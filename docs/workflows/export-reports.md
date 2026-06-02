@@ -10,21 +10,21 @@ IRFlow Timeline supports exporting filtered data and generating investigation re
 
 ### Export to CSV
 
-1. **Menu:** File > Export (`Cmd+E`)
+1. **Menu:** File → Export (`Cmd+E`)
 2. Select **CSV** format
 3. Choose a save location
 4. Exported data respects all active filters — only visible rows are exported
 
 ### Export to TSV
 
-1. **Menu:** File > Export (`Cmd+E`)
+1. **Menu:** File → Export (`Cmd+E`)
 2. Select **TSV** format
 3. Choose a save location
 4. Tab-separated output with the same filtering as CSV
 
 ### Export to XLSX
 
-1. **Menu:** File > Export (`Cmd+E`)
+1. **Menu:** File → Export (`Cmd+E`)
 2. Select **XLSX** format
 3. Choose a save location
 4. Excel files include:
@@ -34,7 +34,7 @@ IRFlow Timeline supports exporting filtered data and generating investigation re
 
 ### Export to XLS
 
-1. **Menu:** File > Export (`Cmd+E`)
+1. **Menu:** File → Export (`Cmd+E`)
 2. Select **XLS** format
 3. Choose a save location
 4. Writes OOXML format with a `.xls` extension for compatibility with tools that expect the `.xls` extension
@@ -42,20 +42,20 @@ IRFlow Timeline supports exporting filtered data and generating investigation re
 ### Export Selected Rows
 
 1. Select rows using checkboxes in the data grid
-2. **Menu:** Actions > Export Selected Rows
+2. **Menu:** Actions → Export Selected Rows
 3. Choose a save location
 4. Exports only the selected rows as CSV
 
 ### What Gets Exported
 
-Full export (File > Export) includes:
+Full export (File → Export) includes:
 
 - All visible columns (hidden columns are excluded)
 - Only rows matching current filters, search, and date range
 - Bookmarked/tagged rows if those filters are active
 - Data in the current sort order
 
-Selected export (Actions > Export Selected Rows) includes only the checked rows regardless of filters.
+Selected export (Actions → Export Selected Rows) includes only the checked rows regardless of filters.
 
 ::: tip Export Bookmarked Only
 Enable the bookmark filter (`Cmd+B`) before exporting to create a file containing only your flagged rows.

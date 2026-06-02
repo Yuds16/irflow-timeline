@@ -32,7 +32,7 @@ features:
     details: Network graph with multi-hop chain reconstruction and RDP session correlation. Detects brute force, password spray, Impacket, 33 RMM tools, and 7 network tunnels.
   - icon: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#E85D2A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" fill="rgba(232,93,42,0.15)"/><path d="M9 12l2 2 4-4"/></svg>'
     title: Persistence Analyzer
-    details: Automated detection of 30+ persistence techniques with risk scoring across services, scheduled tasks, WMI subscriptions, and autorun keys.
+    details: 36 EVTX + 33 registry persistence rules with risk scoring across services, scheduled tasks, WMI subscriptions, and autorun keys.
   - icon: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#E85D2A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 3v18h18"/><rect x="7" y="10" width="3" height="8" rx="0.5" fill="rgba(232,93,42,0.3)"/><rect x="12" y="6" width="3" height="12" rx="0.5" fill="rgba(232,93,42,0.3)"/><rect x="17" y="13" width="3" height="5" rx="0.5" fill="rgba(232,93,42,0.3)"/></svg>'
     title: Rich Analytics
     details: Histogram with brush-to-filter, gap and burst detection, log source coverage maps, and value frequency stacking.
@@ -46,7 +46,7 @@ features:
 
 ## What's New
 
-- **Sigma Detection (dual engine)** — Rule-based detection built into the app via **Tools > Sigma Scan**: the bundled [Hayabusa](https://github.com/Yamato-Security/hayabusa) engine scans raw `.evtx` folders at full speed, while an in-app JS Sigma engine scans imported timelines and EvtxECmd output. Includes scan presets, custom rule collections, MITRE ATT&CK-mapped triage, noisy-rule suppression, and persistent scan history
+- **Sigma Detection (dual engine)** — Rule-based detection built into the app via **Tools → Detection → Sigma Scan**: the bundled [Hayabusa](https://github.com/Yamato-Security/hayabusa) engine scans raw `.evtx` folders at full speed, while an in-app JS Sigma engine scans imported timelines and EvtxECmd output. Includes scan presets, custom rule collections, MITRE ATT&CK-mapped triage, noisy-rule suppression, and persistent scan history
 - **RDP Bitmap Cache** — New workflow wrapping ANSSI-FR [bmc-tools](https://github.com/ANSSI-FR/bmc-tools) to recover bitmap tiles from `bcache*.bmc` / `cache????.bin` artifacts, with a hashed, exportable evidence package
 - **Lateral Movement Tracker expansion** — New Accounts (per-identity scoring) and Exec Sessions (non-RDP movement) tabs, pair-based Incidents, multi-hop Campaign clustering, and a Telemetry Coverage panel
 - **NTFS Analysis Tools** — Six tools for raw `$MFT` and `$J` files: ransomware scanning, timestomping detection, file activity heatmaps, ADS analysis, USN Journal forensics with [UsnJrnl Rewind](https://cybercx.com.au/blog/ntfs-usnjrnl-rewind/) path reconstruction (11 categories), and resident data extraction for recovering deleted threat actor artifacts

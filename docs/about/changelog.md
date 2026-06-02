@@ -8,7 +8,7 @@ description: IRFlow Timeline changelog — version history, new features, perfor
 
 ### New Features
 
-- **Sigma Detection (dual engine)** — Rule-based detection built directly into the app, accessible from **Tools > Sigma Scan**
+- **Sigma Detection (dual engine)** — Rule-based detection built directly into the app, accessible from **Tools → Detection → Sigma Scan**
   - **Hayabusa engine** — the bundled Hayabusa binary scans raw `.evtx` folders at full speed; self-updating rule set with in-app binary/rule maintenance
   - **In-app JS Sigma engine** — compiles Sigma detection YAML to a JS predicate and scans imported data (current tab) or EvtxECmd CSV/XLS/XLSX output when raw `.evtx` is unavailable
   - Three scan targets: EVTX Folder (Hayabusa), EvtxECmd Output Files (JS Sigma), and Current Timeline Tab (JS Sigma) with automatic format detection (EvtxECmd / Hayabusa / raw EVTX / CSV)
@@ -20,7 +20,7 @@ description: IRFlow Timeline changelog — version history, new features, perfor
   - Raw-EVTX triage tools (log metrics, computers, event IDs, logons, pivot IOCs, Base64 decode) and a keyword/regex EVTX search utility
   - Persistent scan history with reopenable results; cancellable scans
 
-- **RDP Bitmap Cache** — New **Tools > RDP Bitmap Cache** workflow wrapping ANSSI-FR `bmc-tools`
+- **RDP Bitmap Cache** — New **Tools → Platforms → Windows → RDP Bitmap Cache** workflow wrapping ANSSI-FR `bmc-tools`
   - Recovers bitmap tiles and collages from `bcache*.bmc` / `cache????.bin` Windows profile artifacts
   - Preflight summary (cache file count, size, detected profiles), recursive directory scanning, and image preview
   - Exportable evidence package with `manifest.json`, source/output SHA-256 hashes, copied images, and recorded command line
@@ -40,6 +40,8 @@ description: IRFlow Timeline changelog — version history, new features, perfor
 ### UI Improvements
 
 - **Tools menu restructure** — Reorganized into Analysis, Detection (Sigma Scan), Platforms (Windows tools, with Linux/macOS/Cloud teasers), and Export sections
+
+- **Lateral Movement Tracker** — **15** configurable built-in event rules (added RMM / Remote Access + Scheduled Task execution presets)
 
 ## v1.0.5 — March 17, 2026
 
@@ -118,7 +120,7 @@ description: IRFlow Timeline changelog — version history, new features, perfor
   - File menu: Open, Export, Save/Load Session, Open Recent (with submenu), Close Tab
   - View menu: Columns, Color Rules, Tags, Filter Presets, Edit Filter, Merge Tabs
   - Actions menu: Select All/Deselect All/Invert Selection, Copy/Export Selected Rows, IOC Matching, Bulk Tag, Pivot, Find Duplicates
-  - Tools menu: Stack Values, Gap Analysis, Log Sources, Burst Detection, Lateral Movement Tracker, Process Inspector, Persistence Analyzer, Generate Report
+  - Tools menu (v1.0.3 flat layout; reorganized in v1.0.6 into **Analysis** / **Detection** / **Platforms** / **Export** — see [Virtual Grid — Tools](/features/virtual-grid#tools))
   - Help menu: Quick Help, Keyboard Shortcuts, Website, About
   - Glassmorphism styling with backdrop blur and semi-transparent backgrounds
 
@@ -199,7 +201,7 @@ description: IRFlow Timeline changelog — version history, new features, perfor
 
 - **Lateral Movement Expansion** — 16 event IDs with RDP session correlation
   - TerminalServices parsing (LocalSessionManager EIDs 21-25, 39, 40; RemoteConnectionManager EID 1149)
-  - 13 built-in detection rules with custom rule support
+  - 13 built-in lateral-movement detection rules with custom rule support (expanded to 15 in v1.0.6)
   - RDP session correlation engine with lifecycle tracking (connecting → active → disconnected → ended)
   - New RDP Sessions tab with expandable event timelines
   - Event breakdown per edge (pill-shaped EID × count chips)
@@ -256,7 +258,7 @@ description: IRFlow Timeline changelog — version history, new features, perfor
 
 ### New Features
 
-- **Persistence Analyzer** — Automated detection of 30+ persistence techniques with risk scoring
+- **Persistence Analyzer** — Automated EVTX and registry persistence detection with risk scoring (expanded to 36 EVTX + 33 registry rules in later releases)
   - Supports EVTX event logs and registry exports (auto-detect mode)
   - 18 EVTX detection rules: Services (7045/4697), Scheduled Tasks (4698/4699/106/141/118/119), WMI subscriptions (5861, Sysmon 19/20/21), Registry autorun (Sysmon 12/13/14), Startup folder drops (Sysmon 11), DLL hijacking (Sysmon 7), Driver loading (Sysmon 6), ADS (Sysmon 15), Process tampering (Sysmon 25), Timestomping (Sysmon 2)
   - 15 registry persistence locations: Run/RunOnce, Services, Winlogon, AppInit_DLLs, IFEO, COM hijacking, Shell extensions, Boot Execute, BHO, LSA packages, Print Monitors, Active Setup, Startup folders, Scheduled Tasks, Network Providers

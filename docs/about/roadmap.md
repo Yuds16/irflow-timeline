@@ -66,4 +66,4 @@ See the [Changelog](/about/changelog) for detailed release notes on everything s
 - **v1.0.4** — Stacking 3→1 query, CSV O(n²)→O(n) parsing, Plaso single-pass sampling, sample-based empty column detection, MFT buffer overflow protection, VT retry cancellation
 - **v1.0.3** — Lateral Movement attack pattern detection, RDP session grouping, menu bar redesign, row checkbox selection, Find Duplicates, Persistence Analyzer custom rules
 - **v1.0.2** — 342 detection rules library, import queue system, IOC matching expansion (17+ types), Process Tree overhaul, Lateral Movement expansion with RDP correlation
-- **v1.0.0** — Persistence Analyzer (30+ techniques), lateral movement outlier detection, background indexing pipeline, phase-tuned SQLite performance
+- **v1.0.0** — Persistence Analyzer (EVTX + registry persistence detection), lateral movement outlier detection, background indexing pipeline, phase-tuned SQLite performance

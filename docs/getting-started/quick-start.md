@@ -10,7 +10,7 @@ Get up and running with your first timeline analysis in under a minute.
 
 There are three ways to open a file:
 
-1. **Menu:** File > Open (`Cmd+O`)
+1. **Menu:** File → Open (`Cmd+O`)
 2. **Drag and drop:** Drag a file onto the application window
 3. **Double-click:** Double-click a supported file in Finder
 

@@ -174,7 +174,7 @@
   <rect x="782" y="532" width="250" height="58" class="card"/>
   <rect x="794" y="544" width="4" height="34" rx="2" fill="#58a6ff"/>
   <text x="810" y="559" class="ctitle">ipc/ · 13 modules</text>
-  <text x="810" y="577" class="csub">159 handlers across domains</text>
+  <text x="810" y="577" class="csub">162 IPC handlers across domains</text>
 
   <!-- main -> workers -->
   <line x1="640" y1="608" x2="640" y2="643" class="spine" stroke="#58a6ff" marker-end="url(#aBlue)"/>

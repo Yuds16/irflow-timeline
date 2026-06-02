@@ -6,7 +6,7 @@ description: IRFlow Timeline architecture — React renderer, Electron main proc
 
 Technical overview of IRFlow Timeline's architecture for developers and contributors.
 
-> **v1.0.6 is a modular refactor.** What was once a ~20K-line `App.jsx` and a monolithic `electron/parser.js` / `electron/db.js` is now decomposed into ~150 focused modules across the renderer and main process. The file references below reflect that layout.
+> **v1.0.6 is a modular refactor.** What was once a ~20K-line `App.jsx` and monolithic `electron/parser.js` / `electron/db.js` is now decomposed into ~200 focused modules across the renderer and main process (`parsers/`, `ipc/`, `jobs/`, `analyzers/`, and related trees). The file references below reflect that layout.
 
 ## System Architecture
 
@@ -52,9 +52,9 @@ The main process runs with full Node.js access and acts as the orchestrator:
 
 - **`main.js`** — creates the `BrowserWindow`, wires crash guards, defines the `safeHandle` / `safeSend` IPC primitives, owns the serialized import queue and the deferred index/FTS build queue, and delegates IPC registration to `ipc/index.js`, menus to `menu.js`, and updates to `updater.js`. Raises the V8 heap to **16 GB** for large imports.
 - **`import.js`** — import pipeline: validation, XLSX sheet selection, large-file warnings, USN↔MFT path resolution, and index scheduling.
-- **`ipc/`** — one registration module per domain (`query-`, `tag-`, `analysis-`, `export-`, `session-`, `vt-`, `sigma-`, `job-`, `rdp-bitmap-cache-`), all registered by `ipc/index.js`. **159 handlers** total, each wrapped by `safeHandle()`.
+- **`ipc/`** — one registration module per domain (`query-`, `tag-`, `analysis-`, `export-`, `session-`, `vt-`, `sigma-`, `job-`, `rdp-bitmap-cache-`), all registered by `ipc/index.js`. Each handler is wrapped by `safeHandle()`.
 - **`updater.js`** — auto-update lifecycle (check → download → install) via `electron-updater`.
-- **`logger.js`** — shared singleton debug logger with ~5 MB rotation and a write buffer (`~/tle-debug.log`); `dbg(scope, message, data?)`.
+- **`logger.js`** — shared singleton debug logger (`electron/logger.js`) with ~5 MB rotation and a write buffer (`~/tle-debug.log`); `dbg(scope, message, data?)` is used across main-process modules (not the legacy monolithic `parser.js` / `db.js` paths).
 
 `safeHandle`/`safeSend` wrap every handler to log and catch errors; on failure they return `{ __ipcError: true, message }`, which the renderer must check via `isIpcError()` — a resolved value is not necessarily success.
 

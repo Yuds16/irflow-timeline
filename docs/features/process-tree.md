@@ -10,7 +10,7 @@ The Process Inspector visualizes parent-child process relationships from Sysmon 
 
 ## Opening the Process Inspector
 
-- **Menu:** Tools > Process Inspector
+- **Menu:** **Tools → Platforms → Windows → Process Inspector**
 - Supports Sysmon Event ID 1 and Windows Security Event ID 4688 (from EVTX or CSV export)
 - Default filter: `1,4688` — both event IDs are queried automatically
 - Configurable max processes limit (default: 200,000)

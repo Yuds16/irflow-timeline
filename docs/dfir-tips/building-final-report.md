@@ -54,7 +54,7 @@ Tags categorize your findings by attack phase or significance. Review them for c
 
 1. In each tab, open the **tag filter dropdown** to see all tags in use
 2. Ensure consistent naming -- if one tab uses `lateral-movement` and another uses `Lateral Movement`, standardize before merging
-3. Use **Actions > Bulk Tag / Bookmark** to bulk-apply missing tags where appropriate
+3. Use **Actions → Bulk Tag / Bookmark** to bulk-apply missing tags where appropriate
 4. Verify that critical events carry the right tags:
 
 | Tag | Expected Content |
@@ -70,7 +70,7 @@ Tags categorize your findings by attack phase or significance. Review them for c
 
 A single merged timeline provides the chronological backbone of your report.
 
-1. Open **View > Merge Tabs**
+1. Open **View → Merge Tabs**
 2. Select all tabs that contain bookmarked or tagged events relevant to the incident
 3. A new merged tab is created with a `_Source` column identifying the origin of each row
 4. Sort the merged tab by timestamp ascending
@@ -109,7 +109,7 @@ Use the histogram's brush selection to highlight just the active attack window. 
 
 Stacking produces the data you need for the "Indicators of Compromise" and "Affected Systems" sections.
 
-1. On the merged tab (filtered to bookmarked/tagged rows), open **Tools > Stack Values**
+1. On the merged tab (filtered to bookmarked/tagged rows), open **Tools → Analysis → Stack Values**
 2. Stack on key columns and record the results:
 
 | Stack Column | Report Section | What to Record |
@@ -124,7 +124,7 @@ Stacking produces the data you need for the "Indicators of Compromise" and "Affe
 
 Produce the raw data exports that support your report narrative.
 
-1. With the merged tab active and bookmarks filtered, go to **File > Export** (`Cmd+E`)
+1. With the merged tab active and bookmarks filtered, go to **File → Export** (`Cmd+E`)
 2. Export as **CSV** for tool-agnostic archival -- this file can be ingested by SIEMs, shared with other analysts, or attached to tickets
 3. Export as **XLSX** for stakeholders who prefer spreadsheets -- the styled headers and auto-fit columns make it immediately readable
 4. Consider separate exports for different audiences:
@@ -155,7 +155,7 @@ The HTML report is for human consumption -- it tells the story. The CSV/XLSX exp
 
 Before closing IRFlow Timeline, save your complete analysis state.
 
-1. Go to **File > Save Session** (`Cmd+S`)
+1. Go to **File → Save Session** (`Cmd+S`)
 2. Save as a `.tle` file alongside your evidence and exports
 3. The session preserves all tabs, filters, bookmarks, tags, color rules, and column configurations
 

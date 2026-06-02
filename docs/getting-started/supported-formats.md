@@ -133,7 +133,7 @@ Native binary parsing of raw NTFS Master File Table files. No need to pre-proces
 - **Timestomping detection** — compares SI and FN timestamps, flags files where `SI < FN`
 - **Zone.Identifier extraction** — parses resident ADS content to extract download origin data
 - **Parent path resolution** — two-pass architecture: first pass builds the directory tree, second pass resolves full parent paths
-- **Resident data extraction** — can extract small files stored directly inside MFT records (via Tools → NTFS Artifacts)
+- **Resident data extraction** — can extract small files stored directly inside MFT records (via **Tools → Platforms → Windows → Master File Table → Extract Resident Data**)
 
 ### Extracted Columns
 
@@ -194,7 +194,7 @@ Native binary parsing of raw NTFS USN Journal (`$UsnJrnl:$J`) files. Provides a 
 
 **Filenames:** `bcache*.bmc`, `cache????.bin`
 
-RDP Bitmap Cache files are handled through **Tools > RDP Bitmap Cache** rather than the normal timeline importer. The analyzer recovers bitmap tiles and collages with `bmc-tools`, records source/output hashes, keeps previous extraction history, and can export an evidence package for reporting.
+RDP Bitmap Cache files are handled through **Tools → Platforms → Windows → RDP Bitmap Cache** rather than the normal timeline importer. The analyzer recovers bitmap tiles and collages with `bmc-tools`, records source/output hashes, keeps previous extraction history, and can export an evidence package for reporting.
 
 Use this workflow for Windows profile artifacts under paths such as:
 

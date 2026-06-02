@@ -65,18 +65,18 @@ The **Tools** menu is organized into four sections so timeline-wide analytics st
 
 Timeline-wide analytics that work on any imported tab (CSV, EVTX, XLSX, Plaso, etc.):
 
-| Item | Description |
-|------|-------------|
-| **Stack Values** | Frequency analysis of unique values in any column |
-| **Gap Analysis** | Detect periods of unusual inactivity in the timeline |
-| **Log Sources** | Gantt-style heatmap of log source coverage across time |
-| **Burst Detection** | Identify abnormal spikes in event volume |
+| Menu path | Description |
+|-----------|-------------|
+| **Tools → Analysis → Stack Values** | Frequency analysis of unique values in any column |
+| **Tools → Analysis → Gap Analysis** | Detect periods of unusual inactivity in the timeline |
+| **Tools → Analysis → Log Sources** | Gantt-style heatmap of log source coverage across time |
+| **Tools → Analysis → Burst Detection** | Identify abnormal spikes in event volume |
 
 #### Detection
 
-| Item | Description |
-|------|-------------|
-| **Sigma Scan** | Dual-engine Sigma detection — Hayabusa over raw EVTX folders or the in-app JS engine on imported timelines |
+| Menu path | Description |
+|-----------|-------------|
+| **Tools → Detection → Sigma Scan** | Dual-engine Sigma detection — Hayabusa over raw EVTX folders or the in-app JS engine on imported timelines |
 
 #### Platforms
 
@@ -86,22 +86,22 @@ Platform-specific analyzers are grouped under collapsible OS sections. **Windows
 
 **Windows** includes:
 
-| Item | Description |
-|------|-------------|
-| **Process Inspector** | Parent-child process hierarchy with MITRE ATT&CK detection |
-| **Lateral Movement Tracker** | Network graph of host-to-host logon activity with attack pattern detection |
-| **Persistence Analyzer** | Automated detection of 30+ persistence techniques with risk scoring |
-| **RDP Bitmap Cache** | Recover bitmap tiles from RDP cache artifacts (`bmc-tools`) |
-| **Master File Table** (submenu) | Ransomware analysis, timestomping, file activity heatmap, ADS analyzer, extract resident data — requires a raw `$MFT` tab |
-| **USN Journal** (submenu) | USN Journal analysis with UsnJrnl Rewind path reconstruction — requires a raw `$J` tab |
+| Menu path | Description |
+|-----------|-------------|
+| **Tools → Platforms → Windows → Process Inspector** | Parent-child process hierarchy with MITRE ATT&CK detection |
+| **Tools → Platforms → Windows → Lateral Movement Tracker** | Network graph of host-to-host logon activity with attack pattern detection |
+| **Tools → Platforms → Windows → Persistence Analyzer** | 36 EVTX + 33 registry persistence rules with risk scoring |
+| **Tools → Platforms → Windows → RDP Bitmap Cache** | Recover bitmap tiles from RDP cache artifacts (`bmc-tools`) |
+| **Tools → Platforms → Windows → Master File Table → …** | Ransomware analysis, timestomping, file activity heatmap, ADS analyzer, extract resident data — requires a raw `$MFT` tab |
+| **Tools → Platforms → Windows → USN Journal → USN Journal Analysis** | USN Journal analysis with UsnJrnl Rewind path reconstruction — requires a raw `$J` tab |
 
 See [NTFS Analysis](/features/ntfs-analysis) for the MFT and USN Journal tools.
 
 #### Export
 
-| Item | Description |
-|------|-------------|
-| **Generate Report** | Create an HTML investigation report from bookmarks and tags |
+| Menu path | Description |
+|-----------|-------------|
+| **Tools → Export → Generate Report** | Create an HTML investigation report from bookmarks and tags (also **File → Generate Report…** on the macOS menu bar, `Cmd+Shift+R`) |
 
 ### Help
 
@@ -300,7 +300,7 @@ Right-click any cell to open the full context menu:
 
 ## Find Duplicates
 
-Open **Actions > Find Duplicates** to find repeated values in any column. Select a column from the dropdown and click "Find Duplicates" to scan for values that appear more than once. Results show the duplicate value and occurrence count (capped at 100 displayed). Click "Filter to Duplicates" to apply a checkbox filter on the selected column showing only rows with duplicate values.
+Open **Actions → Find Duplicates** to find repeated values in any column. Select a column from the dropdown and click "Find Duplicates" to scan for values that appear more than once. Results show the duplicate value and occurrence count (capped at 100 displayed). Click "Filter to Duplicates" to apply a checkbox filter on the selected column showing only rows with duplicate values.
 
 ## Bookmarks and Tags
 

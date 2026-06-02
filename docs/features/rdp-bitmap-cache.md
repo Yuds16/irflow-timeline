@@ -23,9 +23,13 @@ Users\<user>\AppData\Local\Microsoft\Terminal Server Client\Cache
 
 You can select one cache file or a parent directory. Directory scanning is recursive and symlinks are skipped by default.
 
+## Opening
+
+- **Menu:** **Tools → Platforms → Windows → RDP Bitmap Cache**
+
 ## Workflow
 
-1. Open **Tools > RDP Bitmap Cache**.
+1. Open **Tools → Platforms → Windows → RDP Bitmap Cache**.
 2. Select a cache source file or folder.
 3. Confirm the preflight summary: cache file count, size, detected profiles, and cache directories.
 4. Select `bmc-tools` if the bundled copy is unavailable.

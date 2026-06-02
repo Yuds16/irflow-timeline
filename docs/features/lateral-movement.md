@@ -26,9 +26,9 @@ In the tracker configuration phase, enable **Multi-source** and select the tabs 
 
 ## Detection Rules
 
-![Lateral Movement Tracker detection rules configuration showing 13 built-in rules across RDP, Security, Privilege, and Session categories](/dfir-tips/Lateral-Movement-Detection-Rules.png)
+![Lateral Movement Tracker detection rules configuration showing 15 built-in rules across RDP, Security, Privilege, Session, and RMM categories](/dfir-tips/Lateral-Movement-Detection-Rules.png)
 
-The tracker uses a configurable rules system with 13 built-in detection rules across four categories. Each rule can be individually toggled on or off.
+The tracker uses a configurable rules system with **15 built-in detection rules** across five categories. Each rule can be individually toggled on or off.
 
 ### RDP Session Rules
 
@@ -62,6 +62,13 @@ The tracker uses a configurable rules system with 13 built-in detection rules ac
 |------|-----------|----------|------|
 | Session Reconnect / Disconnect | 4778, 4779 | Medium | Window Station events |
 | Account Logoff | 4634, 4647 | Low | Logoff / user-initiated logoff |
+
+### RMM / Remote Access Rules
+
+| Rule | Event IDs | Severity | Hint |
+|------|-----------|----------|------|
+| RMM Tool Detection | 4688, 1, 7045, 4697 | High | 33 RMM tools + 7 tunnel tools (process/service scan) |
+| Scheduled Task Execution | 4698, 4688, 1 | Medium | Remote `schtasks /create /s` |
 
 ### Custom Rules
 
@@ -237,7 +244,11 @@ Scans process and service events for 33 remote monitoring and management tools c
 
 **RMM Tools (33):** ConnectWise ScreenConnect, AnyDesk, TeamViewer, Atera, NetSupport Manager, Splashtop, RustDesk, PDQ Connect, MeshAgent/MeshCentral, Action1, Ammyy Admin, Remote Utilities, SimpleHelp, TacticalRMM, FleetDeck, Level.io, DWService, ISL Online, HopToDesk, Lite Manager, UltraVNC, TigerVNC, RAdmin, Zoho Assist, Pulseway, LabTech/Automate, Kaseya VSA, N-able/SolarWinds, GoTo Resolve/LogMeIn, BeyondTrust (Bomgar), Dameware, Supremo, FixMe.IT
 
-**Network Tunnels (7):** ngrok, Tailscale, Cloudflare Tunnel, Chisel, FRP (Fast Reverse Proxy), Ligolo, WireGuard
+**Network Tunnels (7):** ngrok, Tailscale, Cloudflared, Chisel, ligolo-ng, ZeroTier, WireGuard
+
+::: tip Process Inspector
+The in-app [Process Inspector](/features/process-tree) also flags **frp** (`frpc`/`frps`) and other tunnel/RMM aliases via `src/detection-rules/tool-aliases.js` — separate from the Lateral Movement Tracker’s process/service RMM detector above.
+:::
 
 #### Finding Actions
 

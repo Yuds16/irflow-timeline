@@ -26,7 +26,7 @@ IRFlow Timeline is inspired by Eric Zimmerman's Timeline Explorer but adds capab
 - Dual-engine Sigma detection (Hayabusa + in-app JS Sigma)
 - Process Inspector with MITRE ATT&CK detection rules
 - Lateral Movement Tracker with interactive network graphs
-- Persistence Analyzer scanning 30+ techniques
+- Persistence Analyzer with 36 EVTX and 33 registry detection rules
 - IOC Matching with 17+ indicator types
 - Gap & Burst Analysis for anomaly detection
 - Log Source Coverage heatmap
@@ -34,7 +34,7 @@ IRFlow Timeline is inspired by Eric Zimmerman's Timeline Explorer but adds capab
 
 ### Does it run Sigma rules?
 
-Yes. **Tools > Sigma Scan** provides a dual-engine detection workflow. The bundled [Hayabusa](https://github.com/Yamato-Security/hayabusa) engine scans folders of raw `.evtx` files at full speed, and an in-app JavaScript Sigma engine scans data you have already imported (the current tab) or EvtxECmd CSV/XLS/XLSX output when raw EVTX is unavailable. It supports scan presets, custom rule collections, noisy-rule suppression, GeoIP enrichment, and a MITRE ATT&CK-mapped triage dashboard with persistent scan history. See [Sigma Detection](/features/sigma-detection) for the full workflow.
+Yes. **Tools → Detection → Sigma Scan** provides a dual-engine detection workflow. The bundled [Hayabusa](https://github.com/Yamato-Security/hayabusa) engine scans folders of raw `.evtx` files at full speed, and an in-app JavaScript Sigma engine scans data you have already imported (the current tab) or EvtxECmd CSV/XLS/XLSX output when raw EVTX is unavailable. It supports scan presets, custom rule collections, noisy-rule suppression, GeoIP enrichment, and a MITRE ATT&CK-mapped triage dashboard with persistent scan history. See [Sigma Detection](/features/sigma-detection) for the full workflow.
 
 ### Does it support KAPE output?
 
@@ -46,13 +46,13 @@ Yes. IRFlow Timeline auto-detects 26 KAPE / EZ Tools profiles including MFTECmd,
 
 ### macOS blocks the app with "Apple cannot check it for malicious software"
 
-IRFlow Timeline is not notarized through the Apple App Store. To bypass the Gatekeeper prompt:
+Download builds from [GitHub Releases](https://github.com/r3nzsec/irflow-timeline/releases) — they are signed and notarized. If Gatekeeper still blocks a quarantined copy, use one of these once:
 
 1. **Right-click** the app in Applications and select **Open** (not double-click)
 2. Click **Open** in the dialog that appears
 3. The app will launch and macOS will remember your choice
 
-Alternatively: go to **System Settings > Privacy & Security**, scroll down, and click **Open Anyway** next to the IRFlow Timeline message.
+Alternatively: go to **System Settings → Privacy & Security**, scroll down, and click **Open Anyway** next to the IRFlow Timeline message.
 
 ::: tip
 You only need to do this once. After the first launch, macOS will open the app normally.
@@ -75,7 +75,7 @@ node --version
 # Clear node_modules and rebuild
 rm -rf node_modules
 npm install
-npx electron-rebuild -f -w better-sqlite3
+npm run rebuild
 ```
 
 **Apple Silicon with Rosetta conflicts:**
@@ -90,9 +90,9 @@ arch
 ### The app crashes on launch
 
 1. Check that your macOS version is **12 (Monterey) or later**
-2. Try deleting the app preferences: `rm -rf ~/Library/Application\ Support/tle-app`
+2. Try deleting the app preferences: `rm -rf ~/Library/Application\ Support/irflow-timeline`
 3. Check the debug log for errors: `cat ~/tle-debug.log | tail -50`
-4. If building from source, ensure you ran `npx electron-rebuild -f -w better-sqlite3` after `npm install`
+4. If building from source, ensure you ran `npm run rebuild` after `npm install`
 
 ---
 
@@ -147,11 +147,11 @@ Yes. Enable **Search All Tabs** in the search bar to run your query across every
 
 1. Toggle the bookmark filter (`Cmd+B`) to show only bookmarked rows
 2. Or use the tag filter dropdown to show rows with specific tags
-3. Go to **File > Export** (`Cmd+E`) — only the currently filtered/visible rows will be exported
+3. Go to **File → Export** (`Cmd+E`) — only the currently filtered/visible rows will be exported
 
 ### Can I save my analysis and reopen it later?
 
-Yes. Go to **File > Save Session** (`Cmd+S`) to save a `.tle` session file. This preserves all open tabs, filters, bookmarks, tags, color rules, and column configurations. Use **File > Load Session** to restore it. See [Sessions](/workflows/sessions) for details.
+Yes. Go to **File → Save Session** (`Cmd+S`) to save a `.tle` session file. This preserves all open tabs, filters, bookmarks, tags, color rules, and column configurations. Use **File → Load Session** to restore it. See [Sessions](/workflows/sessions) for details.
 
 ### Does IRFlow Timeline send any data externally?
 

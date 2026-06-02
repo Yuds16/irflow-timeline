@@ -97,7 +97,7 @@ If you have KAPE output from several systems, load each host into its own set of
 
 ### 4. Run Log Source Coverage
 
-Open **Tools > [Log Sources](/features/log-source-coverage)** on your EvtxECmd tab. The heatmap reveals which event log channels are present and where gaps exist.
+Open **Tools → Analysis → [Log Sources](/features/log-source-coverage)** on your EvtxECmd tab. The heatmap reveals which event log channels are present and where gaps exist.
 
 ### 5. Check for expected log sources
 
@@ -126,7 +126,7 @@ A sudden drop in all log sources at a specific time often indicates a system reb
 
 ### 7. Stack event logs by Event ID
 
-On the EvtxECmd tab, open **Tools > [Stack Values](/features/stacking)** and stack the **EventId** column. Review the distribution for these key event IDs:
+On the EvtxECmd tab, open **Tools → Analysis → [Stack Values](/features/stacking)** and stack the **EventId** column. Review the distribution for these key event IDs:
 
 | Event ID | Source | Significance |
 |----------|--------|-------------|
@@ -167,7 +167,7 @@ If you already set a date range filter in Step 2, stacking results only reflect 
 
 ### 10. Build the Process Inspector
 
-On the EvtxECmd tab, filter to Sysmon Event ID 1 or Security Event ID 4688, then open **Tools > [Process Inspector](/features/process-tree)**. IRFlow Timeline builds the parent-child hierarchy automatically.
+On the EvtxECmd tab, filter to Sysmon Event ID 1 or Security Event ID 4688, then open **Tools → Platforms → Windows → [Process Inspector](/features/process-tree)**. IRFlow Timeline builds the parent-child hierarchy automatically.
 
 ### 11. Review suspicious pattern highlights
 
@@ -191,7 +191,7 @@ For each suspicious chain, click the filter icon on the process node to jump bac
 
 ### 13. Map lateral movement
 
-Switch to the EvtxECmd tab (ensure logon events are present) and open **Tools > [Lateral Movement Tracker](/features/lateral-movement)**. The tracker builds a force-directed graph of network logon activity.
+Switch to the EvtxECmd tab (ensure logon events are present) and open **Tools → Platforms → Windows → [Lateral Movement Tracker](/features/lateral-movement)**. The tracker builds a force-directed graph of network logon activity.
 
 Review the three sub-tabs:
 
@@ -201,7 +201,7 @@ Review the three sub-tabs:
 
 ### 14. Run IOC matching
 
-If you have indicators from threat intelligence, open **Actions > IOC Matching** and paste your IOC list. IRFlow Timeline scans all columns across all loaded data for matches.
+If you have indicators from threat intelligence, open **Actions → IOC Matching** and paste your IOC list. IRFlow Timeline scans all columns across all loaded data for matches.
 
 | IOC Type | Where to Expect Matches |
 |----------|------------------------|

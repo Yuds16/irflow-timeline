@@ -108,7 +108,7 @@ You can also set date ranges by brush-selecting on the [Histogram](/features/his
 
 ### Advanced Filter Editor
 
-Open **View > Edit Filter** to build multi-condition filters with a visual editor:
+Open **View → Edit Filter** to build multi-condition filters with a visual editor:
 
 - **AND/OR logic** — each condition has a logic toggle to combine with AND or OR
 - **Column selector** — pick any column in the dataset
@@ -123,7 +123,7 @@ Advanced filters are applied alongside column filters and checkbox filters, givi
 Save frequently used filter configurations as named presets:
 
 1. Build your filter (column filters, advanced filters, checkbox filters)
-2. Open **View > Filter Presets**
+2. Open **View → Filter Presets**
 3. Enter a name and click **Save**
 4. Reload presets from the same menu in any session
 
@@ -158,7 +158,7 @@ When [IOC Matching](/features/ioc-matching) highlights are also active, both wor
 
 ## Find Duplicates
 
-Open **Actions > Find Duplicates** to identify repeated values in any column:
+Open **Actions → Find Duplicates** to identify repeated values in any column:
 
 1. Select a column from the dropdown
 2. Click **Find Duplicates** to scan
