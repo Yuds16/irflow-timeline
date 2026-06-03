@@ -148,36 +148,47 @@ function pickRicherAiHistoryRow(a, b) {
   return a;
 }
 
+/** Full normalized message body, used to confirm two rows are the SAME prompt before merging. */
+function crossToolContentKey(row) {
+  return String(row.FullText || row.Summary || "").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
 /**
- * Collapse the same prompt seen across different tools into the richest single row, but
- * preserve forensic provenance: the kept row's `AlsoInTools` lists every tool the prompt
- * appeared in (so dedupe never erases "this prompt also ran in Cursor").
+ * Collapse the SAME prompt seen across DIFFERENT tools into the richest single row, preserving
+ * provenance in `AlsoInTools`. Two guards keep this from destroying evidence:
+ *   1. Only merge across distinct Tool values. Two rows from the SAME tool that merely share a
+ *      120-char opening (e.g. a repeated "fix the bug in…" template) are DISTINCT prompts — the
+ *      exact dedupe (aiHistoryDedupeKey, incl. Timestamp+SessionId) already ran, so anything left
+ *      here is genuinely different and must be kept, not silently dropped.
+ *   2. Only merge when the full normalized body matches, not just the 120-char prefix, so two
+ *      different prompts that share a boilerplate opening across tools are not falsely merged.
+ * Under-merging (keeping both) is the safe direction for a forensic timeline.
  */
 function dedupeCrossToolPrompts(rows) {
-  const indexByKey = new Map();
-  const toolsByKey = new Map();
+  const bucketsByKey = new Map(); // key -> [{ idx, tools:Set, content }]
   const out = [];
   for (const r of rows) {
     const key = crossToolPromptKey(r);
-    if (!key) {
-      out.push(r);
-      continue;
-    }
+    if (!key) { out.push(r); continue; }
     const tool = String(r.Tool || "").trim();
-    if (indexByKey.has(key)) {
-      const idx = indexByKey.get(key);
-      out[idx] = pickRicherAiHistoryRow(out[idx], r);
-      if (tool) toolsByKey.get(key).add(tool);
-    } else {
-      indexByKey.set(key, out.length);
-      toolsByKey.set(key, new Set(tool ? [tool] : []));
-      out.push(r);
+    const content = crossToolContentKey(r);
+    const buckets = bucketsByKey.get(key);
+    if (buckets) {
+      const match = buckets.find((b) => b.content === content && tool && !b.tools.has(tool));
+      if (match) {
+        out[match.idx] = pickRicherAiHistoryRow(out[match.idx], r);
+        match.tools.add(tool);
+        continue;
+      }
     }
+    const entry = { idx: out.length, tools: new Set(tool ? [tool] : []), content };
+    if (buckets) buckets.push(entry);
+    else bucketsByKey.set(key, [entry]);
+    out.push(r);
   }
-  for (const [key, idx] of indexByKey) {
-    const tools = toolsByKey.get(key);
-    if (tools && tools.size > 1) {
-      out[idx].AlsoInTools = [...tools].sort().join(", ");
+  for (const buckets of bucketsByKey.values()) {
+    for (const b of buckets) {
+      if (b.tools.size > 1) out[b.idx].AlsoInTools = [...b.tools].sort().join(", ");
     }
   }
   return out;
