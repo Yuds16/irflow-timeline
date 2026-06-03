@@ -15,6 +15,11 @@ const { extractCursorDir } = require("./cursor");
 const { extractCopilotPath, getCopilotExtractionStats } = require("./copilot");
 const { sortAndNumberRows, dedupeAiHistoryRows } = require("./row-utils");
 const {
+  prepareChunkRowsForDb,
+  writeAiHistoryRowsToDb,
+  makeSourceAccumulator,
+} = require("./db-sink");
+const {
   buildAiHistoryImportNotice,
   buildCopilotExtractionStats,
 } = require("./import-meta");
@@ -38,8 +43,6 @@ const path = require("path");
 
 /** Safety cap so a pathological collection can't OOM the worker (configurable via options.maxRows). */
 const MAX_AI_HISTORY_ROWS = 3_000_000;
-/** Rows per SQLite insert during worker streaming (keeps peak heap flat). */
-const AI_HISTORY_DB_BATCH = 5000;
 
 const FOLDER_SCAN_TOOL_MAP = [
   ["claudeCode", "claude-code"],
@@ -486,31 +489,6 @@ function collectChunkSidecarStats(chunk, acc) {
   if (chunk._parseErrors) acc.parseErrorTotal += chunk._parseErrors;
 }
 
-function slimAiHistoryRowForDb(row) {
-  if (!AI_HISTORY_DB_OMIT_FULLTEXT || !row) return row;
-  if (!row.FullText) return row;
-  return { ...row, FullText: "" };
-}
-
-function prepareChunkRowsForDb(chunk, recordIdStart, maxRows, totalWritten) {
-  let rows = sortAndNumberRows(dedupeAiHistoryRows(chunk, { crossTool: false }));
-  const remaining = maxRows - totalWritten;
-  if (rows.length > remaining) rows = rows.slice(0, Math.max(0, remaining));
-  for (let i = 0; i < rows.length; i++) {
-    rows[i] = slimAiHistoryRowForDb(rows[i]);
-    rows[i].RecordId = String(recordIdStart + i);
-  }
-  return rows;
-}
-
-function writeAiHistoryRowsToDb(db, tabId, headers, rows, checkAbort) {
-  for (let i = 0; i < rows.length; i += AI_HISTORY_DB_BATCH) {
-    checkAbort();
-    const batch = rows.slice(i, i + AI_HISTORY_DB_BATCH);
-    db.insertBatchArrays(tabId, batch.map((r) => headers.map((h) => r[h] ?? "")));
-  }
-}
-
 /**
  * Extract discovered roots straight into a tab SQLite DB (worker path).
  * Never materializes the full merged row array — each source is deduped/sorted and flushed
@@ -610,21 +588,27 @@ async function extractMergedAiHistoryRootsToDb(db, tabId, roots, attribution = {
 
     try {
       const rowsBeforeSource = totalWritten;
-      const flushExtractedRows = (rawBatch) => {
-        if (!rawBatch?.length || totalWritten >= maxRows) return;
+      // Accumulate the whole source (bounded to the remaining row budget) then flush once, so the
+      // history.jsonl↔session dedupe in dedupeAiHistoryRows — which needs both row kinds together —
+      // actually fires. The previous per-flush-batch dedupe left duplicate rows in the merged tab.
+      const acc = makeSourceAccumulator(maxRows);
+      const collectExtractedRows = (rawBatch) => {
         checkAbort();
-        const prepared = prepareChunkRowsForDb(rawBatch, nextRecordId, maxRows, totalWritten);
-        if (!prepared.length) return;
-        writeAiHistoryRowsToDb(db, tabId, headers, prepared, checkAbort);
-        totalWritten += prepared.length;
-        nextRecordId += prepared.length;
+        acc.add(rawBatch, totalWritten);
       };
       const chunk = await extractRoot(tool, rootPath, rootAttribution, {
         ...rootOptions,
-        onExtractedRows: flushExtractedRows,
+        onExtractedRows: collectExtractedRows,
       });
       collectChunkSidecarStats(chunk, stats);
-      if (chunk.length) flushExtractedRows(chunk);
+      if (chunk.length) acc.add(chunk, totalWritten);
+      const prepared = prepareChunkRowsForDb(acc.rows, nextRecordId, maxRows, totalWritten);
+      if (prepared.length) {
+        writeAiHistoryRowsToDb(db, tabId, headers, prepared, checkAbort);
+        totalWritten += prepared.length;
+        nextRecordId += prepared.length;
+      }
+      if (acc.truncated) capped = true;
       const sourceRows = totalWritten - rowsBeforeSource;
       dbg("AIHIST", "profile-scan streamed to db", { tool, rootPath, rows: sourceRows, totalWritten });
       report({
