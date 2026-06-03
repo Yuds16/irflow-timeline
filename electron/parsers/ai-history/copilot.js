@@ -211,8 +211,13 @@ async function readJsonlSnapshot(filePath) {
 }
 
 function readJsonSnapshot(filePath) {
-  const data = JSON.parse(fs.readFileSync(filePath, "utf8"));
-  if (data && data.kind === 0 && data.v) return data.v;
+  let data;
+  // Untrusted single-file path: a malformed file (JSON.parse throw) or a literal `null`/primitive
+  // must yield null, not crash. The previous `data && ...` short-circuit still fell through to
+  // `data.requests` on a null document.
+  try { data = JSON.parse(fs.readFileSync(filePath, "utf8")); } catch { return null; }
+  if (!data || typeof data !== "object") return null;
+  if (data.kind === 0 && data.v) return data.v;
   if (Array.isArray(data.requests)) return data;
   return null;
 }

@@ -85,7 +85,9 @@ function extractContinueSessionFile(filePath, attribution = {}) {
   let idx = 0;
   for (const item of history) {
     idx += 1;
+    if (!item || typeof item !== "object") continue; // null/primitive turn — skip, don't deref
     const message = item.message || item;
+    if (!message || typeof message !== "object") continue;
     const role = String(message.role || "").toLowerCase();
     if (role !== "user" && role !== "assistant") continue;
     const text = textFromContinueMessage(message);

@@ -85,6 +85,8 @@ function extractGeminiSessionFile(sessionPath, attribution = {}) {
     return [];
   }
 
+  // JSON.parse("null") (and primitives/arrays) survive the try/catch above; guard before deref.
+  if (!data || typeof data !== "object") return [];
   const messages = Array.isArray(data.messages) ? data.messages : [];
   if (!messages.length) return [];
 
@@ -98,7 +100,8 @@ function extractGeminiSessionFile(sessionPath, attribution = {}) {
 
   for (let msgIdx = 0; msgIdx < messages.length; msgIdx++) {
     const msg = messages[msgIdx];
-    const msgType = msg && msg.type != null ? String(msg.type).toLowerCase() : "";
+    if (!msg || typeof msg !== "object") continue; // null/primitive element — skip, don't deref
+    const msgType = msg.type != null ? String(msg.type).toLowerCase() : "";
     const role = ROLE_BY_TYPE[msgType] || (msgType ? "system" : "");
 
     let summary = normalizeContent(msg.content, msg.thoughts);

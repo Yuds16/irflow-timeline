@@ -495,7 +495,9 @@ async function readJsonlFile(filePath, onLine, parseStats = null) {
     if (!trimmed) continue;
     let obj;
     try { obj = JSON.parse(trimmed); } catch { if (parseStats) parseStats.errors += 1; continue; }
-    onLine(obj, lineNumber);
+    // A line that parses to null/a primitive (e.g. literal `null`) or any handler throw must skip
+    // only that line — never unwind the loop and discard every row already parsed from this file.
+    try { onLine(obj, lineNumber); } catch { if (parseStats) parseStats.errors += 1; }
   }
 }
 

@@ -83,12 +83,14 @@ function rowsFromChatData(data, sessionId, sourceFile, toolLabel, attribution, w
   const tabs = data.tabs || data.sessions || data.chats;
   if (Array.isArray(tabs)) {
     for (const tab of tabs) {
+      if (!tab || typeof tab !== "object") continue; // null/primitive tab — skip, don't deref
       const tabId = tab.id || tab.sessionId || tab.chatId || sessionId;
       const messages = tab.messages || tab.bubbles || tab.history;
       if (!Array.isArray(messages)) continue;
       let idx = 0;
       for (const msg of messages) {
         idx += 1;
+        if (!msg || typeof msg !== "object") continue; // null/primitive message — skip
         const role = String(msg.role || msg.type || "").toLowerCase();
         const text = textFromPromptEntry(msg.message || msg) || textFromPromptEntry(msg);
         if (!text || (role !== "user" && role !== "assistant" && role !== "1" && role !== "2")) {
