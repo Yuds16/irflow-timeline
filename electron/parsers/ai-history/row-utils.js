@@ -4,6 +4,18 @@
 
 const { SUMMARY_MAX_LEN } = require("./schema");
 
+// Bound a single message body held in heap. FullText is the only uncapped field (Summary is
+// truncated to 500); without this a single adversarial JSONL line / SQLite value carrying a
+// multi-hundred-MB string would be materialized in full per row. 1MB is far above any real
+// prompt/response; truncation is marked so it is auditable rather than silent.
+const MAX_FULLTEXT_CHARS = 1024 * 1024;
+
+function capFullText(text) {
+  if (text.length <= MAX_FULLTEXT_CHARS) return text;
+  const dropped = text.length - MAX_FULLTEXT_CHARS;
+  return `${text.slice(0, MAX_FULLTEXT_CHARS)}\n…[truncated ${dropped} chars over ${MAX_FULLTEXT_CHARS}-char cap]`;
+}
+
 function formatTimestampUtc(ms) {
   if (ms == null || !Number.isFinite(ms)) return "";
   const d = new Date(ms);
@@ -68,9 +80,9 @@ function buildDescription(entry) {
 }
 
 function makeRow(fields, defaultTool) {
-  const fullText = String(fields.fullText ?? fields.summary ?? "")
+  const fullText = capFullText(String(fields.fullText ?? fields.summary ?? "")
     .replace(/\r\n/g, "\n")
-    .trim();
+    .trim());
   const summary = truncateSummary(fullText || fields.summary);
   const row = {
     Timestamp: fields.timestamp || "",

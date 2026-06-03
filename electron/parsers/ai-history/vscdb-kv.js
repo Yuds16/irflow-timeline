@@ -36,14 +36,27 @@ function kvTableNames(db) {
   return out;
 }
 
+// SQLite BLOB/TEXT can hold ~1GB. A crafted state.vscdb value would force a huge string alloc
+// + full JSON.parse and OOM the worker, so refuse oversized values. 32MB is far above any
+// legitimate chat/composer KV blob.
+const MAX_KV_VALUE_BYTES = 32 * 1024 * 1024;
+
 function parseKvValue(raw) {
   if (raw == null) return null;
   if (Buffer.isBuffer(raw)) {
+    if (raw.length > MAX_KV_VALUE_BYTES) {
+      dbg("AIHIST", "skip oversized vscdb value", { bytes: raw.length });
+      return null;
+    }
     const text = raw.toString("utf8").replace(/^\uFEFF/, "").trim();
     if (!text) return null;
     try { return JSON.parse(text); } catch { return text; }
   }
   if (typeof raw === "string") {
+    if (raw.length > MAX_KV_VALUE_BYTES) {
+      dbg("AIHIST", "skip oversized vscdb value", { chars: raw.length });
+      return null;
+    }
     const text = raw.trim();
     if (!text) return null;
     try { return JSON.parse(text); } catch { return text; }

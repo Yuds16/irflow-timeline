@@ -12,7 +12,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const readline = require("readline");
+const { readJsonlBounded } = require("./jsonl-reader");
 const os = require("os");
 
 const { dbg } = require("../../logger");
@@ -486,19 +486,10 @@ function parseRolloutEnvelope(obj, sourceFile, ctx, attribution) {
 }
 
 async function readJsonlFile(filePath, onLine, parseStats = null) {
-  const stream = fs.createReadStream(filePath, { encoding: "utf8" });
-  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-  let lineNumber = 0;
-  for await (const line of rl) {
-    lineNumber += 1;
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let obj;
-    try { obj = JSON.parse(trimmed); } catch { if (parseStats) parseStats.errors += 1; continue; }
-    // A line that parses to null/a primitive (e.g. literal `null`) or any handler throw must skip
-    // only that line — never unwind the loop and discard every row already parsed from this file.
-    try { onLine(obj, lineNumber); } catch { if (parseStats) parseStats.errors += 1; }
-  }
+  // Bounded reader: caps per-line size (one huge/newline-free rollout line can't OOM the worker)
+  // and contains a per-line handler throw — a literal `null` line skips itself instead of
+  // unwinding the loop and discarding every row already parsed from this file.
+  await readJsonlBounded(filePath, onLine, { parseStats });
 }
 
 async function extractCodexHistoryFile(historyPath, attribution = {}, parseStats = null) {

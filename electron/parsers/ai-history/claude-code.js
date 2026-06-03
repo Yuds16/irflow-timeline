@@ -8,7 +8,7 @@
 
 const fs = require("fs");
 const path = require("path");
-const readline = require("readline");
+const { readJsonlBounded } = require("./jsonl-reader");
 
 const { dbg } = require("../../logger");
 const { TOOL_CLAUDE_CODE } = require("./schema");
@@ -240,17 +240,9 @@ function parseSessionLine(obj, sourceFile, attribution = {}) {
 }
 
 async function readJsonlFile(filePath, onLine, parseStats = null) {
-  const stream = fs.createReadStream(filePath, { encoding: "utf8" });
-  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-  let lineNumber = 0;
-  for await (const line of rl) {
-    lineNumber += 1;
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let obj;
-    try { obj = JSON.parse(trimmed); } catch { if (parseStats) parseStats.errors += 1; continue; }
-    onLine(obj, lineNumber);
-  }
+  // Bounded reader: caps per-line size so a single huge/newline-free session line cannot OOM
+  // the worker, and contains a per-line handler throw instead of unwinding the whole file.
+  await readJsonlBounded(filePath, onLine, { parseStats });
 }
 
 /** Extract all rows from history.jsonl. */

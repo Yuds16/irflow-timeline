@@ -5,7 +5,7 @@
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const readline = require("readline");
+const { readJsonlBounded } = require("./jsonl-reader");
 
 const { dbg } = require("../../logger");
 const { TOOL_COPILOT } = require("./schema");
@@ -179,15 +179,11 @@ function applyJsonlOperation(state, obj) {
   }
 }
 
-function buildSnapshotFromJsonlLines(lines) {
-  const state = { requests: [], snapshot: null, kind1Lines: 0, kind1Bodies: 0 };
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let obj;
-    try { obj = JSON.parse(trimmed); } catch { continue; }
-    applyJsonlOperation(state, obj);
-  }
+function newSnapshotState() {
+  return { requests: [], snapshot: null, kind1Lines: 0, kind1Bodies: 0 };
+}
+
+function finalizeSnapshotState(state) {
   if (state.requests.length) {
     return {
       sessionId: state.snapshot?.sessionId,
@@ -202,12 +198,24 @@ function buildSnapshotFromJsonlLines(lines) {
   return snap;
 }
 
+function buildSnapshotFromJsonlLines(lines) {
+  const state = newSnapshotState();
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    let obj;
+    try { obj = JSON.parse(trimmed); } catch { continue; }
+    applyJsonlOperation(state, obj);
+  }
+  return finalizeSnapshotState(state);
+}
+
 async function readJsonlSnapshot(filePath) {
-  const lines = [];
-  const stream = fs.createReadStream(filePath, { encoding: "utf8" });
-  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-  for await (const line of rl) lines.push(line);
-  return buildSnapshotFromJsonlLines(lines);
+  // Stream line-by-line through the bounded reader rather than buffering the whole untrusted
+  // .jsonl into a lines[] array first — a large/inflated session file would otherwise OOM the worker.
+  const state = newSnapshotState();
+  await readJsonlBounded(filePath, (obj) => applyJsonlOperation(state, obj));
+  return finalizeSnapshotState(state);
 }
 
 function readJsonSnapshot(filePath) {
