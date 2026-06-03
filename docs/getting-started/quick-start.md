@@ -26,6 +26,8 @@ Each card opens the relevant analyzer or file dialog. Cards that need an importe
 
 ## Import Progress
 
+![Import progress bar showing rows imported, file name, and streaming status while a large timeline loads](/dfir-tips/QuickStart-Import-Progress.png)
+
 During import you will see:
 
 - A progress bar showing rows imported
