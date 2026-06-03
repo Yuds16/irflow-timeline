@@ -20,12 +20,16 @@ const {
 const { formatTimestampUtc, parseIsoTimestamp, makeRow, sortAndNumberRows } = require("./row-utils");
 
 function messageTimestampMs(msg) {
-  const raw = msg?.timestamp ?? msg?.createdAt ?? Date.now();
+  // Return null (-> blank Timestamp) when there is no real timestamp. Fabricating one from
+  // Date.now() injected the import-time wall clock into the forensic timeline as if it were the
+  // event time, with no synthetic marker — mis-ordering the incident timeline. Blank = unknown,
+  // matching the app's naive=UTC / blank=unknown convention.
+  const raw = msg?.timestamp ?? msg?.createdAt;
+  if (raw == null) return null;
   if (typeof raw === "number" && Number.isFinite(raw)) {
     return raw > 1e12 ? raw : raw * 1000;
   }
-  const parsed = parseIsoTimestamp(raw);
-  return parsed != null ? parsed : Date.now();
+  return parseIsoTimestamp(raw);
 }
 
 const ITEM_CHAT_KEYS = [
@@ -60,7 +64,8 @@ function rowsFromPromptArray(data, sessionId, sourceFile, toolLabel, attribution
       : (idx % 2 === 1 ? "user" : "assistant");
     if (role !== "user" && role !== "assistant") continue;
     rows.push(makeRow({
-      timestamp: formatTimestampUtc(Date.now() - (data.length - idx) * 1000),
+      // Use the entry's own timestamp if present; never fabricate a Date.now()-derived series.
+      timestamp: formatTimestampUtc(messageTimestampMs(entry)),
       role,
       recordType: role,
       summary: text,
