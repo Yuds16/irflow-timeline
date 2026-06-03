@@ -64,6 +64,19 @@ test("parseAiHistoryImport streams into the db, dedupes per-source, and keeps Fu
   }
 });
 
+test("parseAiHistoryImport reads copilot session stats from the extractor return, not the prepared rows", async () => {
+  // Regression guard: meta.copilot.sessionsScanned/jsonlFiles/kind1Lines come from the _copilotStats
+  // sidecar attached to the extractor's RETURN value. Reading them off the re-prepared rows (which
+  // carry no sidecar) zeroed them out and suppressed the metadata-only warning.
+  const ws = path.join(__dirname, "fixtures/ai-history/copilot/Code/User/workspaceStorage");
+  const db = makeFakeDb();
+  const res = await parseAiHistoryImport(ws, "tab-cp", db, null, { tool: "copilot", target: ws });
+  assert.equal(res.sourceFormat, "ai-history-copilot");
+  assert.ok(res.meta.copilot, "copilot stats present");
+  assert.equal(res.meta.copilot.sessionsScanned, 2, "session-level stat sourced from the sidecar");
+  assert.equal(res.meta.copilot.messageRows, db._inserted().length, "messageRows reflects stored rows");
+});
+
 test("parseAiHistoryImport rejects (never silently succeeds) on empty/unparseable input", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "irflow-import-empty-"));
   const root = path.join(dir, ".codex");

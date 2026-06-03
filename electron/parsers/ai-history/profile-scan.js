@@ -689,7 +689,8 @@ async function extractMergedAiHistoryRootsToDb(db, tabId, roots, attribution = {
   if (sourceCount > 1) {
     importMeta.streamedMerge = {
       crossToolDedupe: false,
-      note: "Per-source dedupe only; cross-tool prompt merge is skipped during streamed import.",
+      note: "Per-source dedupe only; cross-tool prompt merge and exact duplicates shared across "
+        + "separate sources are not collapsed during streamed import (kept for provenance).",
     };
   }
 

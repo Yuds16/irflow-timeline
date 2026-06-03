@@ -630,7 +630,10 @@ async function parseAiHistoryImport(filePath, tabId, db, onProgress, detect) {
     meta.cursor = { ...(meta.cursor || {}), composer: sidecar._cursorComposerStats, syntheticTimestamps: true };
   }
   if (tool === "copilot") {
-    meta.copilot = buildCopilotExtractionStats(prepared, getCopilotExtractionStats(prepared));
+    // _copilotStats (session-level diagnostics, leveldbMetadataOnly, etc.) is attached to the
+    // extractor's RETURN value, not the re-prepared rows — read it from `sidecar`. `prepared` is
+    // the first arg only so the row count reflects what was actually stored.
+    meta.copilot = buildCopilotExtractionStats(prepared, getCopilotExtractionStats(sidecar));
   }
   if (tool === "cursor" || sidecar._cursorSyntheticTimestamps) {
     meta.cursor = { syntheticTimestamps: true };
