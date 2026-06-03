@@ -16,17 +16,36 @@ const { tickFileProgress } = require("./extract-plan");
 const { formatTimestampUtc, parseIsoTimestamp, makeRow, finalizeAiHistoryRows } = require("./row-utils");
 
 const MAX_LEVELDB_BYTES = 64 * 1024 * 1024;
+// Bounded recovery limits so a crafted/large LevelDB byte stream cannot pin the worker (DoS).
+// The raw scan is best-effort carving over untrusted bytes; these caps keep it strictly linear.
+const MAX_LEVELDB_OBJECT_BYTES = 4 * 1024 * 1024; // cap on one recovered JSON array/object
+const LEVELDB_BACKSCAN_WINDOW = 8 * 1024;         // how far back to look for an enclosing '{'
+const MAX_LEVELDB_MATCHES = 50_000;               // cap key occurrences scanned per file
+
+// Char codes for the hot scan loops — charCodeAt avoids allocating a one-char string per index.
+const CC_QUOTE = 34;   // "
+const CC_BACKSLASH = 92; // \
+const CC_OBRACE = 123; // {
+const CC_OBRACKET = 91; // [
 
 function isSqliteFile(filePath) {
+  let fd;
   try {
-    const fd = fs.openSync(filePath, "r");
+    fd = fs.openSync(filePath, "r");
     const buf = Buffer.alloc(16);
     fs.readSync(fd, buf, 0, 16, 0);
-    fs.closeSync(fd);
     return buf.slice(0, 6).toString("latin1") === "SQLite";
   } catch {
     return false;
+  } finally {
+    // Always release the descriptor — readSync can throw after openSync succeeds (EIO on
+    // damaged media), and a leaked fd per failing file eventually exhausts the fd table (EMFILE).
+    if (fd !== undefined) { try { fs.closeSync(fd); } catch { /* ignore */ } }
   }
+}
+
+function isLeveldbWhitespace(ch) {
+  return ch === " " || ch === "\t" || ch === "\n" || ch === "\r";
 }
 
 function isInLeveldbDir(filePath) {
@@ -53,21 +72,26 @@ function parseChatgptTimestamp(s) {
   return null;
 }
 
-function extractBalanced(text, start, open, close) {
-  const slice = text.slice(start);
+// Scan `text` in place from `start` for a balanced open/close pair, bounded by maxLen.
+// Returns the single matched substring (one slice) or null. Scanning in place — rather than
+// slicing the tail per call as before — is what makes the LevelDB carve O(n) instead of O(n^2).
+function extractBalanced(text, start, open, close, maxLen = MAX_LEVELDB_OBJECT_BYTES) {
+  const limit = Math.min(text.length, start + maxLen);
+  const openCode = open.charCodeAt(0);
+  const closeCode = close.charCodeAt(0);
   let depth = 0;
   let inString = false;
   let escape = false;
-  for (let i = 0; i < slice.length; i++) {
-    const ch = slice[i];
+  for (let i = start; i < limit; i++) {
+    const cc = text.charCodeAt(i);
     if (escape) { escape = false; continue; }
-    if (ch === "\\" && inString) { escape = true; continue; }
-    if (ch === '"') { inString = !inString; continue; }
+    if (cc === CC_BACKSLASH && inString) { escape = true; continue; }
+    if (cc === CC_QUOTE) { inString = !inString; continue; }
     if (inString) continue;
-    if (ch === open) depth++;
-    else if (ch === close) {
+    if (cc === openCode) depth++;
+    else if (cc === closeCode) {
       depth--;
-      if (depth === 0) return slice.slice(0, i + 1);
+      if (depth === 0) return text.slice(start, i + 1);
     }
   }
   return null;
@@ -112,47 +136,66 @@ function parseConversationItem(item, sourceFile, attribution) {
 
 function extractFromLeveldbBytes(data, sourceFile, attribution, out) {
   const text = data.toString("latin1");
+  const len = text.length;
+  let capped = false;
+
+  // Primary path: "items": [ ... ]. Scan for the colon/bracket in place within a small window
+  // after the key (JSON puts them adjacent) instead of slicing the entire tail per match.
   let searchFrom = 0;
-  while (searchFrom < text.length) {
+  let matches = 0;
+  while (searchFrom < len) {
     const rel = text.indexOf('"items"', searchFrom);
     if (rel < 0) break;
-    const absPos = rel;
-    const afterKey = text.slice(absPos + 7);
-    const colonPos = afterKey.indexOf(":");
-    if (colonPos < 0) { searchFrom = absPos + 7; continue; }
-    const afterColon = afterKey.slice(colonPos + 1).trimStart();
-    if (!afterColon.startsWith("[")) { searchFrom = absPos + 7; continue; }
-    const arrJson = extractBalanced(afterColon, 0, "[", "]");
-    if (arrJson) {
-      try {
-        const items = JSON.parse(arrJson);
-        if (Array.isArray(items)) {
-          for (const item of items) {
-            const row = parseConversationItem(item, sourceFile, attribution);
-            if (row) out.push(row);
-          }
+    if (++matches > MAX_LEVELDB_MATCHES) { capped = true; break; }
+    const keyEnd = rel + 7;
+    searchFrom = keyEnd; // advance past this key unconditionally — never rescan it
+    let p = keyEnd;
+    while (p < len && p < keyEnd + 16 && isLeveldbWhitespace(text[p])) p++;
+    if (text[p] !== ":") continue;
+    p++;
+    while (p < len && p < keyEnd + 48 && isLeveldbWhitespace(text[p])) p++;
+    if (text[p] !== "[") continue;
+    const arrJson = extractBalanced(text, p, "[", "]");
+    if (!arrJson) continue;
+    try {
+      const items = JSON.parse(arrJson);
+      if (Array.isArray(items)) {
+        for (const item of items) {
+          if (!item || typeof item !== "object") continue;
+          const row = parseConversationItem(item, sourceFile, attribution);
+          if (row) out.push(row);
         }
-      } catch { /* skip malformed blob */ }
-    }
-    searchFrom = absPos + 7;
+      }
+    } catch { /* skip malformed blob */ }
   }
 
+  // Fallback path: standalone {...} objects carrying "create_time". Walk backward to the
+  // enclosing '{' only within a bounded window (the metadata key sits near the object start),
+  // so a buffer packed with the key but no brace cannot trigger an O(n) walk-to-zero per match.
   searchFrom = 0;
-  while (searchFrom < text.length) {
+  matches = 0;
+  while (searchFrom < len) {
     const rel = text.indexOf('"create_time"', searchFrom);
     if (rel < 0) break;
-    const absPos = rel;
-    let start = absPos;
-    while (start > 0 && text[start] !== "{") start--;
+    if (++matches > MAX_LEVELDB_MATCHES) { capped = true; break; }
+    searchFrom = rel + 13;
+    const floor = Math.max(0, rel - LEVELDB_BACKSCAN_WINDOW);
+    let start = rel;
+    while (start > floor && text.charCodeAt(start) !== CC_OBRACE) start--;
+    if (text.charCodeAt(start) !== CC_OBRACE) continue; // no enclosing object in window — bail
     const objJson = extractBalanced(text, start, "{", "}");
-    if (objJson) {
-      try {
-        const obj = JSON.parse(objJson);
+    if (!objJson) continue;
+    try {
+      const obj = JSON.parse(objJson);
+      if (obj && typeof obj === "object") {
         const row = parseConversationItem(obj, sourceFile, attribution);
         if (row) out.push(row);
-      } catch { /* skip */ }
-    }
-    searchFrom = absPos + 13;
+      }
+    } catch { /* skip */ }
+  }
+
+  if (capped) {
+    dbg("AIHIST", "leveldb match cap reached", { sourceFile, max: MAX_LEVELDB_MATCHES });
   }
 }
 
@@ -170,16 +213,23 @@ function extractLeveldbFile(filePath, attribution) {
 
 function copySqliteToTemp(dbPath) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "irflow-chatgpt-"));
-  const base = path.basename(dbPath);
-  const dest = path.join(tmpDir, base);
-  fs.copyFileSync(dbPath, dest);
-  for (const suffix of ["-wal", "-shm", "-journal"]) {
-    const aux = path.join(path.dirname(dbPath), `${base}${suffix}`);
-    if (fs.existsSync(aux)) {
-      try { fs.copyFileSync(aux, path.join(tmpDir, `${base}${suffix}`)); } catch { /* ignore */ }
+  try {
+    const base = path.basename(dbPath);
+    const dest = path.join(tmpDir, base);
+    fs.copyFileSync(dbPath, dest);
+    for (const suffix of ["-wal", "-shm", "-journal"]) {
+      const aux = path.join(path.dirname(dbPath), `${base}${suffix}`);
+      if (fs.existsSync(aux)) {
+        try { fs.copyFileSync(aux, path.join(tmpDir, `${base}${suffix}`)); } catch { /* ignore */ }
+      }
     }
+    return dest;
+  } catch (e) {
+    // The primary copy can throw (source vanished mid-scan, EACCES, EIO). Reclaim the just-created
+    // temp dir before rethrowing so a large triage scan does not accumulate orphaned dirs.
+    try { fs.rmSync(tmpDir, { recursive: true, force: true }); } catch { /* ignore */ }
+    throw e;
   }
-  return dest;
 }
 
 function extractSqliteDatabase(dbPath, attribution) {
