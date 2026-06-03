@@ -1,0 +1,260 @@
+/**
+ * ai-history/row-utils.js — shared timeline row builders for AI history parsers.
+ */
+
+const { SUMMARY_MAX_LEN } = require("./schema");
+
+function formatTimestampUtc(ms) {
+  if (ms == null || !Number.isFinite(ms)) return "";
+  const d = new Date(ms);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n) => String(n).padStart(2, "0");
+  return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())} `
+    + `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+}
+
+function parseIsoTimestamp(s) {
+  if (s == null) return null;
+  if (typeof s === "number" && Number.isFinite(s)) {
+    return s > 1e12 ? s : (s > 1e9 ? s * 1000 : null);
+  }
+  const raw = String(s).trim();
+  if (!raw) return null;
+  const iso = /[zZ]$|[+-]\d{2}:?\d{2}$/.test(raw) ? raw : `${raw.replace(" ", "T")}Z`;
+  const t = Date.parse(iso);
+  return Number.isNaN(t) ? null : t;
+}
+
+function truncateSummary(text) {
+  const s = String(text || "").replace(/\r?\n/g, " ").trim();
+  if (s.length <= SUMMARY_MAX_LEN) return s;
+  return `${s.slice(0, SUMMARY_MAX_LEN - 1)}…`;
+}
+
+function detectActivity(role, content, recordType) {
+  const rt = String(recordType || "").toLowerCase();
+  if (rt && rt !== "user" && rt !== "assistant" && rt !== "history") {
+    return rt.split("-").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ");
+  }
+  const lower = String(content || "").toLowerCase();
+  if (role === "conversation") return "Conversation";
+  if (role === "assistant") return "AI Response";
+  if (role !== "user") return "System Message";
+  if (/\b(fix|bug|error)\b/.test(lower)) return "Bug Fix Request";
+  if (/\b(create|build|implement|add)\b/.test(lower)) return "Feature Request";
+  if (/\b(explain|what|how|why)\b/.test(lower)) return "Question";
+  if (/\b(refactor|clean|optimize)\b/.test(lower)) return "Refactor Request";
+  if (/\btest\b/.test(lower)) return "Test Request";
+  return "User Query";
+}
+
+function buildDescription(entry) {
+  const activity = detectActivity(entry.role, entry.summary, entry.recordType);
+  const preview = truncateSummary(entry.summary).slice(0, 150);
+  const sessionShort = entry.sessionId && entry.sessionId.length > 8
+    ? entry.sessionId.slice(0, 8)
+    : (entry.sessionId || "—");
+  const tokenInfo = (entry.inputTokens > 0 || entry.outputTokens > 0)
+    ? ` | Tokens: ${entry.inputTokens}/${entry.outputTokens}`
+    : "";
+  const modelInfo = entry.model ? ` | Model: ${entry.model}` : "";
+  const workspaceInfo = entry.workspace ? ` | Workspace: ${entry.workspace}` : "";
+  const toolInfo = entry.toolName ? ` | Tool: ${entry.toolName}` : "";
+  const branchInfo = entry.gitBranch ? ` | Branch: ${entry.gitBranch}` : "";
+  const typeInfo = entry.recordType && !["user", "assistant", "history"].includes(entry.recordType)
+    ? ` | Type: ${entry.recordType}`
+    : "";
+  return `[${entry.timestamp}] ${activity} in ${entry.tool} - "${preview}" (Session: ${sessionShort})${typeInfo}${modelInfo}${workspaceInfo}${toolInfo}${branchInfo}${tokenInfo}`;
+}
+
+function makeRow(fields, defaultTool) {
+  const fullText = String(fields.fullText ?? fields.summary ?? "")
+    .replace(/\r\n/g, "\n")
+    .trim();
+  const summary = truncateSummary(fullText || fields.summary);
+  const row = {
+    Timestamp: fields.timestamp || "",
+    Role: fields.role || "",
+    RecordType: fields.recordType || "",
+    Summary: summary,
+    FullText: fullText,
+    ToolName: fields.toolName || "",
+    SessionId: fields.sessionId || "",
+    MessageId: fields.messageId || "",
+    ParentId: fields.parentId || "",
+    Workspace: fields.workspace || "",
+    IsSidechain: fields.isSidechain === true ? "true" : (fields.isSidechain === false ? "false" : ""),
+    GitBranch: fields.gitBranch || "",
+    Tool: fields.tool || defaultTool,
+    Model: fields.model || "",
+    InputTokens: fields.inputTokens != null ? String(fields.inputTokens) : "",
+    OutputTokens: fields.outputTokens != null ? String(fields.outputTokens) : "",
+    SourceFile: fields.sourceFile || "",
+    LineNumber: fields.lineNumber != null && fields.lineNumber !== "" ? String(fields.lineNumber) : "",
+    User: fields.user || "",
+    Host: fields.host || "",
+    AlsoInTools: fields.alsoInTools || "",
+    RecordId: "",
+    Description: "",
+  };
+  row.Description = buildDescription({
+    timestamp: row.Timestamp,
+    role: row.Role,
+    summary: fullText || row.Summary,
+    sessionId: row.SessionId,
+    tool: row.Tool,
+    model: row.Model,
+    workspace: row.Workspace,
+    recordType: row.RecordType,
+    toolName: row.ToolName,
+    gitBranch: row.GitBranch,
+    inputTokens: Number(row.InputTokens) || 0,
+    outputTokens: Number(row.OutputTokens) || 0,
+  });
+  return row;
+}
+
+function summaryDedupeSlice(row) {
+  return String(row.Summary || "").toLowerCase().replace(/\s+/g, " ").trim().slice(0, 120);
+}
+
+function crossToolPromptKey(row) {
+  const slice = summaryDedupeSlice(row);
+  if (!slice || slice.length < 20) return "";
+  const role = String(row.Role || "").toLowerCase();
+  if (role !== "user" && role !== "assistant") return "";
+  return `${role}\x1f${slice}`;
+}
+
+function pickRicherAiHistoryRow(a, b) {
+  const lenA = String(a.FullText || a.Summary || "").length;
+  const lenB = String(b.FullText || b.Summary || "").length;
+  if (a.Timestamp && !b.Timestamp) return a;
+  if (b.Timestamp && !a.Timestamp) return b;
+  if (lenA !== lenB) return lenA > lenB ? a : b;
+  if (a.Tool && b.Tool && a.Tool !== b.Tool) return a;
+  return a;
+}
+
+/**
+ * Collapse the same prompt seen across different tools into the richest single row, but
+ * preserve forensic provenance: the kept row's `AlsoInTools` lists every tool the prompt
+ * appeared in (so dedupe never erases "this prompt also ran in Cursor").
+ */
+function dedupeCrossToolPrompts(rows) {
+  const indexByKey = new Map();
+  const toolsByKey = new Map();
+  const out = [];
+  for (const r of rows) {
+    const key = crossToolPromptKey(r);
+    if (!key) {
+      out.push(r);
+      continue;
+    }
+    const tool = String(r.Tool || "").trim();
+    if (indexByKey.has(key)) {
+      const idx = indexByKey.get(key);
+      out[idx] = pickRicherAiHistoryRow(out[idx], r);
+      if (tool) toolsByKey.get(key).add(tool);
+    } else {
+      indexByKey.set(key, out.length);
+      toolsByKey.set(key, new Set(tool ? [tool] : []));
+      out.push(r);
+    }
+  }
+  for (const [key, idx] of indexByKey) {
+    const tools = toolsByKey.get(key);
+    if (tools && tools.size > 1) {
+      out[idx].AlsoInTools = [...tools].sort().join(", ");
+    }
+  }
+  return out;
+}
+
+function aiHistoryDedupeKey(row) {
+  return [
+    row.SessionId || "",
+    row.Timestamp || "",
+    row.Role || "",
+    summaryDedupeSlice(row),
+  ].join("\x1e");
+}
+
+/** Match history.jsonl prompts to session rows when timestamps differ. */
+function aiHistoryLooseKey(row) {
+  return [
+    row.SessionId || "",
+    row.Role || "",
+    summaryDedupeSlice(row),
+  ].join("\x1e");
+}
+
+function isHistoryRow(row) {
+  const src = row.SourceFile || "";
+  return src.endsWith("history.jsonl") || row.RecordType === "history";
+}
+
+function isSessionRow(row) {
+  if (isHistoryRow(row)) return false;
+  const src = row.SourceFile || "";
+  return !!(row.MessageId || /\.jsonl$/i.test(src));
+}
+
+/**
+ * Drop history.jsonl rows when an equivalent session JSONL row exists (same session + summary).
+ */
+function dedupeAiHistoryRows(rows, options = {}) {
+  const sessionLoose = new Set();
+  for (const r of rows) {
+    if (isSessionRow(r)) sessionLoose.add(aiHistoryLooseKey(r));
+  }
+
+  const seen = new Set();
+  const out = [];
+  for (const r of rows) {
+    const key = aiHistoryDedupeKey(r);
+    if (isHistoryRow(r) && sessionLoose.has(aiHistoryLooseKey(r))) continue;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(r);
+  }
+  if (options.crossTool) return dedupeCrossToolPrompts(out);
+  return out;
+}
+
+function assignLineNumber(row, lineNumber) {
+  if (row && lineNumber != null && lineNumber !== "") row.LineNumber = String(lineNumber);
+  return row;
+}
+
+function sortAndNumberRows(rows) {
+  rows.sort((a, b) => (a.Timestamp < b.Timestamp ? -1 : a.Timestamp > b.Timestamp ? 1 : 0));
+  for (let i = 0; i < rows.length; i++) rows[i].RecordId = String(i + 1);
+  return rows;
+}
+
+/**
+ * Per-tool sort + dedupe. Pass `skipFinalize: true` when rows feed `extractMergedAiHistoryRoots`
+ * so merge performs a single dedupe/sort pass (P2).
+ */
+function finalizeAiHistoryRows(rows, options = {}) {
+  if (options.skipFinalize) return rows;
+  return sortAndNumberRows(dedupeAiHistoryRows(rows, options));
+}
+
+module.exports = {
+  formatTimestampUtc,
+  parseIsoTimestamp,
+  truncateSummary,
+  detectActivity,
+  buildDescription,
+  makeRow,
+  aiHistoryDedupeKey,
+  aiHistoryLooseKey,
+  crossToolPromptKey,
+  dedupeCrossToolPrompts,
+  dedupeAiHistoryRows,
+  assignLineNumber,
+  sortAndNumberRows,
+  finalizeAiHistoryRows,
+};

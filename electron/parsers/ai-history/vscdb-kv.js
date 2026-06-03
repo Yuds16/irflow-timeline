@@ -1,0 +1,183 @@
+/**
+ * vscdb-kv.js — read Cursor / VS Code state.vscdb and store.db key-value SQLite stores.
+ */
+
+const fs = require("fs");
+const path = require("path");
+
+const { dbg } = require("../../logger");
+
+function loadSqlite() {
+  try {
+    return require("better-sqlite3");
+  } catch (e) {
+    throw new Error("SQLite support unavailable (better-sqlite3 not loaded).");
+  }
+}
+
+function openVscdbReadOnly(dbPath) {
+  const Database = loadSqlite();
+  const db = new Database(dbPath, { readonly: true, fileMustExist: true });
+  return db;
+}
+
+function listTables(db) {
+  const rows = db.prepare(
+    "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'",
+  ).all();
+  return rows.map((r) => r.name);
+}
+
+function kvTableNames(db) {
+  const names = listTables(db);
+  const out = [];
+  if (names.includes("cursorDiskKV")) out.push("cursorDiskKV");
+  if (names.includes("ItemTable")) out.push("ItemTable");
+  return out;
+}
+
+function parseKvValue(raw) {
+  if (raw == null) return null;
+  if (Buffer.isBuffer(raw)) {
+    const text = raw.toString("utf8").replace(/^\uFEFF/, "").trim();
+    if (!text) return null;
+    try { return JSON.parse(text); } catch { return text; }
+  }
+  if (typeof raw === "string") {
+    const text = raw.trim();
+    if (!text) return null;
+    try { return JSON.parse(text); } catch { return text; }
+  }
+  return raw;
+}
+
+/**
+ * @param {import("better-sqlite3").Database} db
+ * @param {string} table
+ * @param {string} [keyLike] SQL LIKE pattern (no % added)
+ */
+function queryKvByKeyLike(db, table, keyLike) {
+  const pattern = keyLike.includes("%") ? keyLike : `${keyLike}%`;
+  return db.prepare(`SELECT key, value FROM ${table} WHERE key LIKE ? ORDER BY rowid ASC`)
+    .all(pattern);
+}
+
+function queryKvByKey(db, table, key) {
+  const row = db.prepare(`SELECT key, value FROM ${table} WHERE key = ?`).get(key);
+  return row || null;
+}
+
+/**
+ * Load composer + bubble KV rows in one pass (avoids N+1 LIKE queries per bubble).
+ * @returns {{ composers: Map<string, object>, bubbles: Map<string, object> }}
+ */
+function loadCursorComposerKv(db) {
+  const composers = new Map();
+  const bubbles = new Map();
+  const tables = kvTableNames(db);
+  if (!tables.includes("cursorDiskKV")) return { composers, bubbles };
+
+  const rows = db.prepare(
+    `SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%' OR key LIKE 'bubbleId:%' ORDER BY rowid ASC`,
+  ).all();
+
+  for (const { key, value } of rows) {
+    if (key.startsWith("composerData:")) {
+      const composerId = key.slice("composerData:".length);
+      if (composerId) composers.set(composerId, parseKvValue(value));
+    } else if (key.startsWith("bubbleId:")) {
+      bubbles.set(key, parseKvValue(value));
+    }
+  }
+  return { composers, bubbles };
+}
+
+/** List composer metadata rows without loading bubble payloads (memory-safe). */
+function listComposerDataRows(db) {
+  const tables = kvTableNames(db);
+  if (!tables.includes("cursorDiskKV")) return [];
+  return db.prepare(
+    "SELECT key, value FROM cursorDiskKV WHERE key LIKE 'composerData:%' ORDER BY rowid ASC",
+  ).all();
+}
+
+/** Load bubble JSON for one composer session (scoped LIKE — avoids loading the whole KV table). */
+function loadBubblesForComposer(db, composerId) {
+  const tables = kvTableNames(db);
+  if (!tables.includes("cursorDiskKV") || !composerId) return [];
+  const rows = db.prepare(
+    "SELECT key, value FROM cursorDiskKV WHERE key LIKE ? ORDER BY rowid ASC",
+  ).all(`bubbleId:${composerId}:%`);
+  const out = [];
+  for (const { value } of rows) {
+    const bubble = parseKvValue(value);
+    if (bubble && typeof bubble === "object") out.push(bubble);
+  }
+  return out;
+}
+
+function findVscdbFilesUnder(rootDir, opts = {}) {
+  const maxDepth = opts.maxDepth ?? 14;
+  const maxFiles = opts.maxFiles ?? 32;
+  const names = new Set(["state.vscdb", "store.db"]);
+  const out = [];
+  const stack = [{ d: rootDir, depth: 0 }];
+
+  while (stack.length && out.length < maxFiles) {
+    const { d, depth } = stack.pop();
+    let entries;
+    try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { continue; }
+    for (const e of entries) {
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) {
+        if (!e.isSymbolicLink() && depth < maxDepth) stack.push({ d: full, depth: depth + 1 });
+        continue;
+      }
+      if (!e.isFile() || !names.has(e.name)) continue;
+      out.push(full);
+      if (out.length >= maxFiles) break;
+    }
+  }
+  return out;
+}
+
+function readWorkspaceJsonMap(cursorUserDir) {
+  const map = new Map();
+  const wsRoot = path.join(cursorUserDir, "workspaceStorage");
+  if (!fs.existsSync(wsRoot)) return map;
+  let entries;
+  try { entries = fs.readdirSync(wsRoot, { withFileTypes: true }); } catch { return map; }
+  for (const e of entries) {
+    if (!e.isDirectory()) continue;
+    const wj = path.join(wsRoot, e.name, "workspace.json");
+    if (!fs.existsSync(wj)) continue;
+    try {
+      const data = JSON.parse(fs.readFileSync(wj, "utf8"));
+      const folder = data.folder || data.workspace || "";
+      if (folder) map.set(e.name, String(folder).replace(/^file:\/\//, ""));
+    } catch { /* ignore */ }
+  }
+  return map;
+}
+
+function safeCloseDb(db) {
+  if (!db) return;
+  try { db.close(); } catch (e) {
+    dbg("AIHIST", "vscdb close failed", { err: e.message });
+  }
+}
+
+module.exports = {
+  openVscdbReadOnly,
+  kvTableNames,
+  parseKvValue,
+  queryKvByKeyLike,
+  queryKvByKey,
+  loadCursorComposerKv,
+  listComposerDataRows,
+  loadBubblesForComposer,
+  findVscdbFilesUnder,
+  readWorkspaceJsonMap,
+  safeCloseDb,
+  loadSqlite,
+};

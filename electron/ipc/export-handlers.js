@@ -1,8 +1,53 @@
 const path = require("path");
 const fs = require("fs");
 const fsp = require("fs/promises");
+const os = require("os");
 const { dialog, BrowserWindow } = require("electron");
+const { openDialogOptions } = require("../utils/open-dialog");
 const { dbg } = require("../logger");
+const {
+  sanitizeExportBaseName,
+  enrichSourceManifest,
+  buildPackageManifest,
+  buildReadmeText,
+  buildSourcesOnlyManifest,
+  buildSourcesOnlyReadmeText,
+} = require("../parsers/ai-history/export-package");
+
+async function writeDelimitedExportToPath(exportData, filePath, safeSend) {
+  const ext = path.extname(filePath).toLowerCase();
+  const delimiter = ext === ".tsv" ? "\t" : ",";
+  const writeStream = fs.createWriteStream(filePath, { encoding: "utf-8" });
+  writeStream.write(exportData.headers.join(delimiter) + "\n");
+
+  let count = 0;
+  try {
+    for (const rawRow of exportData.iterator) {
+      const values = exportData.safeCols.map((sc) => {
+        const val = rawRow[sc] ?? "";
+        if (delimiter === "\t") {
+          return val.includes("\t") || val.includes("\n") ? val.replace(/\t/g, " ").replace(/\n/g, " ") : val;
+        }
+        return val.includes(",") || val.includes('"') || val.includes("\n")
+          ? `"${val.replace(/"/g, '""')}"`
+          : val;
+      });
+      const ok = writeStream.write(values.join(delimiter) + "\n");
+      if (!ok) await new Promise((r) => writeStream.once("drain", r));
+      count += 1;
+      if (count % 100000 === 0) safeSend?.("export-progress", { count });
+    }
+  } catch (e) {
+    dbg("EXPORT", `delimited export interrupted after ${count} rows`, { error: e.message });
+  }
+
+  await new Promise((resolve, reject) => {
+    writeStream.on("error", reject);
+    writeStream.on("finish", resolve);
+    writeStream.end();
+  });
+  return count;
+}
 
 // ── HTML Report Builder ──────────────────────────────────────────
 function buildReportHtml(data, fileName, tagColors = {}, vtEnrichment = null) {
@@ -271,49 +316,132 @@ module.exports = function registerExportHandlers(safeHandle, safeSend, { db, _ac
       return { count, filePath: result.filePath };
     }
 
-    // Delimited text export (CSV or TSV)
-    const delimiter = ext === ".tsv" ? "\t" : ",";
-    const writeStream = fs.createWriteStream(result.filePath, { encoding: "utf-8" });
+    const count = await writeDelimitedExportToPath(exportData, result.filePath, safeSend);
+    return { count, filePath: result.filePath };
+  });
 
-    // Write header
-    writeStream.write(exportData.headers.join(delimiter) + "\n");
-
-    // Stream rows with backpressure handling — guard against tab close during iteration
-    let count = 0;
-    try {
-      for (const rawRow of exportData.iterator) {
-        const values = exportData.safeCols.map((sc) => {
-          const val = rawRow[sc] ?? "";
-          if (delimiter === "\t") {
-            // TSV: escape tabs and newlines within values
-            return val.includes("\t") || val.includes("\n") ? val.replace(/\t/g, " ").replace(/\n/g, " ") : val;
-          }
-          // CSV: quote fields containing comma, quote, or newline
-          return val.includes(",") || val.includes('"') || val.includes("\n")
-            ? `"${val.replace(/"/g, '""')}"`
-            : val;
-        });
-        const ok = writeStream.write(values.join(delimiter) + "\n");
-        if (!ok) {
-          // Internal buffer full — wait for drain before continuing
-          await new Promise((r) => writeStream.once("drain", r));
-        }
-        count++;
-        if (count % 100000 === 0) {
-          safeSend("export-progress", { count });
-        }
-      }
-    } catch (e) {
-      // Tab closed or DB error during export — flush what we have
-      dbg("MAIN", `CSV/TSV export interrupted after ${count} rows`, { error: e.message });
+  safeHandle("export-ai-history-package", async (event, { tabId, options, tabName, sourceFormat } = {}) => {
+    const tabInfo = db.getTabInfo(tabId);
+    if (!tabInfo) return { __ipcError: true, message: "No timeline data for this tab." };
+    if (!sourceFormat || !String(sourceFormat).startsWith("ai-history-")) {
+      return { __ipcError: true, message: "AI history package export is only available for AI Query History tabs." };
     }
 
-    await new Promise((resolve, reject) => {
-      writeStream.on("error", reject);
-      writeStream.on("finish", resolve);
-      writeStream.end();
+    const sourcesOnly = !!options?.sourcesOnlyManifest;
+
+    const pick = await dialog.showOpenDialog(_activeWindow(), openDialogOptions({
+      title: sourcesOnly ? "Export Source Manifest (sources only)" : "Export AI History Package",
+      message: sourcesOnly
+        ? "Choose a folder. IRFlow will write sources_manifest.json (paths + SHA-256, no message bodies) and README_sources.txt."
+        : "Choose a folder. IRFlow will write a filtered CSV, manifest.json (source paths + SHA-256), and README.txt.",
+      defaultPath: path.join(os.homedir(), "Desktop"),
+      properties: ["openDirectory", "createDirectory"],
+      buttonLabel: "Export Here",
+    }));
+    if (pick.canceled || !pick.filePaths?.[0]) return { canceled: true };
+
+    const outDir = pick.filePaths[0];
+    const exportOpts = { ...(options || {}) };
+    delete exportOpts.sourcesOnlyManifest;
+
+    const sourceGroups = db.getGroupedColumnCounts(tabId, "SourceFile", exportOpts);
+    const toolGroups = db.getGroupedColumnCounts(tabId, "Tool", exportOpts).groups;
+    const { sources, hashedFileCount, hashTruncated } = await enrichSourceManifest(sourceGroups.groups);
+    const toolBreakdown = toolGroups.map((g) => ({ tool: g.value, rowCount: g.count }));
+    const filtersApplied = options?.filtersApplied !== false;
+
+    if (sourcesOnly) {
+      const manifestPath = path.join(outDir, "sources_manifest.json");
+      const readmePath = path.join(outDir, "README_sources.txt");
+      const manifest = buildSourcesOnlyManifest({
+        tabName,
+        sourceFormat,
+        totalRows: sourceGroups.totalRows,
+        filtersApplied,
+        sources,
+        hashedFileCount,
+        hashTruncated,
+        toolBreakdown,
+      });
+
+      await fsp.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf-8");
+      await fsp.writeFile(readmePath, buildSourcesOnlyReadmeText({
+        tabName,
+        sourceFileCount: sources.length,
+        hashTruncated,
+        dirPath: outDir,
+      }), "utf-8");
+
+      dbg("EXPORT", "export-ai-history-sources-only", {
+        outDir,
+        sources: sources.length,
+        hashTruncated,
+      });
+
+      return {
+        canceled: false,
+        sourcesOnly: true,
+        dirPath: outDir,
+        manifestPath,
+        readmePath,
+        rowCount: sourceGroups.totalRows,
+        sourceFileCount: sources.length,
+        hashTruncated,
+      };
+    }
+
+    const base = sanitizeExportBaseName(tabName);
+    const csvPath = path.join(outDir, `${base}_timeline.csv`);
+    const manifestPath = path.join(outDir, "manifest.json");
+    const readmePath = path.join(outDir, "README.txt");
+
+    let visibleHeaders = exportOpts.visibleHeaders || tabInfo.headers || [];
+    if (tabInfo.headers?.includes("FullText") && !visibleHeaders.includes("FullText")) {
+      visibleHeaders = [...visibleHeaders, "FullText"];
+    }
+    const exportData = db.exportQuery(tabId, { ...exportOpts, visibleHeaders });
+    if (!exportData) return { __ipcError: true, message: "Could not read timeline rows for export." };
+
+    const rowCount = await writeDelimitedExportToPath(exportData, csvPath, safeSend);
+
+    const manifest = buildPackageManifest({
+      tabName,
+      sourceFormat,
+      totalRows: sourceGroups.totalRows,
+      exportedRows: rowCount,
+      filtersApplied,
+      sources,
+      hashedFileCount,
+      hashTruncated,
+      toolBreakdown,
     });
-    return { count, filePath: result.filePath };
+
+    await fsp.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf-8");
+    await fsp.writeFile(readmePath, buildReadmeText({
+      tabName,
+      exportedRows: rowCount,
+      sourceFileCount: sources.length,
+      hashTruncated,
+      dirPath: outDir,
+    }), "utf-8");
+
+    dbg("EXPORT", "export-ai-history-package", {
+      outDir,
+      rowCount,
+      sources: sources.length,
+      hashTruncated,
+    });
+
+    return {
+      canceled: false,
+      dirPath: outDir,
+      csvPath,
+      manifestPath,
+      readmePath,
+      rowCount,
+      sourceFileCount: sources.length,
+      hashTruncated,
+    };
   });
 
   // Save text content to file with save dialog
