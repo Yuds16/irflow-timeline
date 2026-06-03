@@ -4,15 +4,12 @@
  */
 
 const { parentPort, workerData } = require("worker_threads");
+const fs = require("fs");
 const TimelineDB = require("../db");
 const { AI_HISTORY_COLUMNS } = require("../parsers/ai-history/schema");
 const { extractMergedAiHistoryRootsToDb } = require("../parsers/ai-history/profile-scan");
 
 let cancelled = false;
-
-parentPort.on("message", (message = {}) => {
-  if (message?.type === "cancel") cancelled = true;
-});
 
 function checkAbort() {
   if (cancelled) throw Object.assign(new Error("AI history extraction canceled"), { canceled: true });
@@ -31,7 +28,20 @@ function cleanupDb(db, tabId) {
   try { db.closeAll(); } catch { /* ignore */ }
 }
 
-(async () => {
+/**
+ * Remove the worker's temp SQLite file (+ WAL/SHM siblings). Call ONLY on paths where the main
+ * process will not adopt the file (cancel / error / empty result): releaseTab + closeAll close
+ * the connection but never unlink, so every failed or cancelled extract would otherwise orphan a
+ * temp DB in os.tmpdir() (up to the 3M-row cap in size). The success path hands dbPath off intact.
+ */
+function unlinkTempDb(dbPath) {
+  if (!dbPath) return;
+  for (const suffix of ["", "-wal", "-shm"]) {
+    try { fs.rmSync(`${dbPath}${suffix}`, { force: true }); } catch { /* ignore */ }
+  }
+}
+
+async function runExtract() {
   const {
     roots,
     includeSubagents,
@@ -65,6 +75,7 @@ function cleanupDb(db, tabId) {
 
     if (!rowCount) {
       cleanupDb(db, tabId);
+      unlinkTempDb(dbPath);
       parentPort.postMessage({
         type: "result",
         result: {
@@ -110,6 +121,7 @@ function cleanupDb(db, tabId) {
     });
   } catch (err) {
     cleanupDb(db, tabId);
+    unlinkTempDb(dbPath);
     if (err?.canceled) {
       progress({ phase: "cancelled", done: true });
       process.exit(1);
@@ -120,4 +132,15 @@ function cleanupDb(db, tabId) {
       result: { error: err?.message || "AI history profile extract failed", stack: err?.stack },
     });
   }
-})();
+}
+
+// Only run when actually loaded as a worker; guarding lets the module be required in tests
+// (parentPort is null on the main thread) to exercise the pure helpers.
+if (parentPort) {
+  parentPort.on("message", (message = {}) => {
+    if (message?.type === "cancel") cancelled = true;
+  });
+  runExtract();
+}
+
+module.exports = { unlinkTempDb };
