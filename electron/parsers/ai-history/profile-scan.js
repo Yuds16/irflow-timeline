@@ -15,6 +15,7 @@ const { extractCursorDir } = require("./cursor");
 const { extractCopilotPath, getCopilotExtractionStats } = require("./copilot");
 const { sortAndNumberRows, dedupeAiHistoryRows } = require("./row-utils");
 const {
+  MAX_AI_HISTORY_ROWS,
   prepareChunkRowsForDb,
   writeAiHistoryRowsToDb,
   makeSourceAccumulator,
@@ -41,8 +42,6 @@ const { buildEmptyAiScanReport } = require("./scan-report");
 const { AiHistoryExtractAbortedError } = require("./extract-abort");
 const path = require("path");
 
-/** Safety cap so a pathological collection can't OOM the worker (configurable via options.maxRows). */
-const MAX_AI_HISTORY_ROWS = 3_000_000;
 
 const FOLDER_SCAN_TOOL_MAP = [
   ["claudeCode", "claude-code"],

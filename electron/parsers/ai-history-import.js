@@ -11,6 +11,12 @@ const path = require("path");
 const { dbg } = require("../logger");
 const { AI_HISTORY_COLUMNS, AI_HISTORY_TOOLS } = require("./ai-history/schema");
 const { extractAiHistory } = require("./ai-history");
+const {
+  MAX_AI_HISTORY_ROWS,
+  prepareChunkRowsForDb,
+  writeAiHistoryRowsToDb,
+  makeSourceAccumulator,
+} = require("./ai-history/db-sink");
 const { buildChatgptExtractionStats } = require("./ai-history/chatgpt");
 const { isClaudeDir, isClaudeCodeArtifactRoot, resolveClaudeDir } = require("./ai-history/claude-code");
 const {
@@ -56,7 +62,6 @@ const {
   buildCopilotExtractionStats,
 } = require("./ai-history/import-meta");
 
-const BATCH = 5000;
 const EXTRACT_PHASE_WEIGHT = 0.45;
 
 const AI_SCOPE_TOOLS = new Set(["claude-code", "codex", "cursor"]);
@@ -591,10 +596,26 @@ async function parseAiHistoryImport(filePath, tabId, db, onProgress, detect) {
   const fileCountHint = countAiHistorySourceFiles(tool, target, detect);
   const extractOpts = buildExtractOptions(detect, onProgress, fileCountHint);
 
-  const rows = await extractAiHistory(tool, target, { user, host: "" }, extractOpts);
-  if (!rows.length) throw new Error("No AI history messages found in this path.");
+  // Stream the extractor's output into a bounded per-source accumulator rather than returning the
+  // whole corpus: this caps the single-import path at MAX_AI_HISTORY_ROWS (it was the only ingest
+  // path with no row ceiling) and routes rows through the same dedupe/slim/RecordId sink the merged
+  // scan uses. keepFullText: true preserves the full message body for single-tool imports.
+  const acc = makeSourceAccumulator(MAX_AI_HISTORY_ROWS);
+  extractOpts.skipFinalize = true;
+  extractOpts.onExtractedRows = (batch) => acc.add(batch, 0);
+
+  const returned = await extractAiHistory(tool, target, { user, host: "" }, extractOpts);
+  // Streaming-aware extractors emit via onExtractedRows and return an empty array carrying only
+  // sidecar stats; the others ignore the callback and return the full row array — fold it in.
+  if (returned && returned.length) acc.add(returned, 0);
+  const capped = acc.truncated;
+
+  const prepared = prepareChunkRowsForDb(acc.rows, 1, MAX_AI_HISTORY_ROWS, 0, { keepFullText: true });
+  acc.reset();
+  if (!prepared.length) throw new Error("No AI history messages found in this path.");
 
   const filesProcessed = extractOpts.getFilesTotal() || fileCountHint || 1;
+  const sidecar = returned || {};
   const meta = {
     tool,
     target,
@@ -602,41 +623,27 @@ async function parseAiHistoryImport(filePath, tabId, db, onProgress, detect) {
     subagentsSkipped: !extractOpts.includeSubagents,
   };
   if (tool === "chatgpt") {
-    meta.chatgpt = rows._chatgptStats || buildChatgptExtractionStats(rows, target);
+    meta.chatgpt = sidecar._chatgptStats || buildChatgptExtractionStats(prepared, target);
   }
-  if (rows._claudeDesktopStats) meta.claudeDesktop = rows._claudeDesktopStats;
-  if (rows._cursorComposerStats) {
-    meta.cursor = { ...(meta.cursor || {}), composer: rows._cursorComposerStats, syntheticTimestamps: true };
+  if (sidecar._claudeDesktopStats) meta.claudeDesktop = sidecar._claudeDesktopStats;
+  if (sidecar._cursorComposerStats) {
+    meta.cursor = { ...(meta.cursor || {}), composer: sidecar._cursorComposerStats, syntheticTimestamps: true };
   }
   if (tool === "copilot") {
-    meta.copilot = buildCopilotExtractionStats(rows, getCopilotExtractionStats(rows));
+    meta.copilot = buildCopilotExtractionStats(prepared, getCopilotExtractionStats(prepared));
   }
-  if (tool === "cursor" || rows._cursorSyntheticTimestamps) {
+  if (tool === "cursor" || sidecar._cursorSyntheticTimestamps) {
     meta.cursor = { syntheticTimestamps: true };
   }
+  if (capped) meta.capped = { maxRows: MAX_AI_HISTORY_ROWS, rowCount: prepared.length };
 
   const headers = [...AI_HISTORY_COLUMNS];
   db.createTab(tabId, headers);
 
-  const workTotal = filesProcessed + rows.length;
-  let workDone = filesProcessed;
-
-  for (let i = 0; i < rows.length; i += BATCH) {
-    const chunk = rows.slice(i, i + BATCH);
-    db.insertBatchArrays(tabId, chunk.map((r) => headers.map((h) => r[h] ?? "")));
-    const inserted = Math.min(i + BATCH, rows.length);
-    workDone = filesProcessed + inserted;
-    reportAiHistoryProgress(
-      onProgress,
-      inserted,
-      workDone,
-      workTotal,
-      `Writing rows ${inserted.toLocaleString()} / ${rows.length.toLocaleString()}`,
-      "loading",
-    );
-    if (i % (BATCH * 4) === 0) await new Promise((r) => setImmediate(r));
-  }
-  reportAiHistoryProgress(onProgress, rows.length, workTotal, workTotal, "Finalizing…", "finalizing");
+  const workTotal = filesProcessed + prepared.length;
+  reportAiHistoryProgress(onProgress, 0, filesProcessed, workTotal, "Writing rows…", "loading");
+  writeAiHistoryRowsToDb(db, tabId, headers, prepared);
+  reportAiHistoryProgress(onProgress, prepared.length, workTotal, workTotal, "Finalizing…", "finalizing");
 
   const result = db.finalizeImport(tabId);
   dbg("AIHIST", "parseAiHistoryImport done", { tool, target, rowCount: result.rowCount });

@@ -12,6 +12,8 @@ const { sortAndNumberRows, dedupeAiHistoryRows } = require("./row-utils");
 
 /** Rows per SQLite insert during streaming (keeps peak heap flat). */
 const AI_HISTORY_DB_BATCH = 5000;
+/** Safety cap so a pathological collection can't OOM the worker (overridable via options.maxRows). */
+const MAX_AI_HISTORY_ROWS = 3_000_000;
 
 /**
  * Drop FullText before insert for the merged streamed path (DB stays lean; Summary is the preview).
@@ -78,6 +80,7 @@ function makeSourceAccumulator(maxRows) {
 
 module.exports = {
   AI_HISTORY_DB_BATCH,
+  MAX_AI_HISTORY_ROWS,
   slimAiHistoryRowForDb,
   prepareChunkRowsForDb,
   writeAiHistoryRowsToDb,
