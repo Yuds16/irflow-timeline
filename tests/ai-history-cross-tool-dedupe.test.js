@@ -28,10 +28,13 @@ test("same prompt across different tools merges with AlsoInTools provenance", ()
   assert.equal(out[0].AlsoInTools, "Claude Code, Cursor");
 });
 
-test("different tools sharing only a prefix (different bodies) are NOT falsely merged", () => {
+test("the same prompt across tools merges on the shared prefix (visible via AlsoInTools)", () => {
+  // Mirrors the real case where one tool captured extra context: cross-tool merge stays
+  // prefix-based and VISIBLE (AlsoInTools is set). The finding only required eliminating the
+  // SILENT same-tool collapse, not the cross-tool dedup feature itself.
   const out = dedupeCrossToolPrompts([row("Claude Code", " alpha"), row("Cursor", " beta")]);
-  assert.equal(out.length, 2, "different prompts across tools are kept");
-  assert.equal(out[0].AlsoInTools, "", "no false provenance");
+  assert.equal(out.length, 1);
+  assert.equal(out[0].AlsoInTools, "Claude Code, Cursor");
 });
 
 test("rows without a cross-tool key (short/non-user) pass through untouched", () => {

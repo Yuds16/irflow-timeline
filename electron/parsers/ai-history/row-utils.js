@@ -148,40 +148,33 @@ function pickRicherAiHistoryRow(a, b) {
   return a;
 }
 
-/** Full normalized message body, used to confirm two rows are the SAME prompt before merging. */
-function crossToolContentKey(row) {
-  return String(row.FullText || row.Summary || "").replace(/\s+/g, " ").trim().toLowerCase();
-}
-
 /**
- * Collapse the SAME prompt seen across DIFFERENT tools into the richest single row, preserving
- * provenance in `AlsoInTools`. Two guards keep this from destroying evidence:
- *   1. Only merge across distinct Tool values. Two rows from the SAME tool that merely share a
- *      120-char opening (e.g. a repeated "fix the bug in…" template) are DISTINCT prompts — the
- *      exact dedupe (aiHistoryDedupeKey, incl. Timestamp+SessionId) already ran, so anything left
- *      here is genuinely different and must be kept, not silently dropped.
- *   2. Only merge when the full normalized body matches, not just the 120-char prefix, so two
- *      different prompts that share a boilerplate opening across tools are not falsely merged.
- * Under-merging (keeping both) is the safe direction for a forensic timeline.
+ * Collapse the SAME prompt seen across DIFFERENT tools into the richest single row, recording the
+ * tools it appeared in via `AlsoInTools`. The key guard (the finding's recommended fix): only merge
+ * across DISTINCT Tool values. Two rows from the SAME tool that merely share a 120-char opening
+ * (e.g. a repeated "fix the bug in…" template at different times) are DISTINCT prompts — the exact
+ * dedupe (aiHistoryDedupeKey, incl. Timestamp+SessionId) already ran, so anything left here is
+ * genuinely different and must be kept, not silently dropped. Cross-tool merges remain VISIBLE
+ * (AlsoInTools is set), unlike the previous silent same-tool collapse.
  */
 function dedupeCrossToolPrompts(rows) {
-  const bucketsByKey = new Map(); // key -> [{ idx, tools:Set, content }]
+  const bucketsByKey = new Map(); // key -> [{ idx, tools:Set }]
   const out = [];
   for (const r of rows) {
     const key = crossToolPromptKey(r);
     if (!key) { out.push(r); continue; }
     const tool = String(r.Tool || "").trim();
-    const content = crossToolContentKey(r);
     const buckets = bucketsByKey.get(key);
-    if (buckets) {
-      const match = buckets.find((b) => b.content === content && tool && !b.tools.has(tool));
+    if (buckets && tool) {
+      // Merge into an existing occurrence whose tool set does NOT already include this tool.
+      const match = buckets.find((b) => !b.tools.has(tool));
       if (match) {
         out[match.idx] = pickRicherAiHistoryRow(out[match.idx], r);
         match.tools.add(tool);
         continue;
       }
     }
-    const entry = { idx: out.length, tools: new Set(tool ? [tool] : []), content };
+    const entry = { idx: out.length, tools: new Set(tool ? [tool] : []) };
     if (buckets) buckets.push(entry);
     else bucketsByKey.set(key, [entry]);
     out.push(r);
