@@ -23,10 +23,48 @@ const {
   safeCloseDb,
 } = require("./vscdb-kv");
 const { formatWorkspaceDisplay } = require("./workspace-utils");
-const { defaultCursorHome, listCursorUserDataDirs } = require("./artifact-paths");
 
 const CURSOR_DIR_NAME = ".cursor";
 const COMPOSER_YIELD_EVERY = 8;
+
+// Cursor IDE User-data layouts, relative to a user home (macOS / Linux / Windows).
+const CURSOR_USER_DATA_SUFFIXES = [
+  ["Library", "Application Support", "Cursor", "User"],
+  [".config", "Cursor", "User"],
+  ["AppData", "Roaming", "Cursor", "User"],
+];
+
+/** The user home that owns a .cursor (or Cursor User) root, derived from the path itself. */
+function deriveUserHomeFromCursorRoot(cursorRoot) {
+  const norm = path.resolve(cursorRoot);
+  if (path.basename(norm) === CURSOR_DIR_NAME) return path.dirname(norm);
+  const lower = norm.replace(/\\/g, "/").toLowerCase();
+  for (const suffix of [
+    "/library/application support/cursor/user",
+    "/.config/cursor/user",
+    "/appdata/roaming/cursor/user",
+  ]) {
+    const idx = lower.lastIndexOf(suffix);
+    if (idx > 0) return norm.slice(0, idx);
+  }
+  return path.dirname(norm);
+}
+
+/**
+ * Cursor IDE User dirs for the home that OWNS this cursorRoot — NOT os.homedir(). During forensic
+ * triage cursorRoot lives under the seized collection, so deriving the User dir from it keeps
+ * composer reads inside the evidence tree instead of scanning the live analyst's own Cursor data
+ * (which would both contaminate the timeline and read outside the authorized scan scope).
+ */
+function cursorUserDataDirsForRoot(cursorRoot) {
+  const home = deriveUserHomeFromCursorRoot(cursorRoot);
+  const out = [];
+  for (const parts of CURSOR_USER_DATA_SUFFIXES) {
+    const p = path.join(home, ...parts);
+    try { if (fs.statSync(p).isDirectory()) out.push(p); } catch { /* not in this collection */ }
+  }
+  return out;
+}
 
 function cursorComposerRow(fields) {
   return makeRow({ ...fields, tool: TOOL_CURSOR }, TOOL_CURSOR);
@@ -185,12 +223,11 @@ function workspaceLabelForDb(dbPath, cursorHome) {
 }
 
 function listCursorComposerDbs(cursorRoot, extraUserDirs = []) {
-  const agentHome = path.basename(cursorRoot) === CURSOR_DIR_NAME
-    ? cursorRoot
-    : (fs.existsSync(path.join(cursorRoot, "projects")) ? cursorRoot : defaultCursorHome());
+  // Stay inside the supplied root: never fall back to the live ~/.cursor (defaultCursorHome).
+  const agentHome = cursorRoot;
 
   const dbs = new Set();
-  const userDirs = [...extraUserDirs, ...listCursorUserDataDirs()];
+  const userDirs = [...extraUserDirs, ...cursorUserDataDirsForRoot(cursorRoot)];
   for (const userDir of userDirs) {
     const globalVscdb = path.join(userDir, "globalStorage", "state.vscdb");
     if (fs.existsSync(globalVscdb)) dbs.add(globalVscdb);
@@ -215,11 +252,8 @@ function listCursorComposerDbs(cursorRoot, extraUserDirs = []) {
 async function extractCursorComposerStores(cursorRoot, attribution = {}, options = {}) {
   const rows = [];
   const stats = { databases: 0, messageRows: 0, failed: 0 };
-  const agentHome = path.basename(cursorRoot) === CURSOR_DIR_NAME
-    ? cursorRoot
-    : defaultCursorHome();
-
-  const dbPaths = listCursorComposerDbs(agentHome, options.userDataDirs || []);
+  // Derive everything from the supplied (possibly forensic) root — do not touch the live host.
+  const dbPaths = listCursorComposerDbs(cursorRoot, options.userDataDirs || []);
   let fileIndex = 0;
   const { onFileProgress, checkAbort, onExtractedRows } = options;
 
@@ -232,7 +266,7 @@ async function extractCursorComposerStores(cursorRoot, attribution = {}, options
     try {
       db = openVscdbReadOnly(dbPath);
       stats.databases += 1;
-      const ws = workspaceLabelForDb(dbPath, listCursorUserDataDirs()[0] || agentHome);
+      const ws = workspaceLabelForDb(dbPath, cursorUserDataDirsForRoot(cursorRoot)[0] || cursorRoot);
       const chunk = await extractBubblesFromDb(db, dbPath, attribution, ws, {
         checkAbort,
         onExtractedRows,
@@ -278,5 +312,7 @@ module.exports = {
   extractCursorComposerStores,
   extractBubblesFromDb,
   listCursorComposerDbs,
+  deriveUserHomeFromCursorRoot,
+  cursorUserDataDirsForRoot,
   buildCursorComposerImportNotice,
 };
