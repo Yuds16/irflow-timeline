@@ -21,6 +21,8 @@ async function writeDelimitedExportToPath(exportData, filePath, safeSend) {
   writeStream.write(exportData.headers.join(delimiter) + "\n");
 
   let count = 0;
+  let aborted = false;
+  let abortError = null;
   try {
     for (const rawRow of exportData.iterator) {
       const values = exportData.safeCols.map((sc) => {
@@ -38,6 +40,11 @@ async function writeDelimitedExportToPath(exportData, filePath, safeSend) {
       if (count % 100000 === 0) safeSend?.("export-progress", { count });
     }
   } catch (e) {
+    // Tab closed mid-export, DB read error, or disk error: the CSV is now truncated. Surface this
+    // instead of silently returning the partial count as if the export completed — a manifest that
+    // claims a complete forensic export over a truncated CSV is a chain-of-custody integrity loss.
+    aborted = true;
+    abortError = e.message;
     dbg("EXPORT", `delimited export interrupted after ${count} rows`, { error: e.message });
   }
 
@@ -46,7 +53,7 @@ async function writeDelimitedExportToPath(exportData, filePath, safeSend) {
     writeStream.on("finish", resolve);
     writeStream.end();
   });
-  return count;
+  return { count, aborted, error: abortError };
 }
 
 // ── HTML Report Builder ──────────────────────────────────────────
@@ -316,8 +323,8 @@ module.exports = function registerExportHandlers(safeHandle, safeSend, { db, _ac
       return { count, filePath: result.filePath };
     }
 
-    const count = await writeDelimitedExportToPath(exportData, result.filePath, safeSend);
-    return { count, filePath: result.filePath };
+    const { count, aborted } = await writeDelimitedExportToPath(exportData, result.filePath, safeSend);
+    return { count, filePath: result.filePath, partial: aborted || undefined };
   });
 
   safeHandle("export-ai-history-package", async (event, { tabId, options, tabName, sourceFormat } = {}) => {
@@ -402,7 +409,8 @@ module.exports = function registerExportHandlers(safeHandle, safeSend, { db, _ac
     const exportData = db.exportQuery(tabId, { ...exportOpts, visibleHeaders });
     if (!exportData) return { __ipcError: true, message: "Could not read timeline rows for export." };
 
-    const rowCount = await writeDelimitedExportToPath(exportData, csvPath, safeSend);
+    const { count: rowCount, aborted: exportAborted, error: exportError } =
+      await writeDelimitedExportToPath(exportData, csvPath, safeSend);
 
     const manifest = buildPackageManifest({
       tabName,
@@ -415,6 +423,12 @@ module.exports = function registerExportHandlers(safeHandle, safeSend, { db, _ac
       hashTruncated,
       toolBreakdown,
     });
+    // Record truncation in the manifest so the chain-of-custody artifact never asserts a complete
+    // export over a CSV that aborted mid-stream.
+    if (exportAborted) {
+      manifest.exportComplete = false;
+      manifest.exportError = exportError || "Export stream aborted before all rows were written.";
+    }
 
     await fsp.writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, "utf-8");
     await fsp.writeFile(readmePath, buildReadmeText({
@@ -441,6 +455,8 @@ module.exports = function registerExportHandlers(safeHandle, safeSend, { db, _ac
       rowCount,
       sourceFileCount: sources.length,
       hashTruncated,
+      partial: exportAborted || undefined,
+      exportError: exportAborted ? (exportError || "Export stream aborted before all rows were written.") : undefined,
     };
   });
 

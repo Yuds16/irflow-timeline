@@ -69,6 +69,13 @@ export default function AiHistoryScopeModal() {
             },
           }],
         });
+        // safeHandle resolves a failed handler as { __ipcError, message } rather than rejecting,
+        // so without this check a failed import falls through to the success toast below.
+        if (isIpcError(r)) {
+          toast.error(`${label} import failed`, { detail: ipcErrorMessage(r) });
+          setModal(null);
+          return;
+        }
         if (r?.scopePending?.length) {
           openNextScope(r.scopePending);
           return;
