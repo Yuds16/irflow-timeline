@@ -182,6 +182,7 @@ function safeCloseDb(db) {
 
 module.exports = {
   openVscdbReadOnly,
+  listTables,
   kvTableNames,
   parseKvValue,
   queryKvByKeyLike,
