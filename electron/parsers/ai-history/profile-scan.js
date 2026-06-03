@@ -382,7 +382,13 @@ async function extractMergedAiHistoryRoots(roots, attribution = {}, options = {}
       if (chunk._codexStateSqliteStats) codexStateSqliteStats = chunk._codexStateSqliteStats;
       if (chunk._windsurfCascadeStats) windsurfCascadeStats = chunk._windsurfCascadeStats;
       if (chunk._parseErrors) parseErrorTotal += chunk._parseErrors;
-      merged.push(...chunk);
+      // Push element-by-element, not `merged.push(...chunk)`: spreading an array past ~125k
+      // elements throws RangeError (Maximum call stack size). Stop at the cap during accumulation
+      // so a single pathological source can't blow past maxRows before the between-source check.
+      for (const r of chunk) {
+        if (merged.length >= maxRows) { capped = true; break; }
+        merged.push(r);
+      }
       dbg("AIHIST", "profile-scan extracted", { tool, rootPath, rows: chunk.length });
       report({
         phase: "extracting",
