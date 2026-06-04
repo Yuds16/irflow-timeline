@@ -470,7 +470,7 @@ async function extractChatgptDir(appDir, attribution = {}, options = {}) {
       messageId: "",
       parentId: "",
       workspace: path.dirname(bundlePath),
-      toolName: TOOL_CHATGPT,
+      toolName: "",
       sourceFile: bundlePath,
       user: attribution.user || "",
       host: attribution.host || "",
