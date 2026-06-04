@@ -202,6 +202,27 @@ Use this workflow for Windows profile artifacts under paths such as:
 Users\<user>\AppData\Local\Microsoft\Terminal Server Client\Cache
 ```
 
+## AI App Artifacts
+
+**Inputs:** app-data folders, KAPE / triage collection roots, `.jsonl`, `.json`, `.db`, `.sqlite`, `.sqlite3`, `.ldb`, and `.log` files from supported AI apps.
+
+AI app evidence is handled through **Tools → Analysis → AI Artifacts → Scan AI Artifacts** or by opening a supported app-data folder directly. IRFlow Timeline parses local AI history into a normal timeline tab so prompts, responses, tool calls, session IDs, workspace paths, source evidence, and possible secret exposure can be searched, tagged, and exported.
+
+Supported AI app families include:
+
+| App | Common artifacts |
+|-----|------------------|
+| **Claude Code** | `~/.claude/history.jsonl`, `~/.claude/projects/**/*.jsonl`, Claude Desktop `claude-code-sessions/` |
+| **OpenAI Codex** | `$CODEX_HOME` or `~/.codex/`, `sessions/**/rollout-*.jsonl`, `history.jsonl`, `state.sqlite` metadata |
+| **ChatGPT Desktop** | Local app LevelDB / SQLite stores under ChatGPT Desktop app-data folders |
+| **Gemini CLI** | `~/.gemini/tmp/<project_hash>/chats/session-*.json`, `checkpoint-*.json`, `logs.json` |
+| **Cursor** | `~/.cursor/projects/**/agent-transcripts/`, composer `store.db`, VS Code-family `state.vscdb` |
+| **GitHub Copilot** | VS Code-family `workspaceStorage/*/chatSessions/` and `emptyWindowChatSessions/` |
+| **Windsurf** | `Windsurf/User/globalStorage/state.vscdb`, `workspaceStorage/*/state.vscdb` |
+| **Continue** | `~/.continue/sessions/*.json` |
+
+Use this workflow when AI-assisted activity may be relevant evidence: pasted secrets, suspicious prompts, generated commands, workspace-specific development activity, or AI tool output tied to an incident.
+
 ## Format Detection
 
 IRFlow Timeline determines the file format by extension and content detection:
@@ -214,6 +235,7 @@ IRFlow Timeline determines the file format by extension and content detection:
 .plaso, .timeline            →  Plaso SQLite Reader (auto-detect; .timeline falls back to CSV)
 .mft / $MFT (FILE0 magic)  →  Raw MFT Binary Parser
 $J / $UsnJrnl (by name)    →  Raw USN Journal Parser
+AI app folders / stores      →  AI Query History parser
 ```
 
 Files without a recognized extension are auto-detected by name patterns and magic bytes, so raw `$MFT` and `$J` files extracted by forensic tools work without renaming.

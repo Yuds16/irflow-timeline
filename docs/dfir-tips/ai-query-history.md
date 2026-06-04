@@ -2,6 +2,12 @@
 
 IRFlow Timeline includes a native **AI Query History** extractor for investigating local AI assistant usage during incident response. It parses local desktop, CLI, and editor-assistant stores into one timeline so analysts can review prompts, responses, tool calls, workspaces, source files, and possible pasted secrets.
 
+## AI History vs AI Prompts
+
+IRFlow collects user prompts, but the evidence scope is broader than prompts alone. **AI Query History** includes prompts, assistant responses, tool calls or invoked actions, session metadata, timestamps, workspace paths, source files, model data, and endpoint user/host attribution when available.
+
+This makes AI-assisted activity usable as timeline evidence. Analysts can answer questions such as whether a user pasted credentials into an AI tool, asked for help with suspicious commands, generated code for a sensitive workspace, or received output that exposed secrets.
+
 Supported today:
 
 | Tool | Status |
@@ -66,7 +72,7 @@ IRFlow separates AI evidence into three categories:
 | **Continue** | `~/.continue/sessions/*.json` | Parsed | Captures Continue.dev local prompts/responses and maps them to the workspace directory. |
 | **Browser AI usage** | Chrome, Edge, Firefox, and Safari profile storage paths | Hint-only | Browser-only ChatGPT, Claude, Copilot, and Gemini usage may require browser profile collection or vendor export. |
 
-`Tool` identifies the AI app family, such as **OpenAI Codex** or **Claude Code**. `ToolName` is reserved for an invoked function/tool inside that app, such as a shell command, editor operation, or model tool call. Provider names should not appear in `ToolName`.
+`Tool` identifies the AI app family, such as **OpenAI Codex** or **Claude Code**. `InvokedTool` is reserved for an invoked function/tool inside that app, such as a shell command, editor operation, or model tool call. Provider names should not appear in `InvokedTool`; older saved tabs may still show the legacy `ToolName` header.
 
 `Summary` is the grid-friendly preview. `FullText` preserves the richer message body for long prompts, responses, tool output, secret scanning, and export.
 
@@ -84,7 +90,7 @@ From a triage image, look under user profiles, for example:
 - `C:\Users\<user>\.claude\`
 - `/Users/<user>/.claude/` (when collected from macOS endpoints)
 
-Each message becomes a timeline row with **Timestamp**, **Role**, **RecordType**, **Summary**, **FullText**, **ToolName**, **SessionId**, **Model**, token counts (when present), **IsSidechain**, **GitBranch**, **SourceFile**, and a **Description** column for search and review. Claude session files also surface non-chat events (file snapshots, system/compaction markers, attachments, and similar).
+Each message becomes a timeline row with **Timestamp**, **Role**, **RecordType**, **Summary**, **FullText**, **InvokedTool**, **SessionId**, **Model**, token counts (when present), **IsSidechain**, **GitBranch**, **SourceFile**, and a **Description** column for search and review. Claude session files also surface non-chat events (file snapshots, system/compaction markers, attachments, and similar).
 
 When both `history.jsonl` and session JSONL contain the same prompt, the session copy is kept and the history duplicate is dropped.
 
@@ -163,7 +169,7 @@ All sources merge into **one** **AI Query History** tab with the KAPE profile (a
 
 Use this for a live Mac triage without a KAPE folder, or to sanity-check what is on your own machine before collecting from an endpoint.
 
-**Empty collection folder:** If discovery finds no AI stores, the modal shows an **expected paths checklist** (Windows / Linux / macOS), flags when `Users\` or `home/` exists but AI paths were not collected, and offers **Open Triage Collection…** on the same folder to parse EVTX, Prefetch, registry hives, and AI kinds from a second manifest.
+**Empty collection folder:** If discovery finds no AI stores, the modal shows an **expected paths checklist** (Windows / Linux / macOS), flags when `Users\` or `home/` exists but AI paths were not collected, and suggests the AI assistant paths to add to the collection before rescanning.
 
 **Stale app session:** If discovery falls back to an older IPC channel, a banner asks you to quit and restart IRFlow so preload loads `discoverAiHistoryProfile`.
 
@@ -203,13 +209,6 @@ Use this for a live Mac triage without a KAPE folder, or to sanity-check what is
 
 IRFlow opens a new timeline tab with all extracted messages.
 
-### Triage collection
-
-1. **File → Platforms → Windows → Open Triage Collection…**
-2. Scan a KAPE or live-response folder.
-3. Enable AI history kinds (pre-selected when found, including **ChatGPT Desktop** — marked **heavy**). Uncheck ChatGPT if you only want lightweight stores. Same tools are auto-extracted by **Scan AI Artifacts** when present.
-4. **Parse Selected** — by default **Single AI Query History tab** is checked: all selected AI sources merge into one tab (same as Scan AI Artifacts; **Tool** column distinguishes sources). Uncheck to open **one tab per tool** (e.g. separate Claude Code and ChatGPT tabs).
-
 ## Large trees and performance
 
 - **File → Open** on a `.claude` or `.codex` folder skips **`subagents/`** session paths by default (main thread only). This keeps triage imports fast on hosts with 80k+ JSONL lines.
@@ -218,11 +217,11 @@ IRFlow opens a new timeline tab with all extracted messages.
 
 ### Extraction safeguards
 
-- **Cancel** — profile and triage AI imports run in a worker thread; cancel uses a per-job abort check so a second import is not stopped by an earlier cancel.
-- **Row cap** — merged profile/triage extracts stop ingesting after **3,000,000** rows; the tab notice reports when the cap was hit.
+- **Cancel** — profile imports run in a worker thread; cancel uses a per-job abort check so a second import is not stopped by an earlier cancel.
+- **Row cap** — merged profile extracts stop ingesting after **3,000,000** rows; the tab notice reports when the cap was hit.
 - **Malformed JSONL** — Claude, Codex, and Cursor parsers count lines that fail JSON parse; the import notice reports the total so you know data may be incomplete.
-- **Scope confinement** — when you pick a triage/KAPE folder or a collection root for AI extract, discovered artifact paths must resolve **inside** that folder; paths outside the scope (including `..` traversal) are dropped. The same confinement applies whenever a **browse folder** path is set on **Scan AI Artifacts**, even if discovery also probed standard local paths.
-- **Path authorization** — folders and files chosen in **File → Open**, **Tools → AI Artifacts**, **Scan AI Artifacts** (browse), and **Open Triage Collection** are registered in a scoped allow-list before read (same model as Sigma/KAPE scan targets). Renderer-supplied paths that were not picked in-app are rejected.
+- **Scope confinement** — when you pick a KAPE folder or collection root for AI extract, discovered artifact paths must resolve **inside** that folder; paths outside the scope (including `..` traversal) are dropped. The same confinement applies whenever a **browse folder** path is set on **Scan AI Artifacts**, even if discovery also probed standard local paths.
+- **Path authorization** — folders and files chosen in **File → Open**, **Tools → AI Artifacts**, and **Scan AI Artifacts** (browse) are registered in a scoped allow-list before read (same model as Sigma/KAPE scan targets). Renderer-supplied paths that were not picked in-app are rejected.
 
 ## Export for reporting
 
@@ -238,7 +237,7 @@ Share the folder with counsel or attach it to a case folder; re-hash sources ind
 
 ## Investigation tips
 
-- On an **AI Query History** tab, use the **AI hunt** preset chips (credentials, internal IP, PowerShell, etc.) in the filter bar, or **Row Detail → Filter session** / **Correlate path** (jumps to open Prefetch, Program Execution, or EVTX tabs with a column filter on the workspace executable/path).
+- On an **AI Query History** tab, use the **AI hunt** preset chips (credentials, internal IP, PowerShell, etc.) in the filter bar, or **Row Detail → Filter session** / **Correlate path** (jumps to open Prefetch, EVTX/Sigma, or Amcache tabs with a column filter on the workspace executable/path).
 - **FullText** holds the complete message when **Summary** is truncated; Row Detail also prefers FullText for Summary cells. **Export AI History Package** always includes **FullText** in the CSV even if the column is hidden in the grid.
 - Merged profile scans **dedupe identical prompts across tools** (same role + message text) so Claude and Cursor duplicates collapse to one row. Provenance is preserved: the kept row's **AlsoInTools** column lists every tool the prompt appeared in (e.g. `Claude Code, Cursor`), so the merge never hides which assistants ran the same prompt.
 - **Copilot** replays JSONL `kind:0` / `kind:2` / `kind:1` lines, falls back to sibling `.jsonl` when `.json` is empty, and scans `emptyWindowChatSessions`.
@@ -250,12 +249,12 @@ Share the folder with counsel or attach it to a case folder; re-hash sources ind
 
 ## Extraction safeguards
 
-Large profile scans, triage **Collect AI histories**, and merged folder extracts share the same merge pipeline:
+Large profile scans, **Scan AI Artifacts**, and merged folder extracts share the same merge pipeline:
 
-- **Cancel** — Stop during profile scan or triage collection; the worker passes an abort token so parsing stops promptly (not only after the merge phase).
+- **Cancel** — Stop during profile scans and folder-based AI artifact scans; the worker passes an abort token so parsing stops promptly (not only after the merge phase).
 - **Row cap** — Merged timelines stop at **3,000,000** message rows by default; the import notice reports truncation and any skipped sources.
 - **Parse errors** — Malformed JSONL lines (Claude Code, Codex, Cursor agent transcripts) are skipped and counted; the import notice reports how many lines failed.
-- **Folder scope** — When you scan or collect from a chosen folder (KAPE output, triage root, profile **folder** mode), discovered AI roots must lie under that directory; paths outside the scope are dropped.
+- **Folder scope** — When you scan a chosen folder (KAPE output, triage root, mounted disk, or copied profile folder), discovered AI roots must lie under that directory; paths outside the scope are dropped.
 
 ## Limitations
 
