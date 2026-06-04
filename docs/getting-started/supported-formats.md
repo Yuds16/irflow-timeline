@@ -206,7 +206,9 @@ Users\<user>\AppData\Local\Microsoft\Terminal Server Client\Cache
 
 **Inputs:** app-data folders, KAPE / triage collection roots, `.jsonl`, `.json`, `.db`, `.sqlite`, `.sqlite3`, `.ldb`, and `.log` files from supported AI apps.
 
-AI app evidence is handled through **Tools → AI Artifacts → Collect AI Artifacts** or by opening a supported app-data folder directly. IRFlow Timeline parses local AI history into a normal timeline tab so prompts, responses, tool calls, session IDs, workspace paths, source evidence, and possible secret exposure can be searched, tagged, and exported.
+AI app evidence is handled through **Tools → Analysis → AI Artifacts → Collect AI Artifacts** or by opening a supported app-data folder directly (**AI Apps** submenu for single-tool imports). IRFlow Timeline parses local AI history into a normal timeline tab so prompts, responses, tool calls, session IDs, workspace paths, source evidence, and possible secret exposure can be searched, tagged, and exported.
+
+![Tools → Analysis → AI Artifacts with Collect AI Artifacts and AI Apps](/dfir-tips/Tools-Menu-AI-Artifacts.png)
 
 Supported AI app families include:
 

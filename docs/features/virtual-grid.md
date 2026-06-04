@@ -59,7 +59,7 @@ Select a row, then choose **Actions → Pivot ±N Minutes** to open the proximit
 
 The **Tools** menu is organized into four sections so timeline-wide analytics stay separate from platform-specific forensics as IRFlow scales beyond Windows.
 
-![Tools menu with Analysis, Detection, Platforms (Windows, Linux, macOS, Cloud), and Export sections](/dfir-tips/Analysis-Button-NewUI.png)
+![Tools → Analysis → AI Artifacts with Collect AI Artifacts and the AI Apps submenu](/dfir-tips/Tools-Menu-AI-Artifacts.png)
 
 #### Analysis
 
@@ -71,12 +71,17 @@ Timeline-wide analytics that work on any imported tab (CSV, EVTX, XLSX, Plaso, e
 | **Tools → Analysis → Gap Analysis** | Detect periods of unusual inactivity in the timeline |
 | **Tools → Analysis → Log Sources** | Gantt-style heatmap of log source coverage across time |
 | **Tools → Analysis → Burst Detection** | Identify abnormal spikes in event volume |
+| **Tools → Analysis → AI Artifacts → Collect AI Artifacts** | Discover and merge local AI assistant stores (this Mac or a KAPE/triage folder) into one **AI Query History** tab |
+| **Tools → Analysis → AI Artifacts → AI Apps → …** | Per-app import for Claude Code, Codex, ChatGPT Desktop, Gemini CLI, Cursor, Copilot, Windsurf, and Continue |
 
 #### Detection
+
+![Tools → Detection with Sigma Scan and AI Secret Hunt](/dfir-tips/Tools-Menu-Detection-AI-Secret-Hunt.png)
 
 | Menu path | Description |
 |-----------|-------------|
 | **Tools → Detection → Sigma Scan** | Dual-engine Sigma detection — Hayabusa over raw EVTX folders or the in-app JS engine on imported timelines |
+| **Tools → Detection → AI Secret Hunt** | Scan an **AI Query History** tab for exposed API keys, tokens, private keys, and PII (redacted-by-default findings) |
 
 #### Platforms
 

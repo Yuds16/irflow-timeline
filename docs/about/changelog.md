@@ -8,7 +8,7 @@ description: IRFlow Timeline changelog — version history, new features, perfor
 
 ### New Features
 
-- **AI Artifacts / AI Query History** — New **Tools → AI Artifacts → Collect AI Artifacts** workflow for turning local AI assistant activity into timeline evidence
+- **AI Artifacts / AI Query History** — New **Tools → Analysis → AI Artifacts → Collect AI Artifacts** workflow for turning local AI assistant activity into timeline evidence
   - Parses prompts, assistant responses, invoked tool/action records, timestamps, sessions, workspace paths, source files, models, and endpoint user/host attribution when available
   - Supports Claude Code, OpenAI Codex, ChatGPT Desktop, Gemini CLI, Cursor, GitHub Copilot, Windsurf, and Continue
   - Scans the current Mac or a selected KAPE / triage / mounted-disk folder across Windows, Linux, and macOS profile layouts

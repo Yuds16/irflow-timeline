@@ -156,9 +156,13 @@ Sessions are stored as `.json` or `.jsonl`. JSONL replays `kind: 0` / `kind: 2` 
 
 ## How to use it in IRFlow
 
+![Tools → Analysis → AI Artifacts with Collect AI Artifacts and the AI Apps submenu](/dfir-tips/Tools-Menu-AI-Artifacts.png)
+
 ### Collect AI Artifacts (all tools)
 
-**Tools → AI Artifacts → Collect AI Artifacts…** opens a progress modal with two targets:
+**Tools → Analysis → AI Artifacts → Collect AI Artifacts…** opens a progress modal with two targets:
+
+![Collect AI Artifacts target picker — This Mac or Browse folder for KAPE/triage collections](/dfir-tips/Collect-AI-Artifacts-Target.png)
 
 1. **This Mac** — the logged-in analyst profile (same paths as the table below).
 2. **Browse folder…** — KAPE collections, triage packages, mounted disks, or external drives. IRFlow walks the tree and matches **Windows** (`Users\<user>\…`, `AppData\Roaming\…`), **Linux** (`home/<user>/…`, `.config/…`), and **macOS** (`Users/<user>/Library/…`) layouts automatically.
@@ -177,42 +181,52 @@ Use this for a live Mac triage without a KAPE folder, or to sanity-check what is
 
 **Claude Code**
 
-1. **File → Open…** and select your `.claude` folder (recommended), or use **Tools → AI Artifacts → Claude Code…**
+1. **File → Open…** and select your `.claude` folder (recommended), or use **Tools → Analysis → AI Artifacts → AI Apps → Claude Code…**
 2. Dragging multiple `*.jsonl` files from the same `.claude` tree consolidates into **one** timeline tab (not one tab per file).
 3. Opening `history.jsonl` directly uses the AI history parser (proper `Timestamp`, `Role`, `Summary` columns) — not the generic CSV importer.
 
 **ChatGPT Desktop**
 
-1. **File → Open…** and select the app data folder (e.g. `~/Library/Application Support/com.openai.chat`), or **Tools → AI Artifacts → ChatGPT Desktop…**
+1. **File → Open…** and select the app data folder (e.g. `~/Library/Application Support/com.openai.chat`), or **Tools → Analysis → AI Artifacts → AI Apps → ChatGPT Desktop…**
 2. Selecting multiple `.ldb` / SQLite files from the same ChatGPT data folder merges into **one** tab.
 3. Hidden folders (e.g. under `Library/Application Support`) are visible in the open dialog by default.
 
 **OpenAI Codex**
 
-1. **File → Open…** and select your `~/.codex` folder (recommended), or **Tools → AI Artifacts → OpenAI Codex…**
+1. **File → Open…** and select your `~/.codex` folder (recommended), or **Tools → Analysis → AI Artifacts → AI Apps → OpenAI Codex…**
 2. Imports `history.jsonl` plus all `rollout-*.jsonl` under `sessions/` and `archived_sessions/` (deduped against session prompts).
 
 **Gemini CLI**
 
-1. **File → Open…** and select your `.gemini` folder (recommended), or **Tools → AI Artifacts → Gemini CLI…**
+1. **File → Open…** and select your `.gemini` folder (recommended), or **Tools → Analysis → AI Artifacts → AI Apps → Gemini CLI…**
 2. Multiple `session-*.json` files from the same `.gemini` tree consolidate into **one** tab.
 
 **Cursor**
 
-1. **File → Open…** and select your `~/.cursor` folder (recommended), or **Tools → AI Artifacts → Cursor…**
+1. **File → Open…** and select your `~/.cursor` folder (recommended), or **Tools → Analysis → AI Artifacts → AI Apps → Cursor…**
 2. Multiple agent-transcript `.jsonl` files consolidate into **one** tab. Subagent folders are skipped unless you choose **Include subagents**.
 
 **GitHub Copilot**
 
-1. **File → Open…** and select `workspaceStorage` or a specific `chatSessions` folder, or **Tools → AI Artifacts → GitHub Copilot…**
+1. **File → Open…** and select `workspaceStorage` or a specific `chatSessions` folder, or **Tools → Analysis → AI Artifacts → AI Apps → GitHub Copilot…**
 2. All sessions for each workspace hash are merged into **one** tab per import path.
+
+**Windsurf**
+
+1. **File → Open…** and select the Windsurf `User` folder (e.g. `~/Library/Application Support/Windsurf/User`), or **Tools → Analysis → AI Artifacts → AI Apps → Windsurf…**
+2. IRFlow reads `globalStorage/state.vscdb` and per-workspace `workspaceStorage/*/state.vscdb` chat keys; Cascade `.pb` bundles are inventoried but not decoded.
+
+**Continue**
+
+1. **File → Open…** and select `~/.continue` or a `sessions/` folder, or **Tools → Analysis → AI Artifacts → AI Apps → Continue…**
+2. Multiple `sessions/*.json` files from the same tree consolidate into **one** tab.
 
 IRFlow opens a new timeline tab with all extracted messages.
 
 ## Large trees and performance
 
 - **File → Open** on a `.claude` or `.codex` folder skips **`subagents/`** session paths by default (main thread only). This keeps triage imports fast on hosts with 80k+ JSONL lines.
-- **Tools → AI Artifacts → Claude Code / OpenAI Codex / Cursor** asks whether to include subagent content when you pick a directory: Claude `subagents/` folders and inline sidechains, Cursor `isSidechain` transcript lines, Codex forked threads (`parent_session_id` in session metadata).
+- **Tools → Analysis → AI Artifacts → AI Apps → Claude Code / OpenAI Codex / Cursor** asks whether to include subagent content when you pick a directory: Claude `subagents/` folders and inline sidechains, Cursor `isSidechain` transcript lines, Codex forked threads (`parent_session_id` in session metadata).
 - Import progress shows **per-source file** status (e.g. `Reading session-12.jsonl (12/340)`) while JSONL/SQLite is parsed, then row write progress.
 
 ### Extraction safeguards
@@ -221,7 +235,15 @@ IRFlow opens a new timeline tab with all extracted messages.
 - **Row cap** — merged profile extracts stop ingesting after **3,000,000** rows; the tab notice reports when the cap was hit.
 - **Malformed JSONL** — Claude, Codex, and Cursor parsers count lines that fail JSON parse; the import notice reports the total so you know data may be incomplete.
 - **Scope confinement** — when you pick a KAPE folder or collection root for AI extract, discovered artifact paths must resolve **inside** that folder; paths outside the scope (including `..` traversal) are dropped. The same confinement applies whenever a **browse folder** path is set on **Collect AI Artifacts**, even if discovery also probed standard local paths.
-- **Path authorization** — folders and files chosen in **File → Open**, **Tools → AI Artifacts**, and **Collect AI Artifacts** (browse) are registered in a scoped allow-list before read (same model as Sigma/KAPE scan targets). Renderer-supplied paths that were not picked in-app are rejected.
+- **Path authorization** — folders and files chosen in **File → Open**, **Tools → Analysis → AI Artifacts**, and **Collect AI Artifacts** (browse) are registered in a scoped allow-list before read (same model as Sigma/KAPE scan targets). Renderer-supplied paths that were not picked in-app are rejected.
+
+### AI Secret Hunt
+
+On an **AI Query History** tab, run **Tools → Detection → AI Secret Hunt** to scan prompts, responses, and tool output for API keys, tokens, private keys, credentials, and high-confidence secret patterns. Findings are **redacted by default** (cleartext is never written to disk). Group results by tool or session, tag rows for triage, jump to source evidence, and export a redacted PDF/HTML exposure brief or CSV.
+
+![Tools → Detection with AI Secret Hunt enabled on an AI Query History tab](/dfir-tips/Tools-Menu-Detection-AI-Secret-Hunt.png)
+
+![AI Secret Hunt results with grouped findings, severity, and redacted previews](/dfir-tips/AI-Secret-Hunt-Results.png)
 
 ## Export for reporting
 
@@ -237,7 +259,7 @@ Share the folder with counsel or attach it to a case folder; re-hash sources ind
 
 ## Investigation tips
 
-- On an **AI Query History** tab, use the **AI hunt** preset chips (credentials, internal IP, PowerShell, etc.) in the filter bar, or **Row Detail → Filter session** / **Correlate path** (jumps to open Prefetch, EVTX/Sigma, or Amcache tabs with a column filter on the workspace executable/path).
+- On an **AI Query History** tab, run **AI Secret Hunt** for credential and key exposure, then use **Row Detail → Filter session** / **Correlate path** (jumps to open Prefetch, EVTX/Sigma, or Amcache tabs with a column filter on the workspace executable/path).
 - **FullText** holds the complete message when **Summary** is truncated; Row Detail also prefers FullText for Summary cells. **Export AI History Package** always includes **FullText** in the CSV even if the column is hidden in the grid.
 - Merged profile scans **dedupe identical prompts across tools** (same role + message text) so Claude and Cursor duplicates collapse to one row. Provenance is preserved: the kept row's **AlsoInTools** column lists every tool the prompt appeared in (e.g. `Claude Code, Cursor`), so the merge never hides which assistants ran the same prompt.
 - **Copilot** replays JSONL `kind:0` / `kind:2` / `kind:1` lines, falls back to sibling `.jsonl` when `.json` is empty, and scans `emptyWindowChatSessions`.

@@ -61,6 +61,18 @@ Selected export (Actions → Export Selected Rows) includes only the checked row
 Enable the bookmark filter (`Cmd+B`) before exporting to create a file containing only your flagged rows.
 :::
 
+## AI History Package
+
+On an **AI Query History** tab, use **Tools → Export → Export AI History Package…** to write a case-ready folder:
+
+| File | Purpose |
+|------|---------|
+| `<tab>_timeline.csv` | Grid rows (respects filters, sort, and visible columns; **FullText** is always included) |
+| `manifest.json` | Each **SourceFile** path with row count, size, mtime, and SHA-256 (first 250 files hashed) |
+| `README.txt` | Short bundle description |
+
+Use **Tools → Export → Export Source Manifest…** when you only need the source inventory without the filtered timeline CSV. See [AI Query History](/dfir-tips/ai-query-history#export-for-reporting) for investigation context.
+
 ## HTML Reports
 
 Generate a formatted investigation report from your bookmarks and tags.

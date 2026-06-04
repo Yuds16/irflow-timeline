@@ -49,7 +49,7 @@ features:
 
 ## What's New
 
-- **[AI Artifacts and AI Query History](/dfir-tips/ai-query-history)** — New **Tools → AI Artifacts → Collect AI Artifacts** workflow for preserving AI-assisted activity as timeline evidence: user prompts, assistant responses, tool calls, session metadata, workspace paths, source files, and possible secret exposure from local AI apps
+- **[AI Artifacts and AI Query History](/dfir-tips/ai-query-history)** — New **Tools → Analysis → AI Artifacts → Collect AI Artifacts** workflow for preserving AI-assisted activity as timeline evidence: user prompts, assistant responses, tool calls, session metadata, workspace paths, source files, and possible secret exposure from local AI apps
 - **AI Secret Hunt** — Review AI history for exposed API keys, private keys, tokens, credentials, and other sensitive strings via **Tools → Detection → AI Secret Hunt**: redacted-by-default handling (cleartext never written to disk), analyst tags, source-row evidence, group-by tool/session, and a redacted PDF / HTML exposure brief (plus CSV export)
 - **AI app coverage** — Parses local history from Claude Code, OpenAI Codex, ChatGPT Desktop, Gemini CLI, Cursor, GitHub Copilot, Windsurf, and Continue, including KAPE/triage folder scans across Windows, Linux, and macOS profile layouts
 - **Sigma Detection (dual engine)** — Rule-based detection built into the app via **Tools → Detection → Sigma Scan**: the bundled [Hayabusa](https://github.com/Yamato-Security/hayabusa) engine scans raw `.evtx` folders at full speed, while an in-app JS Sigma engine scans imported timelines and EvtxECmd output. Includes scan presets, custom rule collections, MITRE ATT&CK-mapped triage, noisy-rule suppression, and persistent scan history
@@ -58,7 +58,9 @@ features:
 - **NTFS Analysis Tools** — Six tools for raw `$MFT` and `$J` files: ransomware scanning, timestomping detection, file activity heatmaps, ADS analysis, USN Journal forensics with [UsnJrnl Rewind](https://cybercx.com.au/blog/ntfs-usnjrnl-rewind/) path reconstruction (11 categories), and resident data extraction for recovering deleted threat actor artifacts
 - **VirusTotal Integration** — Single and bulk IOC lookups with persistent cache, configurable rate limiting, color-coded verdict badges, and auto-tagging. Bulk lookups are now cancellable mid-retry and stop automatically if the window closes
 - **Auto-Update** — In-app update notifications with download progress and one-click install
-- **Capability launcher** — Home-screen shortcuts into Process Inspector, Lateral Movement, Sigma, NTFS tools, and more
+- **Capability launcher** — Home-screen shortcuts into Process Inspector, Lateral Movement, Sigma, **Collect AI Artifacts**, NTFS tools, and more
+
+![Home capability launcher with Collect AI Artifacts](/dfir-tips/Home-Capability-Launcher-v107.png)
 
 [Full changelog →](/about/changelog)
 
