@@ -31,6 +31,12 @@ Before starting, ensure you have KAPE output collected with one of the common ta
 | **!EZParser** | Parses all collected artifacts using EZ Tools into CSV | MFTECmd, EvtxECmd, PECmd, LECmd, RECmd, AmcacheParser, SBECmd, AppCompatCacheParser, JLECmd |
 | **!SANS_Triage** | Extended parsing with timeline generation | All EZParser modules plus Hayabusa, mini-timeline creation |
 
+::: tip AI app evidence
+For v1.0.7 AI investigations, also collect local AI app history paths from user profiles before scanning the collection in IRFlow Timeline. Prioritize ChatGPT Desktop, Claude Code, OpenAI Codex, Cursor, GitHub Copilot, Gemini CLI, Windsurf, and Continue paths such as `.claude`, `.codex`, `.cursor`, `.gemini`, `.continue`, ChatGPT app-data folders, and VS Code-family `User/workspaceStorage/*/chatSessions/`.
+
+After collection, open **Tools → Analysis → AI Artifacts → Scan AI Artifacts** and choose the KAPE output, triage root, mounted disk, or copied profile folder. IRFlow walks Windows, Linux, and macOS profile layouts and merges discovered AI history into one **AI Query History** tab.
+:::
+
 ### Expected KAPE Output Directory Structure
 
 After a collection with `KapeTriage` targets and `!EZParser` modules, the output directory looks like this:
@@ -77,7 +83,7 @@ Use the [Multi-Tab](/workflows/multi-tab) workflow to load each major artifact t
 3. **MFTECmd output** -- file system metadata for file creation and modification
 4. **AmcacheParser output** -- application execution evidence with hashes
 
-Open each CSV file and IRFlow Timeline will apply the correct [KAPE profile](/workflows/kape-integration) automatically, pinning and ordering columns for that artifact type.
+Open each CSV file and IRFlow Timeline will apply the correct [KAPE profile](/workflows/kape-integration) automatically, ordering columns and hiding noise fields for that artifact type.
 
 ### 2. Set the investigation time window
 

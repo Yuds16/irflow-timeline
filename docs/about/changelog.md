@@ -4,6 +4,34 @@ description: IRFlow Timeline changelog — version history, new features, perfor
 
 # Changelog
 
+## v1.0.7 — June 4, 2026
+
+### New Features
+
+- **AI Artifacts / AI Query History** — New **Tools → Analysis → AI Artifacts → Scan AI Artifacts** workflow for turning local AI assistant activity into timeline evidence
+  - Parses prompts, assistant responses, invoked tool/action records, timestamps, sessions, workspace paths, source files, models, and endpoint user/host attribution when available
+  - Supports Claude Code, OpenAI Codex, ChatGPT Desktop, Gemini CLI, Cursor, GitHub Copilot, Windsurf, and Continue
+  - Scans the current Mac or a selected KAPE / triage / mounted-disk folder across Windows, Linux, and macOS profile layouts
+  - Merges discovered sources into one **AI Query History** tab with consistent columns and provenance fields
+
+- **AI Secret Scan** — New review workflow for finding sensitive data exposed through AI history
+  - Detects API keys, private keys, tokens, credentials, and high-confidence secret patterns across prompts, responses, and tool output
+  - Groups repeated evidence by fingerprint, redacts cleartext by default, and supports analyst tagging for triage
+  - Exports tagged secret findings to CSV for reporting
+
+### Data Quality
+
+- **AI history parser hardening** — Improved timestamp normalization, `Summary` versus `FullText` handling, `Tool` versus `InvokedTool` column naming, and source-row attribution across AI app parsers
+- **False-positive reduction** — Tightened credit-card and high-entropy secret detection so placeholder identifiers, directory paths, and non-secret strings are less likely to appear as findings
+- **Private key evidence handling** — Multi-line PEM-style findings preserve expanded block context instead of collapsing to a one-line preview
+
+### Performance and Stability
+
+- **Large AI History tabs** — Scroll-window handling and streamed import behavior were hardened for 100k+ row AI History tabs
+- **Extraction UI polish** — Progress, expanded evidence rows, tag controls, source paths, and reveal/copy controls were cleaned up to reduce renderer jank during long AI artifact scans
+
+---
+
 ## v1.0.6 — June 1, 2026
 
 ### New Features

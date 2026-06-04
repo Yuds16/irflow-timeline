@@ -58,7 +58,7 @@ export default defineConfig({
       { text: 'Reference', link: '/reference/keyboard-shortcuts' },
       { text: 'Author', link: '/about/author' },
       {
-        text: 'v1.0.6',
+        text: 'v1.0.7',
         items: [
           { text: 'Changelog', link: '/about/changelog' },
           { text: 'Roadmap', link: '/about/roadmap' },
@@ -139,6 +139,7 @@ export default defineConfig({
         {
           text: 'DFIR Tips & Tricks',
           items: [
+            { text: 'AI Query History & AI App Artifacts', link: '/dfir-tips/ai-query-history' },
             { text: 'Ransomware Investigation', link: '/dfir-tips/ransomware-investigation' },
             { text: 'Lateral Movement Tracing', link: '/dfir-tips/lateral-movement-tracing' },
             { text: 'Malware Execution Analysis', link: '/dfir-tips/malware-execution-analysis' },
