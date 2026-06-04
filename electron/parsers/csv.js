@@ -287,6 +287,20 @@ function scanCSVRecords(str, onRecord) {
 }
 
 /**
+ * Count DATA records (header excluded) in CSV text, quote-aware — a record ends only at a newline
+ * OUTSIDE quotes, so an embedded-newline field doesn't inflate the count, and blank lines don't
+ * count (scanCSVRecords skips length-0 records). Used to detect a parser that ran but emitted an
+ * empty / header-only CSV. Returns 0 for empty or header-only input.
+ */
+function countCsvDataRows(text) {
+  if (!text) return 0;
+  let recs = 0;
+  const tail = scanCSVRecords(String(text), () => { recs++; });
+  if (tail) recs++; // final record when the text lacks a trailing newline
+  return recs > 1 ? recs - 1 : 0; // minus the header record
+}
+
+/**
  * Stream-parse a CSV/TSV file and insert into TimelineDB
  * Uses raw chunk processing instead of readline for maximum throughput.
  *
@@ -580,6 +594,9 @@ async function parseCSVStream(filePath, tabId, db, onProgress) {
 module.exports = {
   parseCSVLine,
   parseCSVStream,
+  scanCSVRecords,
+  countCsvDataRows,
+  stripTrailingCR,
   detectDelimiter,
   detectEncoding,
   BATCH_SIZE_DEFAULT,

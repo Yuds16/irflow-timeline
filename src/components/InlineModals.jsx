@@ -136,7 +136,7 @@ export function ColModal({ th, ct, up, ms, colMgrSearch, setColMgrSearch, colMgr
       </div>
       <input
         type="text"
-        placeholder="Search columns…"
+        placeholder="Search columns"
         value={colMgrSearch}
         onChange={(e) => setColMgrSearch(e.target.value)}
         style={{ ...ms.ip, marginBottom: 8 }}
@@ -242,11 +242,17 @@ export function ImportProgress({ th, info }) {
   const importQueue = useTabStore((s) => s.importQueue);
   const queueLen = importQueue.length;
   const phase = info?.phase || (info?.status === "indexing" ? "finalizing" : "parsing");
-  const phaseLabel = phase === "finalizing"
-    ? "Finalizing SQLite timeline..."
-    : phase === "parsing"
-      ? "Reading and importing events..."
-      : "Preparing import...";
+  const phaseLabel = info?.statusDetail
+    ? info.statusDetail
+    : phase === "finalizing"
+      ? "Finalizing SQLite timeline..."
+      : phase === "extracting"
+        ? "Extracting AI history sources..."
+        : phase === "loading"
+          ? "Writing timeline rows..."
+          : phase === "parsing"
+            ? "Reading and importing events..."
+            : "Preparing import...";
   const percent = Math.max(0, Math.min(100, Number.isFinite(info?.percent) ? info.percent : 0));
   const byteTotal = info?.totalBytes || info?.fileSize || 0;
   const hasByteProgress = byteTotal > 0 && Number.isFinite(info?.bytesRead);

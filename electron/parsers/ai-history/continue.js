@@ -68,10 +68,15 @@ function textFromContinueMessage(msg) {
   return "";
 }
 
+// Cap an untrusted session .json before buffering it whole (parity with vscdb-kv 32MB / chatgpt 64MB)
+// so a large/inflated Continue session can't OOM the worker.
+const MAX_SESSION_JSON_BYTES = 32 * 1024 * 1024;
+
 function extractContinueSessionFile(filePath, attribution = {}) {
   const rows = [];
   let data;
   try {
+    if (fs.statSync(filePath).size > MAX_SESSION_JSON_BYTES) { dbg("AIHIST", "skip large continue session", { path: filePath }); return rows; }
     data = JSON.parse(fs.readFileSync(filePath, "utf8"));
   } catch {
     return rows;

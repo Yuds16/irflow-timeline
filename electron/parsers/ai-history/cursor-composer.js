@@ -17,6 +17,7 @@ const {
   openVscdbReadOnly,
   listComposerDataRows,
   loadBubblesForComposer,
+  loadBubbleMapForComposer,
   parseKvValue,
   findVscdbFilesUnder,
   readWorkspaceJsonMap,
@@ -132,17 +133,15 @@ function extractComposerSessionRows(compData, composerId, db, dbPath, attributio
   }
 
   if (headers.length) {
+    // Bulk-load this composer's bubbles in ONE scoped query, then look up per header by key —
+    // replaces the prior per-header `SELECT … WHERE key = ?` (N+1: 100+ round-trips for a long session).
+    const bubbleMap = loadBubbleMapForComposer(db, composerId);
     let idx = 0;
     for (const h of headers) {
       idx += 1;
       const bubbleId = h.bubbleId || h.id;
       if (!bubbleId) continue;
-      const key = `bubbleId:${composerId}:${bubbleId}`;
-      let bubble = null;
-      try {
-        const row = db.prepare("SELECT value FROM cursorDiskKV WHERE key = ?").get(key);
-        if (row) bubble = parseKvValue(row.value);
-      } catch { /* ignore */ }
+      const bubble = bubbleMap.get(`bubbleId:${composerId}:${bubbleId}`) || null;
       const row = parseBubbleRow(
         bubble || { type: h.type, text: "" },
         composerId,

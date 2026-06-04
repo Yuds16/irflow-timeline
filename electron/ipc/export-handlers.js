@@ -488,6 +488,25 @@ module.exports = function registerExportHandlers(safeHandle, safeSend, { db, _ac
     }
   });
 
+  // Export AI Secret & Leak Scan exposure brief as PDF (redacted HTML → printToPDF)
+  safeHandle("export-ai-secrets-pdf", async (event, { html, defaultName }) => {
+    const result = await dialog.showSaveDialog(_activeWindow(), {
+      defaultPath: defaultName || "ai-secret-exposure-brief.pdf",
+      filters: [{ name: "PDF Document", extensions: ["pdf"] }],
+    });
+    if (result.canceled) return null;
+    const win = new BrowserWindow({ show: false, width: 900, height: 1200, webPreferences: { offscreen: true, nodeIntegration: false, contextIsolation: true, sandbox: true } });
+    try {
+      await win.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(html));
+      await new Promise((r) => setTimeout(r, 500));
+      const pdfBuf = await win.webContents.printToPDF({ printBackground: true, preferCSSPageSize: true, margins: { top: 0, bottom: 0, left: 0, right: 0 } });
+      await fsp.writeFile(result.filePath, pdfBuf);
+      return { filePath: result.filePath };
+    } finally {
+      win.destroy();
+    }
+  });
+
   // Generate HTML report from bookmarked/tagged events
   safeHandle("generate-report", async (event, { tabId, fileName, tagColors, vtEnrichment }) => {
     const reportData = db.getReportData(tabId);

@@ -190,7 +190,7 @@ async function _processQueue() {
     dbg("QUEUE", `Starting import: ${item.fileName}`, { heapMB: Math.round(memBefore.heapUsed / 1048576), rssMB: Math.round(memBefore.rss / 1048576), queueRemaining: _importQueue.length });
 
     try {
-      await importFile(item.filePath, item.tabId, item.sheetName);
+      await importFile(item.filePath, item.tabId, item.sheetName, item);
     } catch (err) {
       dbg("QUEUE", `importFile failed for ${item.fileName}`, { error: err?.message });
       // Notify renderer so it can dismiss the loading state for this file
@@ -424,6 +424,23 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
 
+  const wc = mainWindow.webContents;
+  wc.on("render-process-gone", (_event, details) => {
+    dbg("CRASH", "Renderer process gone", { reason: details?.reason, exitCode: details?.exitCode });
+    try {
+      dialog.showErrorBox(
+        "IRFlow Timeline — Display Error",
+        `The timeline view stopped unexpectedly (${details?.reason || "unknown"}).\n\nIf this happened after a large import, quit and restart IRFlow, then reopen the file. Debug log: ${debugLogPath}`
+      );
+    } catch (_) {}
+  });
+  wc.on("unresponsive", () => {
+    dbg("CRASH", "Renderer became unresponsive");
+  });
+  wc.on("responsive", () => {
+    dbg("CRASH", "Renderer responsive again");
+  });
+
   mainWindow.once("ready-to-show", () => {
     mainWindow.show();
     if (app.pendingFilePath) {
@@ -440,14 +457,14 @@ function createWindow() {
 
 // ── File import (delegated to electron/import.js) ──────────────────
 const { importFile: _importFile } = require("./import");
-async function importFile(filePath, preTabId, preSheetName) {
+async function importFile(filePath, preTabId, preSheetName, queueItem = {}) {
   return _importFile(filePath, preTabId, preSheetName, {
     mainWindow, safeSend, activeWindow: _activeWindow, db,
     getXLSXSheets, enqueueImport, runImportJob, scheduleIndexBuild,
     importQueue: _importQueue, pendingIndexTabs: _pendingIndexTabs,
     tabMeta: _tabMeta,
     nextTabId: () => `tab_${++tabCounter}_${Date.now()}`,
-  });
+  }, queueItem);
 }
 
 function _descriptorsForTabs(tabIds) {
@@ -502,6 +519,7 @@ registerAll(safeHandle, safeSend, {
   startAnalyzerJob,
   scheduleIndexBuild,
   nextTabId: () => `tab_${++tabCounter}_${Date.now()}`,
+  _newTempDbPath,
   extractResidentData,
   updateController,
   mainWindow: { isDestroyed() { return !mainWindow || mainWindow.isDestroyed(); } },

@@ -8,6 +8,7 @@ const fs = require("fs");
 const TimelineDB = require("../db");
 const { AI_HISTORY_COLUMNS } = require("../parsers/ai-history/schema");
 const { extractMergedAiHistoryRootsToDb } = require("../parsers/ai-history/profile-scan");
+const { buildCopilotEmptyExtractError } = require("../parsers/ai-history/import-meta");
 
 let cancelled = false;
 
@@ -59,6 +60,7 @@ async function runExtract() {
     const {
       rowCount,
       importNotice,
+      importMeta,
       failures,
     } = await extractMergedAiHistoryRootsToDb(
       db,
@@ -76,13 +78,16 @@ async function runExtract() {
     if (!rowCount) {
       cleanupDb(db, tabId);
       unlinkTempDb(dbPath);
+      const copilotDetail = buildCopilotEmptyExtractError(importMeta?.copilot);
       parentPort.postMessage({
         type: "result",
         result: {
-          error: failures?.length
-            ? failures.map((f) => `${f.label}: ${f.error}`).join("; ")
-            : "Sources were found but contained no message rows.",
+          error: copilotDetail
+            || (failures?.length
+              ? failures.map((f) => `${f.label}: ${f.error}`).join("; ")
+              : "Sources were found but contained no message rows."),
           failures: failures || [],
+          importMeta: importMeta || null,
         },
       });
       return;

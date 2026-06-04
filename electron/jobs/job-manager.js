@@ -1,5 +1,6 @@
 const path = require("path");
 const { Worker } = require("worker_threads");
+const { workerResourceLimits } = require("../utils/worker-heap");
 
 class JobManager {
   constructor({ safeSend, dbg }) {
@@ -29,6 +30,7 @@ class JobManager {
 
     const thread = new Worker(workerPath, {
       workerData: { ...workerData, jobId, type },
+      resourceLimits: workerResourceLimits(),
     });
     job.worker = thread;
 

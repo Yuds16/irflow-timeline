@@ -17,6 +17,7 @@ const os = require("os");
 
 const { dbg } = require("../../logger");
 const { shouldSkipSubagentPath, filterSidechainRows, tickFileProgress } = require("./extract-plan");
+const { processFilesConcurrently } = require("./file-batch");
 const { TOOL_CODEX } = require("./schema");
 const {
   formatTimestampUtc,
@@ -551,30 +552,49 @@ async function extractCodexDir(codexRoot, attribution = {}, options = {}) {
     }
   }
 
-  for (const rolloutPath of rolloutPaths) {
-    fileIndex += 1;
-    tickFileProgress(onFileProgress, fileIndex, fileCount, rolloutPath);
-    try {
-      emitBatch(await extractCodexRolloutFile(rolloutPath, threadIndex, attribution, parseStats));
-    } catch (e) {
-      dbg("AIHIST", "codex rollout failed", { path: rolloutPath, err: e.message });
-    }
-    if (fileIndex % 8 === 0) await new Promise((r) => setImmediate(r));
-  }
+  // Read rollout files in bounded-concurrency batches (threadIndex is a read-only map; sink dedupes +
+  // DB/finalize sorts, so order is irrelevant). Per-file error isolation + progress preserved.
+  await processFilesConcurrently(rolloutPaths, {
+    process: (rolloutPath) => extractCodexRolloutFile(rolloutPath, threadIndex, attribution, parseStats),
+    onProgress: (rolloutPath) => { fileIndex += 1; tickFileProgress(onFileProgress, fileIndex, fileCount, rolloutPath); },
+    onRows: (batch) => emitBatch(batch),
+    onError: (e, rolloutPath) => dbg("AIHIST", "codex rollout failed", { path: rolloutPath, err: e.message }),
+    checkAbort: options.checkAbort,
+  });
 
   const { supplementCodexFromStateSqlite } = require("./codex-state-sqlite");
   const { rows: sqliteRows, stats: sqliteStats } = supplementCodexFromStateSqlite(codexRoot, attribution, options);
   if (sqliteRows.length) emitBatch(sqliteRows);
 
+  let vscodeAgentStats = null;
+  const needsVsCodeAgentSupplement = rows.length < 8;
+  if (needsVsCodeAgentSupplement) {
+    try {
+      const { supplementCodexFromVsCodeAgentSessions } = require("./vscode-chat-db");
+      const { dedupeAiHistoryRows } = require("./row-utils");
+      const { rows: vsRows, stats: vsStats } = await supplementCodexFromVsCodeAgentSessions(attribution, options);
+      if (vsRows.length) {
+        const merged = dedupeAiHistoryRows([...rows, ...vsRows]);
+        rows.length = 0;
+        rows.push(...merged);
+        vscodeAgentStats = vsStats;
+      }
+    } catch (e) {
+      dbg("AIHIST", "codex vscode agent supplement failed", { err: e.message });
+    }
+  }
+
   if (onExtractedRows) {
     const out = [];
     if (sqliteStats) out._codexStateSqliteStats = sqliteStats;
+    if (vscodeAgentStats) out._codexVsCodeAgentStats = vscodeAgentStats;
     if (parseStats.errors) out._parseErrors = parseStats.errors;
     return out;
   }
 
   const finalized = finalizeAiHistoryRows(filterSidechainRows(rows, options), options);
   if (sqliteStats) finalized._codexStateSqliteStats = sqliteStats;
+  if (vscodeAgentStats) finalized._codexVsCodeAgentStats = vscodeAgentStats;
   if (parseStats.errors) finalized._parseErrors = parseStats.errors;
   return finalized;
 }

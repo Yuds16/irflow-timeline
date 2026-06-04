@@ -1,4 +1,5 @@
 const { dialog } = require("electron");
+const { openDialogOptions } = require("../../utils/open-dialog");
 
 module.exports = function registerSigmaHistoryHandlers(ctx) {
   const {
@@ -67,11 +68,11 @@ module.exports = function registerSigmaHistoryHandlers(ctx) {
     const record = scanHistory.getScanHistory(historyId);
     if (!record) return { error: "Scan history record not found" };
     const win = typeof _activeWindow === "function" ? _activeWindow() : null;
-    const result = await dialog.showOpenDialog(win, {
+    const result = await dialog.showOpenDialog(win, openDialogOptions({
       properties: ["openDirectory", "createDirectory"],
       title: "Export Scan Package",
       message: "Choose a folder where IRFlow should create the scan package",
-    });
+    }));
     if (result.canceled || !result.filePaths?.length) return { canceled: true };
     return scanHistory.exportScanPackage(historyId, result.filePaths[0]);
   });

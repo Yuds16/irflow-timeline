@@ -7,6 +7,7 @@ const path = require("path");
 const crypto = require("crypto");
 const { app, dialog } = require("electron");
 const { PathAuthorizer } = require("../utils/path-authorizer");
+const { openDialogOptions } = require("../utils/open-dialog");
 const registerSigmaHistoryHandlers = require("./sigma/history-handlers");
 const registerSigmaResultActionHandlers = require("./sigma/result-action-handlers");
 const registerSigmaRuleSettingsHandlers = require("./sigma/rule-settings-handlers");
@@ -381,6 +382,8 @@ module.exports = function registerSigmaHandlers(safeHandle, safeSend, { db, next
   async function _importJobAsTab(rows, name, options = {}) {
     if (!rows || rows.length === 0) return { error: "No rows to import" };
     const postAction = _normalizeResultTabPostAction(options.postAction);
+    const sourceFormat = options.sourceFormat || null;
+    const importNotice = options.importNotice || null;
     const PRIORITY = ["Timestamp", "Computer", "Channel", "EventID", "Level", "RuleTitle", "SigmaRuleTitle", "SigmaRuleId", "SourceTabId", "SourceRowId", "User", "MITRE",
       "Image", "CommandLine", "Cmdline", "Proc", "ParentImage", "ParentCmdline",
       "TargetFilename", "TargetObject", "ServiceName", "Hashes",
@@ -452,11 +455,12 @@ module.exports = function registerSigmaHandlers(safeHandle, safeSend, { db, next
       initialRows: initialData.rows,
       totalFiltered: initialData.totalFiltered,
       emptyColumns,
-      sourceFormat: null,
+      sourceFormat,
       resolveStats: null,
       bookmarkedRowIds: postAction.bookmark ? initialRowIds : [],
       rowTags: postAction.tag ? _buildImportedRowTags(initialRowIds, postAction.tag) : {},
       tagColors: importedTagColors || null,
+      importNotice,
     });
     if (scheduleIndexBuild) scheduleIndexBuild(tabId);
     emit("importing-tab-done", total, "Tab ready — building indexes in background");
@@ -744,17 +748,18 @@ module.exports = function registerSigmaHandlers(safeHandle, safeSend, { db, next
 
   // Open Sigma scan results directly as a new tab. Backward-compatible: accepts
   // either a jobId (new path — rows on backend) or rows (legacy fallback).
-  safeHandle("sigma-open-as-tab", async (event, { rows, name, jobId } = {}) => {
+  safeHandle("sigma-open-as-tab", async (event, { rows, name, jobId, sourceFormat, importNotice, postAction } = {}) => {
+    const tabOptions = { sourceFormat, importNotice, postAction };
     if (jobId) {
       const job = _resolveJob(jobId);
       if (job?.resultDbPath) return _importResultStoreAsTab(job, name);
       if (!job?.rows || job.rows.length === 0) return { error: "No scan results to open" };
-      const result = await _importJobAsTab(job.rows, name);
+      const result = await _importJobAsTab(job.rows, name, tabOptions);
       // Free job rows after successful import to release memory
       if (!result.error) job.rows = null;
       return result;
     }
-    return _importJobAsTab(rows, name);
+    return _importJobAsTab(rows, name, tabOptions);
   });
 
   // Get Hayabusa binary status (installed, version, path)
@@ -799,11 +804,11 @@ module.exports = function registerSigmaHandlers(safeHandle, safeSend, { db, next
   // Select an EVTX directory via native dialog
   safeHandle("sigma-select-evtx-dir", async () => {
     const win = typeof _activeWindow === "function" ? _activeWindow() : null;
-    const result = await dialog.showOpenDialog(win, {
+    const result = await dialog.showOpenDialog(win, openDialogOptions({
       properties: ["openDirectory"],
       title: "Select EVTX Directory",
       message: "Choose a folder containing .evtx files to scan with Hayabusa",
-    });
+    }));
     if (result.canceled || !result.filePaths?.length) return null;
     const dirPath = result.filePaths[0];
     _authorizeSelectedScanPath(dirPath);
@@ -819,14 +824,14 @@ module.exports = function registerSigmaHandlers(safeHandle, safeSend, { db, next
 
   safeHandle("sigma-select-kape-output", async () => {
     const win = typeof _activeWindow === "function" ? _activeWindow() : null;
-    const result = await dialog.showOpenDialog(win, {
+    const result = await dialog.showOpenDialog(win, openDialogOptions({
       properties: ["openFile", "multiSelections"],
       title: "Select EvtxECmd Output Files",
       message: "Choose one or more EvtxECmd CSV/XLS/XLSX output files",
       filters: [
         { name: "EvtxECmd Output Files", extensions: ["csv", "tsv", "xlsx", "xls", "xlsm"] },
       ],
-    });
+    }));
     if (result.canceled || !result.filePaths?.length) return null;
     for (const targetPath of result.filePaths) _authorizeSelectedKapePath(targetPath);
     const summary = summarizeKapeSelection(result.filePaths);
@@ -838,11 +843,11 @@ module.exports = function registerSigmaHandlers(safeHandle, safeSend, { db, next
 
   safeHandle("sigma-select-kape-output-folder", async () => {
     const win = typeof _activeWindow === "function" ? _activeWindow() : null;
-    const result = await dialog.showOpenDialog(win, {
+    const result = await dialog.showOpenDialog(win, openDialogOptions({
       properties: ["openDirectory"],
       title: "Find EvtxECmd Outputs in Folder",
       message: "Choose a folder to search recursively. Only validated EvtxECmd CSV/XLS/XLSX files will be accepted.",
-    });
+    }));
     if (result.canceled || !result.filePaths?.length) return null;
     const folderPath = result.filePaths[0];
     _authorizeSelectedKapePath(folderPath);
@@ -1191,11 +1196,11 @@ module.exports = function registerSigmaHandlers(safeHandle, safeSend, { db, next
   // Select a custom rules directory via native dialog
   safeHandle("sigma-select-rules-path", async () => {
     const win = typeof _activeWindow === "function" ? _activeWindow() : null;
-    const result = await dialog.showOpenDialog(win, {
+    const result = await dialog.showOpenDialog(win, openDialogOptions({
       properties: ["openDirectory"],
       title: "Select Custom Rules Directory",
       message: "Choose a folder containing Hayabusa/Sigma rules",
-    });
+    }));
     if (result.canceled || !result.filePaths?.length) return null;
     const selectedPath = result.filePaths[0];
     pathAuthorizer.authorize("hayabusa-rules", selectedPath, {
@@ -1212,11 +1217,11 @@ module.exports = function registerSigmaHandlers(safeHandle, safeSend, { db, next
   // Select a rules config file via native dialog
   safeHandle("sigma-select-rules-config", async () => {
     const win = typeof _activeWindow === "function" ? _activeWindow() : null;
-    const result = await dialog.showOpenDialog(win, {
+    const result = await dialog.showOpenDialog(win, openDialogOptions({
       properties: ["openFile"],
       title: "Select Rules Config File",
       filters: [{ name: "YAML Files", extensions: ["yml", "yaml"] }],
-    });
+    }));
     if (result.canceled || !result.filePaths?.length) return null;
     const selectedPath = result.filePaths[0];
     pathAuthorizer.authorize("hayabusa-rules-config", selectedPath, {
@@ -1258,11 +1263,11 @@ module.exports = function registerSigmaHandlers(safeHandle, safeSend, { db, next
   // Select a GeoIP database directory via native dialog
   safeHandle("sigma-select-geoip-dir", async () => {
     const win = typeof _activeWindow === "function" ? _activeWindow() : null;
-    const result = await dialog.showOpenDialog(win, {
+    const result = await dialog.showOpenDialog(win, openDialogOptions({
       properties: ["openDirectory"],
       title: "Select GeoIP Database Directory",
       message: "Choose a folder containing MaxMind GeoLite2 .mmdb files",
-    });
+    }));
     if (result.canceled || !result.filePaths?.length) return null;
     const selectedPath = result.filePaths[0];
     pathAuthorizer.authorize("geoip", selectedPath, {

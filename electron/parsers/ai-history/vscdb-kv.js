@@ -40,6 +40,8 @@ function kvTableNames(db) {
 // + full JSON.parse and OOM the worker, so refuse oversized values. 32MB is far above any
 // legitimate chat/composer KV blob.
 const MAX_KV_VALUE_BYTES = 32 * 1024 * 1024;
+/** Cap bubble rows loaded per composer — very long chats can hold 10k+ KV entries. */
+const MAX_BUBBLES_PER_COMPOSER = 4000;
 
 function parseKvValue(raw) {
   if (raw == null) return null;
@@ -123,10 +125,31 @@ function loadBubblesForComposer(db, composerId) {
   ).all(`bubbleId:${composerId}:%`);
   const out = [];
   for (const { value } of rows) {
+    if (out.length >= MAX_BUBBLES_PER_COMPOSER) break;
     const bubble = parseKvValue(value);
     if (bubble && typeof bubble === "object") out.push(bubble);
   }
   return out;
+}
+
+/**
+ * Load one composer's bubbles as a Map keyed by the FULL KV key (`bubbleId:<composerId>:<bubbleId>`),
+ * via ONE scoped LIKE query. Lets the header-ordered path look bubbles up by key instead of issuing a
+ * separate `SELECT … WHERE key = ?` per header (the old N+1 — 100+ round-trips for a long session).
+ */
+function loadBubbleMapForComposer(db, composerId) {
+  const map = new Map();
+  const tables = kvTableNames(db);
+  if (!tables.includes("cursorDiskKV") || !composerId) return map;
+  const rows = db.prepare(
+    "SELECT key, value FROM cursorDiskKV WHERE key LIKE ? ORDER BY rowid ASC",
+  ).all(`bubbleId:${composerId}:%`);
+  for (const { key, value } of rows) {
+    if (map.size >= MAX_BUBBLES_PER_COMPOSER) break;
+    const bubble = parseKvValue(value);
+    if (bubble && typeof bubble === "object") map.set(key, bubble);
+  }
+  return map;
 }
 
 function findVscdbFilesUnder(rootDir, opts = {}) {
@@ -190,6 +213,7 @@ module.exports = {
   loadCursorComposerKv,
   listComposerDataRows,
   loadBubblesForComposer,
+  loadBubbleMapForComposer,
   findVscdbFilesUnder,
   readWorkspaceJsonMap,
   safeCloseDb,

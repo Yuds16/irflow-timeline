@@ -13,6 +13,7 @@ const readline = require("readline");
 const { dbg } = require("../../logger");
 const { TOOL_CURSOR } = require("./schema");
 const { shouldSkipSubagentPath, filterSidechainRows, tickFileProgress } = require("./extract-plan");
+const { processFilesConcurrently } = require("./file-batch");
 const { extractContentText, extractContentParts } = require("./claude-code");
 const {
   formatWorkspaceDisplay,
@@ -142,39 +143,16 @@ function parseTranscriptLine(obj, filePath, attribution, lineNumber, fallbackTsM
   });
 }
 
-async function countTranscriptMessages(filePath, options = {}) {
-  const stream = fs.createReadStream(filePath, { encoding: "utf8" });
-  const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
-  let count = 0;
-  for await (const line of rl) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-    let obj;
-    try { obj = JSON.parse(trimmed); } catch { if (options.parseStats) options.parseStats.errors += 1; continue; }
-    const role = obj.role != null ? String(obj.role).toLowerCase() : "";
-    if (role !== "user" && role !== "assistant") continue;
-    const message = obj.message && typeof obj.message === "object" ? obj.message : {};
-    if (!extractContentText(message.content)) continue;
-    count += 1;
-  }
-  return count;
-}
-
 async function readTranscriptFile(filePath, attribution = {}, options = {}) {
   const cursorHome = resolveCursorHome(filePath, options);
   const workspace = workspaceFromTranscriptPath(filePath, cursorHome);
 
-  const messageCount = options._messageCount != null
-    ? options._messageCount
-    : await countTranscriptMessages(filePath, options);
-  const { startMs, endMs } = fileTimestampSpread(filePath, messageCount);
-
-  const rows = [];
+  // Single pass over the file (was two: count messages, then build rows). Under concurrent
+  // transcript reads that doubled parse work and heap churn in the worker.
+  const pending = [];
   const stream = fs.createReadStream(filePath, { encoding: "utf8" });
   const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
   let lineNumber = 0;
-  let msgIndex = 0;
-  let syntheticCount = 0;
   for await (const line of rl) {
     lineNumber += 1;
     const trimmed = line.trim();
@@ -185,14 +163,23 @@ async function readTranscriptFile(filePath, attribution = {}, options = {}) {
     if (role !== "user" && role !== "assistant") continue;
     const message = obj.message && typeof obj.message === "object" ? obj.message : {};
     if (!extractContentText(message.content)) continue;
+    pending.push({ obj, lineNumber });
+  }
 
+  const messageCount = options._messageCount != null ? options._messageCount : pending.length;
+  const { startMs, endMs } = fileTimestampSpread(filePath, messageCount);
+
+  const rows = [];
+  let msgIndex = 0;
+  let syntheticCount = 0;
+  for (const { obj, lineNumber: ln } of pending) {
     msgIndex += 1;
     const spreadMs = timestampForMessageIndex(msgIndex, messageCount, startMs, endMs);
     const before = transcriptTimestampMs(obj, null);
-    const row = parseTranscriptLine(obj, filePath, attribution, lineNumber, spreadMs, workspace);
+    const row = parseTranscriptLine(obj, filePath, attribution, ln, spreadMs, workspace);
     if (!row) continue;
     if (before == null) syntheticCount += 1;
-    rows.push(assignLineNumber(row, lineNumber));
+    rows.push(assignLineNumber(row, ln));
   }
 
   if (syntheticCount > 0 && syntheticCount < rows.length) {
@@ -287,25 +274,15 @@ async function extractCursorDir(cursorRoot, attribution = {}, options = {}) {
     }
     : null;
 
-  for (const filePath of files) {
-    if (typeof checkAbort === "function") checkAbort();
-    fileIndex += 1;
-    tickFileProgress(onFileProgress, fileIndex, files.length, filePath);
-    try {
-      const fileRows = filterSidechainRows(
-        await readTranscriptFile(filePath, attribution, extractOpts),
-        options,
-      );
-      if (flushExtracted && fileRows.length) {
-        flushExtracted(fileRows);
-      } else {
-        rows.push(...fileRows);
-      }
-    } catch (e) {
-      dbg("AIHIST", "cursor transcript failed", { path: filePath, err: e.message });
-    }
-    if (fileIndex % 8 === 0) await new Promise((r) => setImmediate(r));
-  }
+  // Read transcripts in bounded-concurrency batches (order-independent: streamed rows dedupe at the
+  // sink, in-memory rows are finalize-sorted). Per-file error isolation + progress + abort preserved.
+  await processFilesConcurrently(files, {
+    process: async (filePath) => filterSidechainRows(await readTranscriptFile(filePath, attribution, extractOpts), options),
+    onProgress: (filePath) => { fileIndex += 1; tickFileProgress(onFileProgress, fileIndex, files.length, filePath); },
+    onRows: (fileRows) => { if (flushExtracted && fileRows.length) flushExtracted(fileRows); else rows.push(...fileRows); },
+    onError: (e, filePath) => dbg("AIHIST", "cursor transcript failed", { path: filePath, err: e.message }),
+    checkAbort,
+  });
 
   const { extractCursorComposerStores } = require("./cursor-composer");
   const { rows: composerRows, stats: composerStats } = await extractCursorComposerStores(

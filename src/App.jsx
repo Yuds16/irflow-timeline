@@ -12,6 +12,15 @@ import { formatDateTime } from "./utils/datetime.js";
 import { isIpcError, ipcErrorMessage } from "./utils/ipc-result";
 import { compileColorRules, applyColors, buildTimelineColorRules } from "./utils/color-rules.js";
 import { detectKapeProfile, isChainsawDataset, isChainsawProcessDataset, isChainsawLogonDataset } from "./utils/dataset-detect.js";
+import {
+  checkboxFilterActive,
+  isAiHistorySourceFormat,
+  aiHistoryQueryIpcOptions,
+  normalizeCheckboxFilterValues,
+  resolveAiWorkspacePath,
+  buildWorkspaceCorrelationTargets,
+} from "./utils/ai-history-profile.js";
+import { handleOpenFileDialogResult } from "./utils/open-file-result.js";
 import { IOC_CATEGORY_PATTERNS } from "./utils/ioc-parsing.js";
 
 // ── Extracted components ─────────────────────────────────────────
@@ -44,6 +53,11 @@ import BulkActionsModal from "./components/modals/BulkActionsModal.jsx";
 import QuickHelpModal from "./components/modals/QuickHelpModal.jsx";
 import SigmaRuleModal from "./components/modals/SigmaRuleModal.jsx";
 import RdpBitmapCacheModal from "./components/modals/RdpBitmapCacheModal.jsx";
+import AiHistoryProfileScanModal from "./components/modals/AiHistoryProfileScanModal.jsx";
+import AiHistoryExtractModal from "./components/modals/AiHistoryExtractModal.jsx";
+import AiWorkspaceCorrelateModal from "./components/modals/AiWorkspaceCorrelateModal.jsx";
+import AiHistoryScopeModal from "./components/modals/AiHistoryScopeModal.jsx";
+import AiSecretsModal from "./components/modals/AiSecretsModal.jsx";
 import {
   openColumnStatsModal,
   openIocLoadModal,
@@ -52,6 +66,8 @@ import {
 	  openSigmaModal,
   openSimpleModal,
   openStackingModal,
+  openAiWorkspaceCorrelateModal,
+  openAiHistoryProfileScanModal,
   updateModal,
 } from "./modals/modalRegistry.js";
 import { HOME_CAPABILITY_LAUNCHERS } from "./utils/analyzer-launch.js";
@@ -87,6 +103,44 @@ const debugRightClick = (message, data = {}) => {
     }
   } catch {}
 };
+
+/** Header-only widths — cheap first paint after a multi-GB import. */
+function fastColumnWidths(headers) {
+  const cw = {};
+  for (const h of headers) {
+    cw[h] = Math.max(80, Math.min(h.length * 8 + 36, 400));
+  }
+  return cw;
+}
+
+function measureColumnWidths(headers, initialRows) {
+  const cw = {};
+  const sampleRows = initialRows.slice(0, 100);
+  headers.forEach((h) => {
+    const hLen = h.length * 8 + 36;
+    const lengths = sampleRows.map((r) => (r[h] || "").length).filter((l) => l > 0);
+    const meanLen = lengths.length > 0 ? lengths.reduce((a, b) => a + b, 0) / lengths.length : 0;
+    const meanPx = meanLen * 6.5 + 16;
+    cw[h] = Math.max(80, Math.min(Math.max(hLen, Math.round(meanPx)), 400));
+  });
+  return cw;
+}
+
+const LARGE_TAB_HISTOGRAM_DEFER_MS = 60_000;
+
+function fetchLimitForTab(tab) {
+  return VIRTUAL_WINDOW;
+}
+
+function fetchAheadForLimit(limit) {
+  return Math.max(100, Math.min(VIRTUAL_AHEAD, Math.floor((limit || VIRTUAL_WINDOW) / 3)));
+}
+
+function rowWindowCovers(rowOffset, rowCount, firstVisibleRow, visibleRowCount) {
+  const start = rowOffset || 0;
+  const end = start + (rowCount || 0);
+  return firstVisibleRow >= start && firstVisibleRow + visibleRowCount <= end;
+}
 
 // ── Main App ───────────────────────────────────────────────────────
 export default function App() {
@@ -219,6 +273,7 @@ export default function App() {
   const histogramLoaded = useUIStore((s) => s.histogramLoaded);
   const setHistogramLoaded = useUIStore((s) => s.setHistogramLoaded);
   const histogramCache = useRef({}); // { [tabId]: { sig, data } }
+  const histDeferUntilRef = useRef({}); // tabId -> epoch ms — defer histogram after large import
   const searchCache = useRef({}); // { [tabId]: { [sig]: { rows, rowOffset, totalFiltered, bookmarkedSet, rowTags } } }
   const histResizeStartY = useRef(0);
   const histResizeStartH = useRef(0);
@@ -235,6 +290,7 @@ export default function App() {
 
   // Filter dropdown internal state (stays local — ephemeral, reset on each open)
   const [fdValues, setFdValues] = useState([]);
+  const [fdSampled, setFdSampled] = useState(false);
   const [fdLoading, setFdLoading] = useState(false);
   const [fdSearch, setFdSearch] = useState("");
   const [fdSelected, setFdSelected] = useState(new Set());
@@ -301,6 +357,17 @@ export default function App() {
   const ct = tabs.find((t) => t.id === activeTab);
   ctRef.current = ct;
   const tle = typeof window !== "undefined" ? window.tle : null;
+  const runOpenFileDialog = useCallback(async () => {
+    if (!tle) return null;
+    const r = await tle.openFileDialog();
+    handleOpenFileDialogResult(tle, setModal, r);
+    return r;
+  }, [tle, setModal]);
+  const runImportPaths = useCallback(async (paths) => {
+    if (!tle || !paths?.length) return;
+    const r = await tle.importFiles(paths);
+    if (r?.scopePending) handleOpenFileDialogResult(tle, setModal, r);
+  }, [tle, setModal]);
   const th = THEMES[themeName];
   const isGrouped = ct?.groupByColumns?.length > 0;
   const handleCheckForUpdates = async () => {
@@ -357,6 +424,34 @@ export default function App() {
   // ── Tab updater ──────────────────────────────────────────────────
   const up = useTabStore((s) => s.up);
 
+  const filterToAiSession = useCallback((sessionId) => {
+    if (!ct?.id || !sessionId) return;
+    const id = String(sessionId).trim();
+    if (!id) return;
+    up("columnFilters", { ...(ct.columnFilters || {}), SessionId: id });
+    toast.success("Session filter applied", { detail: `Column filter: SessionId contains “${id.length > 48 ? `${id.slice(0, 48)}…` : id}”` });
+  }, [ct, up]);
+
+  const correlateAiWorkspace = useCallback((workspace, sourceFile) => {
+    const pathStr = resolveAiWorkspacePath(workspace, sourceFile);
+    if (!pathStr) {
+      toast.warning("No workspace path", { detail: "This row has no resolvable Workspace path to correlate." });
+      return;
+    }
+    const targets = buildWorkspaceCorrelationTargets(useTabStore.getState().tabs, pathStr);
+    if (targets.length === 1) {
+      const t = targets[0];
+      useTabStore.getState().setActiveTab(t.tabId);
+      useTabStore.getState().updateTab(t.tabId, {
+        columnFilters: { [t.column]: t.value },
+        searchHighlight: false,
+      });
+      toast.success("Correlation filter applied", { detail: `${t.kind}: ${t.hint}` });
+      return;
+    }
+    setModal(openAiWorkspaceCorrelateModal({ path: pathStr, targets }));
+  }, [setModal]);
+
   // ── Export helpers ────────────────────────────────────────────────
   const _downloadFile = (content, filename, mime) => {
     const blob = new Blob([content], { type: mime });
@@ -376,10 +471,17 @@ export default function App() {
   // ── Query backend ────────────────────────────────────────────────
   const activeFilters = useCallback((tab) => {
     const dis = tab.disabledFilters || new Set();
-    if (dis.size === 0) return { columnFilters: tab.columnFilters, checkboxFilters: tab.checkboxFilters };
+    const normalizeCbf = (cbf) => Object.fromEntries(
+      Object.entries(cbf || {}).map(([k, v]) => [k, normalizeCheckboxFilterValues(v)]),
+    );
+    if (dis.size === 0) {
+      return { columnFilters: tab.columnFilters, checkboxFilters: normalizeCbf(tab.checkboxFilters) };
+    }
     return {
       columnFilters: Object.fromEntries(Object.entries(tab.columnFilters).filter(([k]) => !dis.has(k))),
-      checkboxFilters: Object.fromEntries(Object.entries(tab.checkboxFilters).filter(([k]) => !dis.has(k))),
+      checkboxFilters: normalizeCbf(Object.fromEntries(
+        Object.entries(tab.checkboxFilters || {}).filter(([k]) => !dis.has(k)),
+      )),
     };
   }, []);
 
@@ -425,9 +527,16 @@ export default function App() {
       setSearchLoading(false);
       return;
     }
-    const fetchOffset = Math.max(0, centerRow - Math.floor(VIRTUAL_WINDOW / 2));
+    const aiHist = isAiHistorySourceFormat(tab.sourceFormat);
+    const fetchLimit = fetchLimitForTab(tab);
+    const knownTotal = Number.isFinite(tab.totalFiltered) && tab.totalFiltered > 0
+      ? tab.totalFiltered
+      : (Number.isFinite(tab.totalRows) ? tab.totalRows : 0);
+    const maxOffset = knownTotal > fetchLimit ? knownTotal - fetchLimit : 0;
+    const fetchOffset = Math.max(0, Math.min(maxOffset, centerRow - Math.floor(fetchLimit / 2)));
     const result = await tle.queryRows(tab.id, {
-      offset: fetchOffset, limit: VIRTUAL_WINDOW,
+      offset: fetchOffset, limit: fetchLimit,
+      ...(aiHist ? aiHistoryQueryIpcOptions() : {}),
       sortCol: tab.sortCol, sortDir: tab.sortDir,
       searchTerm: effectiveSearch, searchMode: tab.searchMode, searchCondition: tab.searchCondition || "contains",
       columnFilters, checkboxFilters,
@@ -527,6 +636,10 @@ export default function App() {
   useEffect(() => {
     if (histogramTimer.current) clearTimeout(histogramTimer.current);
     if (!histogramVisible || !ct?.dataReady || !ct?.tsColumns?.size || !tle) { setHistogramData([]); setHistogramLoaded(false); return; }
+    if (ct.isLargeFile && (histDeferUntilRef.current[ct.id] || 0) > Date.now()) {
+      setHistogramLoaded(false);
+      return;
+    }
     const hCol = histogramCol && ct.tsColumns.has(histogramCol) ? histogramCol : [...ct.tsColumns][0];
     if (!hCol) return;
     const sig = `${ct.id}:${hCol}:${histGranularity}:${ct.totalFiltered}:${ct.searchTerm}:${ct.searchMode}:${ct.showBookmarkedOnly}:${rowIdFilterSignature(ct.rowIdFilter)}:${JSON.stringify(ct.dateRangeFilters)}:${JSON.stringify(ct.advancedFilters)}`;
@@ -571,11 +684,18 @@ export default function App() {
   useEffect(() => {
     if (!ct || !ct.dataReady || isGrouped) return;
     const scrollRow = Math.floor(scrollMapRef.current.logicalScrollTop / ROW_HEIGHT);
-    const windowEnd = (ct.rowOffset || 0) + (ct.rows?.length || 0);
-    const needsFetch = scrollRow < (ct.rowOffset || 0) + VIRTUAL_AHEAD
-      || scrollRow + 60 > windowEnd - VIRTUAL_AHEAD;
-    // Only fetch if we're actually near the edge of the cached window
-    if (!needsFetch || (ct.rows?.length || 0) >= (ct.totalFiltered || 0)) return;
+    const rowOffset = ct.rowOffset || 0;
+    const loadedRows = ct.rows?.length || 0;
+    const windowEnd = rowOffset + loadedRows;
+    const visibleRows = Math.max(60, Math.ceil((scrollRef.current?.clientHeight || 0) / ROW_HEIGHT) + OVERSCAN);
+    const fetchLimit = fetchLimitForTab(ct);
+    const ahead = fetchAheadForLimit(Math.max(loadedRows, fetchLimit));
+    const cacheCoversViewport = rowWindowCovers(rowOffset, loadedRows, scrollRow, visibleRows);
+    const fullZeroBasedCache = rowOffset === 0 && loadedRows >= (ct.totalFiltered || 0);
+    const needsFetch = !cacheCoversViewport
+      || scrollRow < rowOffset + ahead
+      || scrollRow + visibleRows > windowEnd - ahead;
+    if (!needsFetch || fullZeroBasedCache) return;
     if (scrollFetchTimer.current) clearTimeout(scrollFetchTimer.current);
     scrollFetchTimer.current = setTimeout(() => fetchData(ct, scrollRow), 50);
   }, [scrollTop, ct?.rowOffset, ct?.rows?.length, ct?.totalFiltered, isGrouped]);
@@ -606,9 +726,11 @@ export default function App() {
     } else {
       // Leaf level — fetch actual rows (initial batch)
       const af = activeFilters(tab);
-      const GROUP_BATCH = 100000;
+      const aiHistGroup = isAiHistorySourceFormat(tab.sourceFormat);
+      const GROUP_BATCH = aiHistGroup ? fetchLimitForTab(tab) : 100000;
       const result = await tle.queryRows(tab.id, {
         offset: 0, limit: GROUP_BATCH,
+        ...(aiHistGroup ? aiHistoryQueryIpcOptions() : {}),
         sortCol: tab.sortCol, sortDir: tab.sortDir,
         searchTerm: tab.searchHighlight ? "" : tab.searchTerm, searchMode: tab.searchMode, searchCondition: tab.searchCondition || "contains",
         columnFilters: af.columnFilters, checkboxFilters: af.checkboxFilters,
@@ -634,13 +756,15 @@ export default function App() {
     const tab = ctRef.current;
     const existing = tab.expandedGroups?.[pathKey];
     if (!existing || !existing.rows || !existing.groupFilters) return;
-    const GROUP_BATCH = 100000;
+    const aiHistGroup = isAiHistorySourceFormat(tab.sourceFormat);
+    const GROUP_BATCH = aiHistGroup ? fetchLimitForTab(tab) : 100000;
     const loaded = existing.rows.length;
     const remaining = existing.totalFiltered - loaded;
     if (remaining <= 0) return;
     const af = activeFilters(tab);
     const result = await tle.queryRows(tab.id, {
-      offset: loaded, limit: loadAll ? remaining : GROUP_BATCH,
+      offset: loaded, limit: loadAll ? Math.min(remaining, aiHistGroup ? fetchLimitForTab(tab) : remaining) : GROUP_BATCH,
+      ...(aiHistGroup ? aiHistoryQueryIpcOptions() : {}),
       sortCol: tab.sortCol, sortDir: tab.sortDir,
       searchTerm: tab.searchHighlight ? "" : tab.searchTerm, searchMode: tab.searchMode, searchCondition: tab.searchCondition || "contains",
       columnFilters: af.columnFilters, checkboxFilters: af.checkboxFilters,
@@ -763,7 +887,7 @@ export default function App() {
         pendingCapabilityRef.current.tabId = tabId;
       }
     });
-    tle.onImportProgress(({ tabId, fileName, rowsImported, percent, phase, bytesRead, totalBytes }) => {
+    tle.onImportProgress(({ tabId, fileName, rowsImported, percent, phase, bytesRead, totalBytes, statusDetail }) => {
       if (!tabId) return;
       const normalizedPercent = Number.isFinite(percent) ? percent : 0;
       setImportingTabs((prev) => ({
@@ -776,57 +900,72 @@ export default function App() {
           phase: phase || (normalizedPercent >= 100 ? "finalizing" : "parsing"),
           bytesRead,
           totalBytes,
+          statusDetail: statusDetail || "",
           status: normalizedPercent >= 100 ? "indexing" : "importing",
         },
       }));
     });
-    tle.onImportComplete(({ tabId, fileName, headers, rowCount, tsColumns, numericColumns, initialRows, totalFiltered, emptyColumns, sourceFormat, evtxMessageMode, messagesDeferred, resolveStats, bookmarkedRowIds, rowTags, tagColors }) => {
+    tle.onImportComplete(({ tabId, fileName, headers, rowCount, tsColumns, numericColumns, initialRows, totalFiltered, emptyColumns, sourceFormat, evtxMessageMode, messagesDeferred, resolveStats, bookmarkedRowIds, rowTags, tagColors, importWarning, importNotice, isLargeFile, initialRowsDeferred }) => {
       delete importPathsRef.current[tabId];
-      const cw = {};
-      headers.forEach((h) => {
-        const hLen = h.length * 8 + 36;
-        const sampleRows = initialRows.slice(0, 100);
-        const lengths = sampleRows.map((r) => (r[h] || "").length).filter((l) => l > 0);
-        const meanLen = lengths.length > 0 ? lengths.reduce((a, b) => a + b, 0) / lengths.length : 0;
-        const meanPx = meanLen * 6.5 + 16;
-        // Use mean for typical width, but ensure header always fits
-        cw[h] = Math.max(80, Math.min(Math.max(hLen, Math.round(meanPx)), 400));
-      });
+      if (importWarning) {
+        const warnTitle = isAiHistorySourceFormat(sourceFormat) ? "AI history import"
+          : (sourceFormat === "registry" || String(importWarning).includes("hive") ? "Dirty registry hive" : "Import warning");
+        toast.warning(warnTitle, { detail: importWarning });
+      }
+      if (importNotice) toast.info("AI history import", { detail: importNotice });
+      const largeTab = !!isLargeFile || rowCount >= 2_500_000 || (isAiHistorySourceFormat(sourceFormat) && rowCount >= 50_000);
+      if (largeTab) {
+        histDeferUntilRef.current[tabId] = Date.now() + LARGE_TAB_HISTOGRAM_DEFER_MS;
+        toast.info("Large timeline loaded", {
+          detail: `${formatNumber(rowCount)} rows ready. Wait for indexes to finish before heavy column filters; search uses LIKE until FTS is skipped on files over 5 GB.`,
+          ttl: 12000,
+        });
+      }
+      const cw = largeTab ? fastColumnWidths(headers) : measureColumnWidths(headers, initialRows);
       const saved = pendingRestoresRef.current[tabId];
-      setTabs((prev) => prev.map((t) => {
+      const applyTabImport = (columnWidths) => setTabs((prev) => prev.map((t) => {
         if (t.id !== tabId) return t;
         const base = { ...t, name: fileName, headers, rows: initialRows, rowOffset: 0, totalRows: rowCount, totalFiltered,
           tsColumns: new Set(tsColumns || []), numericColumns: new Set(numericColumns || []),
-          columnWidths: saved ? { ...cw, ...saved.columnWidths } : cw, importing: false, dataReady: true, bookmarkedSet: new Set(bookmarkedRowIds || []),
+          columnWidths: saved ? { ...columnWidths, ...saved.columnWidths } : columnWidths, importing: false, dataReady: true, isLargeFile: largeTab,
+          bookmarkedSet: new Set(bookmarkedRowIds || []),
           rowTags: rowTags || {},
           tagColors: tagColors ? { ...TAG_PRESETS, ...tagColors } : { ...TAG_PRESETS },
           sourceFormat: sourceFormat || null,
           evtxMessageMode: evtxMessageMode || null,
           messagesDeferred: !!messagesDeferred,
+          aiSecretTriage: saved?.aiSecretTriage || {},
+          aiSecretSalt: saved?.aiSecretSalt || "",
           usnResolveStats: sourceFormat === "raw-usnjrnl" ? (resolveStats || null) : null };
         if (!saved) {
-          const autoHidden = new Set(emptyColumns || []);
-          // Raw binary parsers (MFT, USN Journal): show all columns, only hide empty
-          if (sourceFormat) {
-            return { ...base, hiddenColumns: autoHidden };
-          }
-          // Auto-detect KAPE/EZ Tools output and apply profile
+          // Auto-detect KAPE / AI history profiles (including ai-history-* imports)
           const kp = detectKapeProfile(headers);
+          const autoHidden = kp?.showAllColumns
+            ? new Set()
+            : new Set(emptyColumns || []);
           if (kp) {
             const order = (kp.columnOrder || []).filter((h) => headers.includes(h));
             const rest = headers.filter((h) => !order.includes(h));
             const autoRules = kp.autoColorColumn && headers.includes(kp.autoColorColumn)
               ? buildTimelineColorRules(initialRows, kp.autoColorColumn, true)
               : [];
-            // Merge KAPE hidden columns with auto-detected empty columns
-            const kpHidden = (kp.hiddenColumns || []).filter((h) => headers.includes(h));
-            kpHidden.forEach((h) => autoHidden.add(h));
+            if (!kp.showAllColumns) {
+              const kpHidden = (kp.hiddenColumns || []).filter((h) => headers.includes(h));
+              kpHidden.forEach((h) => autoHidden.add(h));
+            }
+            const sortPatch = kp.defaultSortCol && headers.includes(kp.defaultSortCol)
+              ? { sortCol: kp.defaultSortCol, sortDir: kp.defaultSortDir || "asc" }
+              : {};
             return { ...base, _detectedProfile: kp.name,
-              pinnedColumns: [],
               hiddenColumns: autoHidden,
               columnOrder: [...order, ...rest],
               colorRules: autoRules,
+              ...sortPatch,
             };
+          }
+          // Raw binary parsers (MFT, USN Journal): show all columns, only hide empty
+          if (sourceFormat) {
+            return { ...base, hiddenColumns: autoHidden };
           }
           return { ...base, hiddenColumns: autoHidden };
         }
@@ -847,8 +986,44 @@ export default function App() {
           advancedFilters: saved.advancedFilters || [],
           searchHighlight: saved.searchHighlight || false,
           vtEnrichment: saved.vtEnrichment || null,
+          aiSecretTriage: saved.aiSecretTriage || {},
+          aiSecretSalt: saved.aiSecretSalt || "",
         };
       }));
+      applyTabImport(cw);
+      if (initialRowsDeferred || (isAiHistorySourceFormat(sourceFormat) && rowCount > 0 && (!initialRows || initialRows.length === 0))) {
+        const deferLimit = fetchLimitForTab({ sourceFormat });
+        tle.queryRows(tabId, {
+          offset: 0,
+          limit: deferLimit,
+          sortCol: null,
+          sortDir: "asc",
+          ...aiHistoryQueryIpcOptions(),
+        }).then((result) => {
+          if (!result || result.__ipcError) return;
+          setTabs((prev) => prev.map((t) =>
+            t.id === tabId ? {
+              ...t,
+              rows: result.rows,
+              rowOffset: 0,
+              totalFiltered: result.totalFiltered,
+              bookmarkedSet: new Set(result.bookmarkedRows || []),
+              rowTags: result.rowTags || {},
+            } : t,
+          ));
+        }).catch(() => {});
+      }
+      if (largeTab && initialRows.length > 0) {
+        const refine = () => {
+          const refined = measureColumnWidths(headers, initialRows);
+          setTabs((prev) => prev.map((t) => {
+            if (t.id !== tabId) return t;
+            return { ...t, columnWidths: saved ? { ...refined, ...saved.columnWidths } : refined };
+          }));
+        };
+        if (typeof requestIdleCallback === "function") requestIdleCallback(refine, { timeout: 3000 });
+        else setTimeout(refine, 0);
+      }
       setImportingTabs((prev) => { const next = { ...prev }; delete next[tabId]; return next; });
       // Restore bookmarks and tags from session
       if (saved) {
@@ -887,15 +1062,18 @@ export default function App() {
       setImportQueue(pending || []);
     });
     tle.onImportError(({ tabId, error }) => {
+      const errText = String(error || "");
+      const userCanceled = /job cancel|extraction cancel|canceled|cancelled/i.test(errText);
       // Drop the pending home-tile capability intent only if THIS (the bound) import failed.
       if (pendingCapabilityRef.current?.tabId === tabId) pendingCapabilityRef.current = null;
       setImportingTabs((prev) => { const next = { ...prev }; delete next[tabId]; return next; });
       setTabs((prev) => prev.filter((t) => t.id !== tabId));
+      if (userCanceled) return;
       // Offer one-click retry instead of silent data loss — the source path was captured at import-start.
       const failedPath = importPathsRef.current[tabId];
       delete importPathsRef.current[tabId];
       toast.error("Import failed", {
-        detail: String(error),
+        detail: errText,
         ...(failedPath ? { actionLabel: "Retry import", onAction: () => tle?.importFiles([failedPath]) } : {}),
       });
     });
@@ -954,7 +1132,7 @@ export default function App() {
     tle.onSheetSelection(({ tabId, fileName, filePath, sheets }) => {
       setModal(openSimpleModal("sheets", { tabId, fileName, filePath, sheets }));
     });
-    tle.onTriggerOpen(() => tle.openFileDialog());
+    tle.onTriggerOpen(() => { runOpenFileDialog(); });
     tle.onTriggerExport(() => {
       const cur = ctRef.current;
       if (cur) {
@@ -1364,7 +1542,9 @@ export default function App() {
 
   const handleExport = async () => {
     if (!tle || !ct) return;
-    const visHeaders = ct.headers.filter((h) => !ct.hiddenColumns.has(h));
+    const visSet = new Set(ct.headers.filter((h) => !ct.hiddenColumns.has(h)));
+    if (isAiHistorySourceFormat(ct.sourceFormat) && ct.headers.includes("FullText")) visSet.add("FullText");
+    const visHeaders = ct.headers.filter((h) => visSet.has(h));
     const af = activeFilters(ct);
     await tle.exportFiltered(ct.id, {
       sortCol: ct.sortCol, sortDir: ct.sortDir, searchTerm: ct.searchHighlight ? "" : ct.searchTerm, searchMode: ct.searchMode, searchCondition: ct.searchCondition || "contains",
@@ -1401,15 +1581,10 @@ export default function App() {
     if (tle) await tle.closeTab(id);
     delete histogramCache.current[id];
     delete searchCache.current[id];
+    delete histDeferUntilRef.current[id];
     const rem = tabs.filter((t) => t.id !== id);
     setTabs(rem);
     if (activeTab === id) setActiveTab(rem.length ? rem[rem.length - 1].id : null);
-  };
-
-  const copyCell = (val) => {
-    navigator.clipboard?.writeText(val || "");
-    setCopiedMsg(true);
-    setTimeout(() => setCopiedMsg(false), 1200);
   };
 
   // ── Temporal Proximity Search ──────────────────────────────────
@@ -1451,6 +1626,8 @@ export default function App() {
         groupByColumns: tab.groupByColumns, showBookmarkedOnly: tab.showBookmarkedOnly,
         dateRangeFilters: tab.dateRangeFilters || {}, advancedFilters: tab.advancedFilters || [], searchHighlight: tab.searchHighlight || false,
         vtEnrichment: tab.vtEnrichment || null,
+        aiSecretTriage: tab.aiSecretTriage || {},
+        aiSecretSalt: tab.aiSecretSalt || "",
       });
     }
     return { version: 1, savedAt: new Date().toISOString(), activeTabIndex: tabs.findIndex((t) => t.id === activeTab), tabs: sessionTabs };
@@ -1761,6 +1938,12 @@ export default function App() {
   const compiledColors = useMemo(() => compileColorRules(ct?.colorRules || []), [ct?.colorRules]);
   const gw = (col) => ct?.columnWidths[col] || 150;
   const fmtCell = (h, val) => (dateTimeFormat && ct?.tsColumns?.has(h)) ? formatDateTime(val, dateTimeFormat, timezone) : (val || "");
+  const copyCell = useCallback((val, colName) => {
+    const text = colName != null && colName !== "" ? fmtCell(colName, val) : (val || "");
+    navigator.clipboard?.writeText(text);
+    setCopiedMsg(true);
+    setTimeout(() => setCopiedMsg(false), 1200);
+  }, [dateTimeFormat, timezone, ct?.tsColumns]);
   const hlTerm = ct?.searchHighlight && ct?.searchTerm?.trim() ? ct.searchTerm.trim() : null;
   const hlRegex = useMemo(() => {
     if (!hlTerm) return null;
@@ -1864,7 +2047,7 @@ export default function App() {
     return indices;
   }, [ct?.searchHighlight, ct?.searchTerm, ct?.searchMode, rows, ct?.rowOffset, isGrouped, allVisH]);
 
-  const scrollToRow = (idx) => {
+  const scrollToRow = useCallback((idx) => {
     if (!scrollRef.current) return;
     // Map logical row position -> physical scrollTop. When scaleFactor === 1 this is a no-op.
     const sf = scrollMapRef.current.scaleFactor || 1;
@@ -1876,7 +2059,24 @@ export default function App() {
     const viewH = scrollRef.current.clientHeight;
     if (physicalTop < curTop) scrollRef.current.scrollTop = physicalTop;
     else if (physicalBot > curTop + viewH) scrollRef.current.scrollTop = physicalBot - viewH;
-  };
+
+    // Prefetch SQL window when jumping via keyboard/search (same margin as scroll-driven fetch).
+    if (!isGrouped && ct?.dataReady) {
+      const offset = ct.rowOffset || 0;
+      const loadedRows = ct.rows?.length || 0;
+      const windowEnd = offset + loadedRows;
+      const visibleRows = Math.max(60, Math.ceil((scrollRef.current?.clientHeight || 0) / ROW_HEIGHT) + OVERSCAN);
+      const ahead = fetchAheadForLimit(Math.max(loadedRows, fetchLimitForTab(ct)));
+      const cacheCoversViewport = rowWindowCovers(offset, loadedRows, idx, visibleRows);
+      const fullZeroBasedCache = offset === 0 && loadedRows >= (ct.totalFiltered || 0);
+      const needsFetch = !cacheCoversViewport
+        || idx < offset + ahead
+        || idx + visibleRows > windowEnd - ahead;
+      if (needsFetch && !fullZeroBasedCache) {
+        fetchData(ct, idx);
+      }
+    }
+  }, [ct, isGrouped, fetchData]);
 
   const navigateSearch = (dir) => {
     const total = ct?.totalFiltered || 0;
@@ -1983,7 +2183,14 @@ export default function App() {
   const loadFilterValues = useCallback(async (colName, searchText, preselectAll, useRegex = false) => {
     const tab = ctRef.current;
     if (!tle || !tab) return;
+    if (tab.isLargeFile && !tab.indexesReady) {
+      toast.warning("Indexes still building", {
+        detail: "Column filter lists on large timelines are safest after the toolbar shows indexes ready. Showing values may use a row sample.",
+        ttl: 8000,
+      });
+    }
     setFdLoading(true);
+    setFdSampled(false);
     try {
       const af = activeFilters(tab);
       const result = await tle.getColumnUniqueValues(tab.id, colName, {
@@ -1995,6 +2202,7 @@ export default function App() {
         dateRangeFilters: tab.dateRangeFilters || {}, advancedFilters: tab.advancedFilters || [],
       });
       const vals = isIpcError(result) || !Array.isArray(result) ? [] : result;
+      setFdSampled(!!vals.sampled);
       setFdValues(vals);
       // Pre-select all values when no existing filter (so user unchecks to exclude)
       if (preselectAll) {
@@ -2009,7 +2217,7 @@ export default function App() {
   }, [tle]);
 
   useEffect(() => {
-    if (!filterDropdown) { setFdValues([]); setFdSearch(""); setFdSelected(new Set()); setFdRegex(false); return; }
+    if (!filterDropdown) { setFdValues([]); setFdSearch(""); setFdSelected(new Set()); setFdRegex(false); setFdSampled(false); return; }
     if (filterDropdown.colName === "__tags__") {
       // Tags filter — load tags from DB
       const existing = ct?.tagFilter;
@@ -2047,8 +2255,8 @@ export default function App() {
       return;
     }
     const existing = ct?.checkboxFilters?.[filterDropdown.colName];
-    const hasExisting = existing?.length > 0;
-    setFdSelected(hasExisting ? new Set(existing) : new Set());
+    const hasExisting = checkboxFilterActive(existing);
+    setFdSelected(hasExisting ? new Set(normalizeCheckboxFilterValues(existing)) : new Set());
     setFdSearch("");
     setFdRegex(false);
     loadFilterValues(filterDropdown.colName, "", !hasExisting, false);
@@ -2115,20 +2323,34 @@ export default function App() {
         tagFilter: (ct.disabledFilters || new Set()).has("__tags__") ? null : (ct.tagFilter || null),
         rowIdFilter: ct.rowIdFilter || null,
         dateRangeFilters: ct.dateRangeFilters || {}, advancedFilters: ct.advancedFilters || [],
+        sortCol: ct.sortCol || null,
+        sortDir: ct.sortDir || "asc",
         distinct,
       });
       if (isIpcError(res)) throw new Error(ipcErrorMessage(res));
       const values = res?.values || [];
       if (values.length === 0) { toast.info("No values to copy in that column for the current view."); return; }
-      await navigator.clipboard?.writeText(values.join("\n"));
+      let copyValues = (dateTimeFormat && ct.tsColumns?.has(colName))
+        ? values.map((v) => formatDateTime(v, dateTimeFormat, timezone))
+        : values;
+      if (distinct) {
+        const seen = new Set();
+        copyValues = copyValues.filter((v) => {
+          const key = String(v ?? "");
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      }
+      await navigator.clipboard?.writeText(copyValues.join("\n"));
       setCopiedMsg(true);
       setTimeout(() => setCopiedMsg(false), 1200);
       const label = distinct ? "unique value" : "value";
-      toast.success(`Copied ${formatNumber(values.length)} ${label}${values.length === 1 ? "" : "s"} from "${colName}"${res?.truncated ? " (truncated at 1,000,000)" : ""}`);
+      toast.success(`Copied ${formatNumber(copyValues.length)} ${label}${copyValues.length === 1 ? "" : "s"} from "${colName}"${res?.truncated ? " (truncated at 1,000,000)" : ""}`);
     } catch (err) {
       toast.error("Couldn't copy column", { detail: String(err?.message || err) });
     }
-  }, [tle, ct, activeFilters, setCopiedMsg]);
+  }, [tle, ct, activeFilters, setCopiedMsg, dateTimeFormat, timezone]);
 
   // ── Keyboard shortcuts ───────────────────────────────────────────
   useEffect(() => {
@@ -2137,7 +2359,7 @@ export default function App() {
       if (mod && e.key === "w") { e.preventDefault(); const cur = ctRef.current; if (cur) closeTabRef.current?.(cur.id); return; }
       if (mod && e.key === "s") { e.preventDefault(); handleSaveSessionRef.current?.(); }
       if (mod && e.shiftKey && e.key === "O") { e.preventDefault(); handleLoadSessionRef.current?.(); }
-      if (mod && e.key === "o") { e.preventDefault(); tle?.openFileDialog(); }
+      if (mod && e.key === "o") { e.preventDefault(); runOpenFileDialog(); }
       if (mod && e.key === "f" && !e.shiftKey) { e.preventDefault(); document.getElementById("gs")?.focus(); }
       if (mod && e.shiftKey && e.key === "f") { e.preventDefault(); setModal(openSimpleModal("crossfind")); }
       if (mod && e.key === "e") { e.preventDefault(); handleExport(); }
@@ -2174,7 +2396,7 @@ export default function App() {
         for (const idx of sortedIndices) {
           const item = getRowAt(idx);
           const r = isGrouped ? (item?.type === "row" ? item.data : null) : item;
-          if (r) lines.push(hdrs.map((h) => (r[h] || "").replace(/\t/g, " ")).join("\t"));
+          if (r) lines.push(hdrs.map((h) => fmtCell(h, r[h] || "").replace(/\t/g, " ")).join("\t"));
         }
         navigator.clipboard?.writeText(lines.join("\n"));
         setCopiedMsg(true);
@@ -2182,6 +2404,10 @@ export default function App() {
       }
       if (e.key === "Escape") {
         if (cellPopup) { setCellPopup(null); return; }
+        if (modal?.type === "aiSecrets") {
+          if (modal.tagMenuGroup) setModal((prev) => (prev?.type === "aiSecrets" ? { ...prev, tagMenuGroup: null, tagDraft: "" } : prev));
+          return;
+        }
         if (modal) { setModal(null); return; }
         if (filterDropdown) { setFilterDropdown(null); return; }
         if (dateRangeDropdown) { setDateRangeDropdown(null); return; }
@@ -2230,7 +2456,7 @@ export default function App() {
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [ct, activeTab, selectedRows, lastClickedRow, ct?.totalFiltered, isGrouped, getRowAt, searchMatchIdx, navigateSearch, selectedColumn, setSelectedColumn, copyColumnValues, contextMenu]);
+  }, [ct, activeTab, selectedRows, lastClickedRow, ct?.totalFiltered, isGrouped, getRowAt, searchMatchIdx, navigateSearch, selectedColumn, setSelectedColumn, copyColumnValues, contextMenu, dateTimeFormat, timezone, scrollToRow]);
 
 
 
@@ -2258,7 +2484,7 @@ export default function App() {
       // consume it and fire the analyzer on the wrong tab.
       pendingCapabilityRef.current = { capability: capKey, tabId: null };
       try {
-        const res = await tle?.openFileDialog();
+        const res = await runOpenFileDialog();
         if (res == null) pendingCapabilityRef.current = null; // null === user canceled
       } catch {
         pendingCapabilityRef.current = null;
@@ -2279,20 +2505,20 @@ export default function App() {
         icon: <><path d="M12 21V9"/><circle cx="12" cy="6" r="3"/><path d="M5 13H3m4.5 5L6 19.5M18 13h2m-3.5 5l1.5 1.5"/></> },
       { title: "Sigma · Hayabusa", desc: "Sigma detection over raw EVTX — no import needed", color: th.accent, outcome: "Scan a directory →", ready: true, onClick: () => setModal(openSigmaModal({ scanMode: "evtx-dir" })),
         icon: <><circle cx="12" cy="12" r="9"/><path d="M12 4v8l5 3"/></> },
-      { title: "IOC Matching", desc: "17+ indicator types · VirusTotal enrichment", color: th.accent, capability: "ioc", chip: "Any timeline", outcome: "Open → match & tag", onClick: () => launchCapabilityFromHome("ioc"),
-        icon: <><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5"/><path d="M12 3v3m0 12v3M3 12h3m12 0h3"/></> },
+      { title: "Collect AI Artifacts", desc: "Claude, Codex, Cursor, ChatGPT & more — scan this Mac or a triage folder into one AI history timeline.", color: th.accent, chip: "Mac / folder", outcome: "Scan → AI timeline", onClick: () => setModal(openAiHistoryProfileScanModal()),
+        icon: <><path d="M11 3l1.7 4.4L17 9l-4.3 1.6L11 15l-1.7-4.4L5 9l4.3-1.6z"/><path d="M17.6 14l.7 1.8 1.7.7-1.7.7-.7 1.8-.7-1.8-1.7-.7 1.7-.7z"/></> },
       { title: "Master File Table", desc: "Ransomware mass-encryption, in-place rewrites & recovery-target deletion across the $MFT", color: th.accent, capability: "mft", chip: "Raw $MFT", outcome: "Open → ransomware scan", onClick: () => launchCapabilityFromHome("mft"),
         icon: <><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><rect x="10" y="11" width="4" height="4" rx="1"/><path d="M10.5 11V9.5a1.5 1.5 0 0 1 3 0V11"/></> },
       { title: "USN Journal", desc: "Renames, deletions, exfil staging & self-deletion from the $J journal", color: th.accent, capability: "usn", chip: "$J / USN", outcome: "Open → journal triage", onClick: () => launchCapabilityFromHome("usn"),
         icon: <><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 8h10M7 12h10M7 16h6"/></> },
-      { title: "Open & Explore", desc: "Just browse a large CSV / TSV / XLSX in a fast grid — filter, search & sort. No analyzer needed.", color: th.accent, chip: "Any file", outcome: "Open any file →", onClick: () => tle?.openFileDialog(),
+      { title: "Open & Explore", desc: "Just browse a large CSV / TSV / XLSX in a fast grid — filter, search & sort. No analyzer needed.", color: th.accent, chip: "Any file", outcome: "Open any file →", onClick: () => runOpenFileDialog(),
         icon: <><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></> },
     ];
     return (
       <div onContextMenu={(e) => e.preventDefault()} style={{ display: "flex", height: "100vh", background: th.bg, fontFamily: "'SF Mono',Menlo,monospace", WebkitAppRegion: "drag", overflow: "hidden", position: "relative" }}
         onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; setDragOver(true); }}
         onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setDragOver(false); }}
-        onDrop={(e) => { e.preventDefault(); setDragOver(false); pendingCapabilityRef.current = null; /* drag = "just open", not a tile launch → drop any armed capability so it can't fire on this import */ const files = [...e.dataTransfer.files]; if (files.length > 0 && tle) { const paths = files.map((f) => tle.getPathForFile(f)).filter(Boolean); if (paths.length > 0) tle.importFiles(paths); } }}>
+        onDrop={(e) => { e.preventDefault(); setDragOver(false); pendingCapabilityRef.current = null; /* drag = "just open", not a tile launch → drop any armed capability so it can't fire on this import */ const files = [...e.dataTransfer.files]; if (files.length > 0 && tle) { const paths = files.map((f) => tle.getPathForFile(f)).filter(Boolean); if (paths.length > 0) runImportPaths(paths); } }}>
         <div style={{ width: 360, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "stretch", padding: "26px 24px 18px", borderRight: `1px solid ${th.border}`, background: th.panelBg, overflowY: "auto", WebkitAppRegion: "no-drag", zIndex: 2 }}>
           {/* IRFlow Logo — shield with timeline pulse */}
           <svg width="52" height="59" viewBox="0 0 64 72" fill="none" style={{ marginBottom: 14 }}>
@@ -2313,7 +2539,7 @@ export default function App() {
           <h1 style={{ fontSize: 24, fontWeight: 700, color: th.text, margin: 0, fontFamily: "-apple-system, 'SF Pro Display', sans-serif", letterSpacing: "-0.01em" }}>IRFlow <span style={{ color: th.accent }}>Timeline</span></h1>
           <p style={{ color: th.textDim, fontSize: 14, letterSpacing: "0.14em", textTransform: "uppercase", margin: "10px 0 6px", fontWeight: 600 }}>DFIR Timeline Analysis for macOS</p>
           <div style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "stretch", width: "100%", marginTop: 26, WebkitAppRegion: "no-drag" }}>
-            <button onClick={() => tle?.openFileDialog()} style={{ padding: "14px 48px", background: th.primaryBtn, color: "#fff", border: "none", borderRadius: 8, fontSize: 16, fontWeight: 600, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}
+            <button onClick={() => runOpenFileDialog()} style={{ padding: "14px 48px", background: th.primaryBtn, color: "#fff", border: "none", borderRadius: 8, fontSize: 16, fontWeight: 600, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}
               onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(1.1)"; }}
               onMouseLeave={(e) => { e.currentTarget.style.filter = ""; }}>Open File</button>
 	          </div>
@@ -2346,7 +2572,7 @@ export default function App() {
                   const fileName = fp.split("/").pop();
                   const dirPath = fp.substring(0, fp.lastIndexOf("/"));
                   return (
-                    <button key={i} onClick={() => tle?.importFiles([fp])}
+                    <button key={i} onClick={() => runImportPaths([fp])}
                       style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", background: "transparent", border: "none", borderRadius: 6, cursor: "pointer", textAlign: "left", transition: "background var(--m-fast)", width: "100%" }}
                       onMouseEnter={(e) => { e.currentTarget.style.background = th.textMuted + "12"; }}
                       onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
@@ -2454,13 +2680,20 @@ export default function App() {
 	        {/* Modal overlay — must render even in empty state for EVTX scanning */}
 	        {modal?.type === "sigma" && <SigmaRuleModal />}
 	        {modal?.type === "rdpBitmapCache" && <RdpBitmapCacheModal />}
+      {modal?.type === "aiHistoryProfileScan" && <AiHistoryProfileScanModal />}
+      {modal?.type === "aiHistoryExtract" && <AiHistoryExtractModal />}
+      {modal?.type === "aiWorkspaceCorrelate" && <AiWorkspaceCorrelateModal th={th} />}
+      {modal?.type === "aiHistoryScope" && <AiHistoryScopeModal />}
+      {modal?.type === "aiSecrets" && <AiSecretsModal th={th} />}
 	      </div>
     );
   }
 
   // ── Main render ──────────────────────────────────────────────────
   const isImporting = ct?.importing && importingTabs[ct?.id];
-  const activeCheckboxCount = ct ? Object.keys(ct.checkboxFilters || {}).filter(k => ct.checkboxFilters[k]?.length > 0).length : 0;
+  const activeCheckboxCount = ct
+    ? Object.keys(ct.checkboxFilters || {}).filter((k) => checkboxFilterActive(ct.checkboxFilters[k])).length
+    : 0;
   const activeColumnFilterCount = ct ? Object.values(ct.columnFilters || {}).filter(Boolean).length : 0;
   const activeDateFilterCount = ct ? Object.keys(ct.dateRangeFilters || {}).length : 0;
   const activeAdvFilterCount = ct?.advancedFilters?.length || 0;
@@ -2482,7 +2715,7 @@ export default function App() {
     <div onContextMenu={(e) => e.preventDefault()}
       onDragOver={(e) => { if (!e.dataTransfer.types.includes("Files")) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; setDragOver(true); }}
       onDragLeave={(e) => { if (e.currentTarget.contains(e.relatedTarget)) return; setDragOver(false); }}
-      onDrop={(e) => { if (!e.dataTransfer.types.includes("Files")) return; e.preventDefault(); setDragOver(false); const files = [...e.dataTransfer.files]; if (files.length > 0 && tle) { const paths = files.map((f) => tle.getPathForFile(f)).filter(Boolean); if (paths.length > 0) tle.importFiles(paths); } }}
+      onDrop={(e) => { if (!e.dataTransfer.types.includes("Files")) return; e.preventDefault(); setDragOver(false); const files = [...e.dataTransfer.files]; if (files.length > 0 && tle) { const paths = files.map((f) => tle.getPathForFile(f)).filter(Boolean); if (paths.length > 0) runImportPaths(paths); } }}
       style={{ display: "flex", flexDirection: "column", height: "100vh", background: th.bg, color: th.text, fontFamily: "'SF Mono','Fira Code',Menlo,monospace", fontSize: fontSize, overflow: "hidden" }}>
       <style>{`
         :root {
@@ -2698,6 +2931,8 @@ export default function App() {
         histBarGeomRef={histBarGeomRef}
         extracting={extracting} extractProgress={extractProgress}
         detailPanelRef={detailPanelRef} detailPanelHeight={detailPanelHeight}
+        onFilterToSession={isAiHistorySourceFormat(ct?.sourceFormat) ? filterToAiSession : undefined}
+        onCorrelateWorkspace={isAiHistorySourceFormat(ct?.sourceFormat) ? correlateAiWorkspace : undefined}
         ImportProgress={ImportProgress}
         sortTimerRef={sortTimerRef} justResizedRef={justResizedRef}
         searchLoading={searchLoading} fontSize={fontSize}
@@ -3122,7 +3357,7 @@ export default function App() {
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", borderBottom: `1px solid ${th.border}` }}>
               <span style={{ color: th.textDim, fontSize: 12, fontWeight: 600 }}>{cellPopup.column}</span>
               <div style={{ display: "flex", gap: 6 }}>
-                <button onClick={() => copyCell(cellPopup.value)} style={{ background: th.btnBg, border: `1px solid ${th.btnBorder}`, borderRadius: 6, color: th.text, fontSize: 11, padding: "4px 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
+                <button onClick={() => copyCell(cellPopup.value, cellPopup.column)} style={{ background: th.btnBg, border: `1px solid ${th.btnBorder}`, borderRadius: 6, color: th.text, fontSize: 11, padding: "4px 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
                   Copy
                 </button>
@@ -3130,7 +3365,7 @@ export default function App() {
               </div>
             </div>
             <div style={{ padding: "16px", overflow: "auto", maxHeight: "calc(80vh - 50px)" }}>
-              <pre style={{ color: th.text, fontSize: 12, fontFamily: "'SF Mono', Menlo, monospace", whiteSpace: "pre-wrap", wordBreak: "break-all", margin: 0, lineHeight: 1.5 }}>{cpVal || <span style={{ color: th.textMuted, fontStyle: "italic" }}>(empty)</span>}</pre>
+              <pre style={{ color: th.text, fontSize: 12, fontFamily: "'SF Mono', Menlo, monospace", whiteSpace: "pre-wrap", wordBreak: "break-all", margin: 0, lineHeight: 1.5 }}>{fmtCell(cellPopup.column, cpVal) || <span style={{ color: th.textMuted, fontStyle: "italic" }}>(empty)</span>}</pre>
               {/* Timestamp Converter */}
               {cpIsTs && (() => {
                 const epoch = Math.floor(cpDate.getTime() / 1000);
@@ -3237,7 +3472,9 @@ export default function App() {
               <button onClick={() => setFdSelected(new Set(fdValues.map((v) => v.val)))} style={ms.bsm}>Select All</button>
               <button onClick={() => setFdSelected(new Set())} style={ms.bsm}>Clear</button>
               <span style={{ flex: 1 }} />
-              <span style={{ color: th.textMuted, fontSize: 10, alignSelf: "center" }}>{fdValues.length} values</span>
+              <span style={{ color: th.textMuted, fontSize: 10, alignSelf: "center" }}>
+                {fdValues.length} values{fdSampled ? " (sampled)" : ""}
+              </span>
             </div>
             <div style={{ flex: 1, overflow: "auto", padding: "0 4px" }}>
               {fdLoading ? (
@@ -3416,6 +3653,11 @@ export default function App() {
       {modal?.type === "heatmap" && ct && <HeatmapModal />}
 	      {modal?.type === "sigma" && <SigmaRuleModal />}
 	      {modal?.type === "rdpBitmapCache" && <RdpBitmapCacheModal />}
+      {modal?.type === "aiHistoryProfileScan" && <AiHistoryProfileScanModal />}
+      {modal?.type === "aiHistoryExtract" && <AiHistoryExtractModal />}
+      {modal?.type === "aiWorkspaceCorrelate" && <AiWorkspaceCorrelateModal th={th} />}
+      {modal?.type === "aiHistoryScope" && <AiHistoryScopeModal />}
+      {modal?.type === "aiSecrets" && <AiSecretsModal th={th} />}
 
       {/* ADS Analyzer Modal */}
       {modal?.type === "ads" && ct && <AdsModal />}
@@ -3522,7 +3764,7 @@ export default function App() {
           <div onMouseDown={(e) => { if (shouldCloseContextBackdrop(e)) setRowContextMenu(null); }} onContextMenu={(e) => { e.preventDefault(); }} style={{ position: "fixed", inset: 0, zIndex: 99998 }} />
           <div onMouseDown={(e) => e.stopPropagation()} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }} style={{ position: "fixed", left: Math.min(rowContextMenu.x, window.innerWidth - 220), top: Math.min(rowContextMenu.y, window.innerHeight - 300), background: themeName === "dark" ? "rgba(28,31,36,0.97)" : "rgba(252,252,254,0.97)", backdropFilter: "blur(20px) saturate(180%)", WebkitBackdropFilter: "blur(20px) saturate(180%)", border: `1px solid ${themeName === "dark" ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"}`, borderRadius: 10, padding: "5px 0", zIndex: 99999, boxShadow: themeName === "dark" ? "0 12px 40px rgba(0,0,0,0.55), 0 0 0 0.5px rgba(255,255,255,0.06) inset" : "0 12px 40px rgba(0,0,0,0.18), 0 0 0 0.5px rgba(255,255,255,0.5) inset", minWidth: 200, animation: "tle-modal-in var(--m-fast) var(--ease-out)" }}>
             {rowContextMenu.cellColumn && (
-              <button onClick={() => { copyCell(rowContextMenu.cellValue); setRowContextMenu(null); }}
+              <button onClick={() => { copyCell(rowContextMenu.cellValue, rowContextMenu.cellColumn); setRowContextMenu(null); }}
                 onMouseEnter={(e) => { e.currentTarget.style.background = `${th.accent}22`; }}
                 onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
                 style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "6px 14px", background: "none", border: "none", color: th.text, fontSize: 12, cursor: "pointer", textAlign: "left", fontFamily: "-apple-system, BlinkMacSystemFont, sans-serif", borderRadius: 6, margin: "0 4px", maxWidth: "calc(100% - 8px)" }}>
@@ -3533,7 +3775,7 @@ export default function App() {
             <button onClick={() => {
               if (rowContextMenu.row && ct) {
                 const hdrs = ct.headers.filter((h) => !ct.hiddenColumns?.has(h));
-                const line = hdrs.map((h) => (rowContextMenu.row[h] || "").replace(/\t/g, " ")).join("\t");
+                const line = hdrs.map((h) => fmtCell(h, rowContextMenu.row[h] || "").replace(/\t/g, " ")).join("\t");
                 navigator.clipboard?.writeText(hdrs.join("\t") + "\n" + line);
                 setCopiedMsg(true); setTimeout(() => setCopiedMsg(false), 1200);
               }

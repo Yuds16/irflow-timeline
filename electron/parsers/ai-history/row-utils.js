@@ -71,7 +71,7 @@ function buildDescription(entry) {
     : "";
   const modelInfo = entry.model ? ` | Model: ${entry.model}` : "";
   const workspaceInfo = entry.workspace ? ` | Workspace: ${entry.workspace}` : "";
-  const toolInfo = entry.toolName ? ` | Tool: ${entry.toolName}` : "";
+  const toolInfo = entry.toolName && entry.toolName !== entry.tool ? ` | InvokedTool: ${entry.toolName}` : "";
   const branchInfo = entry.gitBranch ? ` | Branch: ${entry.gitBranch}` : "";
   const typeInfo = entry.recordType && !["user", "assistant", "history"].includes(entry.recordType)
     ? ` | Type: ${entry.recordType}`
@@ -84,20 +84,21 @@ function makeRow(fields, defaultTool) {
     .replace(/\r\n/g, "\n")
     .trim());
   const summary = truncateSummary(fullText || fields.summary);
+  const tool = fields.tool || defaultTool || "";
   const row = {
     Timestamp: fields.timestamp || "",
     Role: fields.role || "",
     RecordType: fields.recordType || "",
     Summary: summary,
     FullText: fullText,
-    ToolName: fields.toolName || "",
+    InvokedTool: fields.toolName || "",
     SessionId: fields.sessionId || "",
     MessageId: fields.messageId || "",
     ParentId: fields.parentId || "",
     Workspace: fields.workspace || "",
     IsSidechain: fields.isSidechain === true ? "true" : (fields.isSidechain === false ? "false" : ""),
     GitBranch: fields.gitBranch || "",
-    Tool: fields.tool || defaultTool,
+    Tool: tool,
     Model: fields.model || "",
     InputTokens: fields.inputTokens != null ? String(fields.inputTokens) : "",
     OutputTokens: fields.outputTokens != null ? String(fields.outputTokens) : "",
@@ -118,7 +119,7 @@ function makeRow(fields, defaultTool) {
     model: row.Model,
     workspace: row.Workspace,
     recordType: row.RecordType,
-    toolName: row.ToolName,
+    toolName: row.InvokedTool,
     gitBranch: row.GitBranch,
     inputTokens: Number(row.InputTokens) || 0,
     outputTokens: Number(row.OutputTokens) || 0,

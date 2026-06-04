@@ -18,6 +18,7 @@ const {
   MAX_AI_HISTORY_ROWS,
   prepareChunkRowsForDb,
   writeAiHistoryRowsToDb,
+  filterAlreadySeenStreamedRows,
   makeSourceAccumulator,
 } = require("./db-sink");
 const {
@@ -297,6 +298,16 @@ async function extractMergedAiHistoryRoots(roots, attribution = {}, options = {}
   const report = (patch) => {
     if (typeof onProgress === "function") onProgress(patch);
   };
+  // Throttle per-file progress to ~6/sec (always send a source's last file) — see the matching note
+  // in extractMergedAiHistoryRootsToDb; a 500-file source otherwise fires 500 progress callbacks.
+  const FILE_PROGRESS_THROTTLE_MS = 160;
+  let lastFileReportAt = 0;
+  const reportFileProgress = (patch, isLast) => {
+    const now = Date.now();
+    if (!isLast && now - lastFileReportAt < FILE_PROGRESS_THROTTLE_MS) return;
+    lastFileReportAt = now;
+    report(patch);
+  };
   const merged = [];
   const failures = [];
   let copilotStats = null;
@@ -341,7 +352,7 @@ async function extractMergedAiHistoryRoots(roots, attribution = {}, options = {}
         const fileLabel = filePath && (String(filePath).includes(path.sep) || String(filePath).includes("/"))
           ? path.basename(filePath)
           : String(filePath || "…");
-        report({
+        reportFileProgress({
           phase: "extracting",
           percent: Math.min(90, Math.round(4 + ((i + fileFrac) / sourceCount) * 86)),
           sourceIndex: i + 1,
@@ -355,7 +366,7 @@ async function extractMergedAiHistoryRoots(roots, attribution = {}, options = {}
           statusDetail: `${label}: ${fileLabel} (${fileIndex}/${fileCount})`,
           logLine: `${label} — ${fileLabel} [${fileIndex}/${fileCount}]`,
           rowsSoFar: merged.length,
-        });
+        }, fileIndex >= fileCount);
       },
     };
 
@@ -509,6 +520,18 @@ async function extractMergedAiHistoryRootsToDb(db, tabId, roots, attribution = {
   const report = (patch) => {
     if (typeof onProgress === "function") onProgress(patch);
   };
+  // Per-FILE progress fires once per source file (500+ ChatGPT LevelDB files, 200+ Cursor transcripts):
+  // every one becomes a worker postMessage + a renderer re-render + a log line + a scroll. Throttle the
+  // per-file reports to ~6/sec, but ALWAYS send the last file of a source so completion stays visible.
+  // (Milestone reports — "Starting X", source-done — go through `report` directly, unthrottled.)
+  const FILE_PROGRESS_THROTTLE_MS = 160;
+  let lastFileReportAt = 0;
+  const reportFileProgress = (patch, isLast) => {
+    const now = Date.now();
+    if (!isLast && now - lastFileReportAt < FILE_PROGRESS_THROTTLE_MS) return;
+    lastFileReportAt = now;
+    report(patch);
+  };
   const failures = [];
   const stats = {
     copilotStats: null,
@@ -523,6 +546,8 @@ async function extractMergedAiHistoryRootsToDb(db, tabId, roots, attribution = {
   let capped = false;
   let totalWritten = 0;
   let nextRecordId = 1;
+  let streamedDuplicatesDropped = 0;
+  const streamedSeenKeys = new Set();
   const sourceCount = roots.length;
 
   db.createTab(tabId, [...headers]);
@@ -560,7 +585,7 @@ async function extractMergedAiHistoryRootsToDb(db, tabId, roots, attribution = {
         const fileLabel = filePath && (String(filePath).includes(path.sep) || String(filePath).includes("/"))
           ? path.basename(filePath)
           : String(filePath || "…");
-        report({
+        reportFileProgress({
           phase: "extracting",
           percent: Math.min(90, Math.round(4 + ((i + fileFrac) / sourceCount) * 86)),
           sourceIndex: i + 1,
@@ -574,7 +599,7 @@ async function extractMergedAiHistoryRootsToDb(db, tabId, roots, attribution = {
           statusDetail: `${label}: ${fileLabel} (${fileIndex}/${fileCount})`,
           logLine: `${label} — ${fileLabel} [${fileIndex}/${fileCount}]`,
           rowsSoFar: totalWritten,
-        });
+        }, fileIndex >= fileCount);
       },
     };
 
@@ -607,7 +632,13 @@ async function extractMergedAiHistoryRootsToDb(db, tabId, roots, attribution = {
       });
       collectChunkSidecarStats(chunk, stats);
       if (chunk.length) acc.add(chunk, totalWritten);
-      const prepared = prepareChunkRowsForDb(acc.rows, nextRecordId, maxRows, totalWritten);
+      // Retain FullText for AI tabs so the AI Secret Scan can see content past the 500-char Summary
+      // preview (the merged/triage path previously slimmed it, leaving secret detection blind).
+      let prepared = prepareChunkRowsForDb(acc.rows, nextRecordId, maxRows, totalWritten, { keepFullText: true });
+      const filtered = filterAlreadySeenStreamedRows(prepared, streamedSeenKeys);
+      prepared = filtered.rows;
+      streamedDuplicatesDropped += filtered.dropped;
+      for (let j = 0; j < prepared.length; j++) prepared[j].RecordId = String(nextRecordId + j);
       if (prepared.length) {
         writeAiHistoryRowsToDb(db, tabId, headers, prepared, checkAbort);
         totalWritten += prepared.length;
@@ -676,10 +707,8 @@ async function extractMergedAiHistoryRootsToDb(db, tabId, roots, attribution = {
   };
   if (stats.claudeDesktopStats) importMeta.claudeDesktop = stats.claudeDesktopStats;
   if (stats.chatgptStats) importMeta.chatgpt = stats.chatgptStats;
-  if (stats.copilotStats) {
-    importMeta.copilot = stats.copilotStats;
-  } else if (roots.some((r) => r.tool === "copilot")) {
-    importMeta.copilot = buildCopilotExtractionStats([], {});
+  if (stats.copilotStats || roots.some((r) => r.tool === "copilot")) {
+    importMeta.copilot = buildCopilotExtractionStats([], stats.copilotStats || {});
   }
   if (stats.windsurfStats) importMeta.windsurf = stats.windsurfStats;
   if (stats.codexStateSqliteStats) importMeta.codexStateSqlite = stats.codexStateSqliteStats;
@@ -689,8 +718,9 @@ async function extractMergedAiHistoryRootsToDb(db, tabId, roots, attribution = {
   if (sourceCount > 1) {
     importMeta.streamedMerge = {
       crossToolDedupe: false,
-      note: "Per-source dedupe only; cross-tool prompt merge and exact duplicates shared across "
-        + "separate sources are not collapsed during streamed import (kept for provenance).",
+      exactDuplicatesDropped: streamedDuplicatesDropped,
+      note: "Streamed import performs per-source dedupe plus exact duplicate suppression across sources. "
+        + "Cross-tool prompt merge is still skipped to preserve source provenance.",
     };
   }
 

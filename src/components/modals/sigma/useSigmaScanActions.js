@@ -61,7 +61,7 @@ export default function useSigmaScanActions({
       setModal((p) => ({
         ...p,
         largeJsSigmaScanConfirmed: true,
-        error: `Large imported-tab JS Sigma scan detected (${formatNumber(ct.totalRows || 0)} rows). Raw EVTX + Hayabusa is faster and more complete when available. Click Scan Imported Tab again to continue; each logsource group will be capped at ${formatNumber(JS_SIGMA_MAX_ROWS_PER_QUERY)} candidate rows to avoid runaway scans.`,
+        error: `Large imported-tab JS Sigma scan detected (${formatNumber(ct.totalRows || 0)} rows). Use the "Fast high-confidence only" preset (or fewer severity levels) for much faster results; raw EVTX + Hayabusa is faster when available. Click Scan Imported Tab again to continue; each logsource group is capped at ${formatNumber(JS_SIGMA_MAX_ROWS_PER_QUERY)} candidate rows.`,
       }));
       return;
     }

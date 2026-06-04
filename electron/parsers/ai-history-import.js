@@ -587,7 +587,7 @@ function planImportPaths(filePaths) {
 }
 
 /**
- * Import AI history into a tab (same contract as parseAmcacheFile).
+ * Import AI history into a tab (same contract as the other parseFile delegates).
  */
 async function parseAiHistoryImport(filePath, tabId, db, onProgress, detect) {
   const target = detect?.target || filePath;

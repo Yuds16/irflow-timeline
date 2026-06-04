@@ -54,6 +54,11 @@ function callAnalyzer(db, method, payload = {}) {
       });
     case "analyzeADS":
       return db.analyzeADS(tabId, { ...options });
+    case "analyzeAiHistory":
+      return db.analyzeAiHistory(tabId, {
+        ...options,
+        progressCb: (p) => progress({ phase: "ai-secrets", tabId, ...p }),
+      });
     case "analyzeUsnJournal":
       return db.analyzeUsnJournal(tabId, options);
     case "matchIocs":

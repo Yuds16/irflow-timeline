@@ -430,7 +430,14 @@ function extractChatgptDataFile(filePath, attribution) {
  */
 async function extractChatgptDir(appDir, attribution = {}, options = {}) {
   const rows = [];
-  const dataFiles = listChatgptDataFiles(appDir);
+  // Single tree walk collects BOTH the data files and the encrypted conversations-v2 bundles — the
+  // prior code walked the same appDir tree twice (listChatgptDataFiles + detectEncryptedConversationBundles).
+  const dataFiles = [];
+  const encryptedBundles = [];
+  walkChatgptFiles(appDir, (filePath) => {
+    if (isChatgptDataFile(filePath)) dataFiles.push(filePath);
+    if (/^conversations-v2/i.test(path.basename(filePath))) encryptedBundles.push(filePath);
+  });
   const fileCount = dataFiles.length;
   const { onFileProgress, onExtractedRows } = options;
   let streamConversationCount = 0;
@@ -456,7 +463,7 @@ async function extractChatgptDir(appDir, attribution = {}, options = {}) {
     if ((i + 1) % 12 === 0) await new Promise((r) => setImmediate(r));
   }
 
-  const encryptedBundles = detectEncryptedConversationBundles(appDir);
+  // encryptedBundles already collected in the single walk above (no second tree scan).
   const bundleRows = [];
   for (const bundlePath of encryptedBundles) {
     let mtime = "";

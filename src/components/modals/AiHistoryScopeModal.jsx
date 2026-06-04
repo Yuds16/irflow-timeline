@@ -6,7 +6,7 @@ import { Modal } from "../primitives/index.js";
 import { openAiHistoryScopeModal, openAiHistoryExtractModal } from "../../modals/modalRegistry.js";
 
 /**
- * In-app subagent scope choice (replaces native dialog for Tools → AI Artifacts → …).
+ * In-app subagent scope choice (replaces native dialog for Tools → AI Artifacts → AI Apps → …).
  */
 export default function AiHistoryScopeModal() {
   const modal = useUIStore((s) => s.modal);

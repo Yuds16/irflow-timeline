@@ -279,10 +279,11 @@ class TimelineDB {
    * Indexes, FTS, and ANALYZE are all deferred to async background builds
    * so the UI becomes interactive immediately after import completes.
    */
-  finalizeImport(tabId) {
+  finalizeImport(tabId, options = {}) {
     dbg("DB", `finalizeImport start`, { tabId });
     const meta = this.databases.get(tabId);
     if (!meta) { dbg("DB", `finalizeImport: no meta for tab`); return; }
+    const skipWalPromotion = !!options.skipWalPromotion;
 
     const db = meta.db;
 
@@ -341,12 +342,13 @@ class TimelineDB {
       }
     });
 
-    // Minimal pragmas so initial queries work while background builds run.
-    // buildIndexesAsync/buildFtsAsync set their own aggressive pragmas and
-    // restore full query mode (WAL + mmap + 256MB cache) when they finish.
-    db.pragma("journal_mode = WAL"); // need WAL for concurrent reads during build
-    db.pragma("synchronous = NORMAL");
-    db.pragma("cache_size = -262144"); // 256MB cache for queries
+    // Workers skip WAL promotion here — adoptTabFromFile on the main process sets WAL/mmap.
+    // Avoids a full checkpoint on close when the temp DB used journal_mode=OFF during ingest.
+    if (!skipWalPromotion) {
+      db.pragma("journal_mode = WAL"); // need WAL for concurrent reads during build
+      db.pragma("synchronous = NORMAL");
+      db.pragma("cache_size = -262144"); // 256MB cache for queries
+    }
 
     // Skip ANALYZE here — run after async index build completes
 
@@ -710,12 +712,15 @@ class TimelineDB {
       return aTs - bTs;
     });
 
-    // For large files, eagerly index ONLY timestamp columns (the ones analysts sort by
-    // first). Every other column is indexed lazily on first sort via _ensureIndex — this
-    // avoids the ~30-50GB all-column index footprint and ~10-25min build on a 30GB import.
+    // For large files, eagerly index timestamp columns plus EventID/Channel (JS Sigma
+    // logsource pre-filters). Other columns are indexed lazily on first sort via
+    // _ensureIndex — this avoids the ~30-50GB all-column index footprint on huge imports.
     // Deferred columns are intentionally NOT added to indexedCols, so _ensureIndex still
     // builds them on demand. (Small files keep eager all-column indexing for snappy filters.)
-    const eagerCols = meta.isLargeFile ? allCols.filter((c) => tsSet_.has(c.original)) : allCols;
+    const isSigmaFilterCol = (name) => /^(EventID|EventId|event_id|eventid|id|Channel|SourceName|Provider)$/i.test(String(name || ""));
+    const eagerCols = meta.isLargeFile
+      ? allCols.filter((c) => tsSet_.has(c.original) || isSigmaFilterCol(c.original))
+      : allCols;
 
     // Pre-filter: skip columns with uniform values (cardinality ≤ 1)
     // Sample-based: check first + middle + last 100 rows instead of full DISTINCT scan
@@ -1401,6 +1406,12 @@ class TimelineDB {
     const analyzers = require("./analyzers");
     const getDatabaseMeta = (id) => this.databases.get(id);
     return analyzers.analyzeUsnJournal(this.databases.get(tabId), opts, getDatabaseMeta);
+  }
+
+  analyzeAiHistory(tabId, opts) {
+    const analyzers = require("./analyzers");
+    const o = typeof opts === "function" ? { progressCb: opts } : (opts || {});
+    return analyzers.analyzeAiHistory(this.databases.get(tabId), o);
   }
 
   resolveUsnPaths(tabId, mftTabId) {

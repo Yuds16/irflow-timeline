@@ -11,7 +11,29 @@ const path = require("node:path");
 
 const { readJsonlBounded } = require("../electron/parsers/ai-history/jsonl-reader");
 const { makeRow } = require("../electron/parsers/ai-history/row-utils");
-const { parseKvValue } = require("../electron/parsers/ai-history/vscdb-kv");
+const {
+  loadBubbleMapForComposer,
+  loadBubblesForComposer,
+  parseKvValue,
+} = require("../electron/parsers/ai-history/vscdb-kv");
+
+function fakeCursorKvDb(rowCount) {
+  const rows = Array.from({ length: rowCount }, (_unused, i) => ({
+    key: `bubbleId:composer-1:${i}`,
+    value: JSON.stringify({ type: 1, text: `message ${i}` }),
+  }));
+  return {
+    prepare(sql) {
+      return {
+        all() {
+          if (sql.includes("sqlite_master")) return [{ name: "cursorDiskKV" }];
+          if (sql.includes("WHERE key LIKE ?")) return rows;
+          throw new Error(`unexpected query: ${sql}`);
+        },
+      };
+    },
+  };
+}
 
 async function withTmpFile(content, fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "irflow-caps-"));
@@ -71,9 +93,28 @@ test("makeRow caps FullText and marks the truncation", () => {
   assert.match(row.FullText, /truncated \d+ chars/);
 });
 
+test("makeRow leaves InvokedTool blank when no specific tool call exists", () => {
+  const row = makeRow({ role: "user", summary: "investigate this timeline" }, "OpenAI Codex");
+  assert.equal(row.Tool, "OpenAI Codex");
+  assert.equal(row.InvokedTool, "");
+
+  const call = makeRow({ role: "assistant", summary: "run shell", tool: "OpenAI Codex", toolName: "shell" }, "OpenAI Codex");
+  assert.equal(call.Tool, "OpenAI Codex");
+  assert.equal(call.InvokedTool, "shell");
+});
+
 test("parseKvValue refuses an oversized BLOB but still parses normal values", () => {
   assert.equal(parseKvValue(Buffer.alloc(40 * 1024 * 1024, 0x20)), null, "40MB value skipped");
   assert.deepEqual(parseKvValue(Buffer.from('{"ok":true}', "utf8")), { ok: true });
   assert.deepEqual(parseKvValue('{"n":2}'), { n: 2 });
   assert.equal(parseKvValue(null), null);
+});
+
+test("Cursor composer bubble loaders cap one huge session", () => {
+  const db = fakeCursorKvDb(4105);
+  const bubbles = loadBubblesForComposer(db, "composer-1");
+  const bubbleMap = loadBubbleMapForComposer(db, "composer-1");
+
+  assert.equal(bubbles.length, 4000);
+  assert.equal(bubbleMap.size, 4000);
 });

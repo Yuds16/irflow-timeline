@@ -52,6 +52,40 @@ function writeAiHistoryRowsToDb(db, tabId, headers, rows, checkAbort = () => {})
   }
 }
 
+function streamedDedupeSummary(row) {
+  return String(row?.Summary || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
+}
+
+function streamedImportDedupeKey(row) {
+  const tool = String(row?.Tool || "").trim();
+  const sessionId = String(row?.SessionId || "").trim();
+  const timestamp = String(row?.Timestamp || "").trim();
+  const role = String(row?.Role || "").trim();
+  const summary = streamedDedupeSummary(row);
+  if (!tool || !sessionId || !timestamp || !role || !summary) return "";
+  return [tool, sessionId, timestamp, role, summary].join("\x1e");
+}
+
+function filterAlreadySeenStreamedRows(rows, seenKeys) {
+  if (!seenKeys || !rows?.length) return { rows: rows || [], dropped: 0 };
+  const out = [];
+  let dropped = 0;
+  for (const row of rows) {
+    const key = streamedImportDedupeKey(row);
+    if (key && seenKeys.has(key)) {
+      dropped += 1;
+      continue;
+    }
+    if (key) seenKeys.add(key);
+    out.push(row);
+  }
+  return { rows: out, dropped };
+}
+
 /**
  * Bounded per-source accumulator. Collect a source's emitted batches up to the remaining global
  * row budget, then flush once so dedupe sees the whole source. Capping the buffer to the budget
@@ -84,5 +118,7 @@ module.exports = {
   slimAiHistoryRowForDb,
   prepareChunkRowsForDb,
   writeAiHistoryRowsToDb,
+  streamedImportDedupeKey,
+  filterAlreadySeenStreamedRows,
   makeSourceAccumulator,
 };

@@ -144,9 +144,14 @@ function supplementCodexFromStateSqlite(codexRoot, attribution = {}, options = {
     safeCloseDb(db);
   }
 
-  const unique = sortAndNumberRows(rows).filter((r, i, arr) => {
+  // Single-pass Set dedupe (keep first occurrence in sorted order) — the prior findIndex-in-filter was
+  // O(n^2) over the index rows (~250k comparisons at 500 rows).
+  const seen = new Set();
+  const unique = sortAndNumberRows(rows).filter((r) => {
     const k = `${r.SessionId}:${r.Summary.slice(0, 60)}`;
-    return arr.findIndex((x) => `${x.SessionId}:${x.Summary.slice(0, 60)}` === k) === i;
+    if (seen.has(k)) return false;
+    seen.add(k);
+    return true;
   });
 
   return {

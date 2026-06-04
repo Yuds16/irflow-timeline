@@ -3,10 +3,14 @@ const { contextBridge, ipcRenderer, webUtils } = require("electron");
 contextBridge.exposeInMainWorld("tle", {
   // File operations
   openFileDialog: () => ipcRenderer.invoke("open-file-dialog"),
+  openAiSource: (filePath, lineNumber) => ipcRenderer.invoke("open-ai-source", { filePath, lineNumber }),
   openExternal: (url) => ipcRenderer.invoke("open-external", { url }),
   checkForUpdates: () => ipcRenderer.invoke("check-for-updates"),
   installUpdate: () => ipcRenderer.invoke("install-update"),
-  importFiles: (filePaths) => ipcRenderer.invoke("import-files", { filePaths }),
+  importFiles: (filePaths, options) => ipcRenderer.invoke("import-files", {
+    filePaths: filePaths || [],
+    items: options?.items,
+  }),
   listJobs: () => ipcRenderer.invoke("jobs-list"),
   cancelJob: (jobId) => ipcRenderer.invoke("jobs-cancel", { jobId }),
   debugLog: (payload) => ipcRenderer.invoke("debug-log", payload),
@@ -28,6 +32,7 @@ contextBridge.exposeInMainWorld("tle", {
   getTabInfo: (tabId) => ipcRenderer.invoke("get-tab-info", { tabId }),
   getFtsStatus: (tabId) => ipcRenderer.invoke("get-fts-status", { tabId }),
   exportFiltered: (tabId, options) => ipcRenderer.invoke("export-filtered", { tabId, options }),
+  exportAiHistoryPackage: (tabId, options, tabName, sourceFormat) => ipcRenderer.invoke("export-ai-history-package", { tabId, options, tabName, sourceFormat }),
   extractResidentData: (tabId) => ipcRenderer.invoke("extract-resident-data", { tabId }),
   analyzeRansomware: (tabId, encryptedExt, ransomNotePattern, noteMatchMode, usnTabId) => ipcRenderer.invoke("analyze-ransomware", { tabId, encryptedExt, ransomNotePattern, noteMatchMode, usnTabId }),
   scanRansomwareExtensions: (tabId) => ipcRenderer.invoke("scan-ransomware-extensions", { tabId }),
@@ -35,8 +40,15 @@ contextBridge.exposeInMainWorld("tle", {
   getFileActivityHeatmap: (tabId) => ipcRenderer.invoke("get-file-activity-heatmap", { tabId }),
   analyzeADS: (tabId) => ipcRenderer.invoke("analyze-ads", { tabId }),
   analyzeUsnJournal: (tabId, startTime, endTime, analyses, pathFilter, mftTabId) => ipcRenderer.invoke("analyze-usn-journal", { tabId, startTime, endTime, analyses, pathFilter, mftTabId }),
+  analyzeAiHistory: (tabId, options) => ipcRenderer.invoke("analyze-ai-history", { tabId, mode: options?.mode, redact: options?.redact, salt: options?.salt }),
+  decodeAiHistory: (path, tool, options) => ipcRenderer.invoke("decode-ai-history", { path, tool, ...(options || {}) }),
+  pickAiHistoryScanFolder: () => ipcRenderer.invoke("pick-ai-history-scan-folder"),
+  discoverAiHistoryProfile: (options) => ipcRenderer.invoke("discover-ai-history-profile", options || {}),
+  extractAiHistoryProfile: (options) => ipcRenderer.invoke("extract-ai-history-profile", options || {}),
+  cancelAiHistoryExtract: () => ipcRenderer.invoke("cancel-ai-history-extract"),
   saveTextFile: (content, defaultPath, filters) => ipcRenderer.invoke("save-text-file", { content, defaultPath, filters }),
   exportRansomwarePdf: (html, defaultName) => ipcRenderer.invoke("export-ransomware-pdf", { html, defaultName }),
+  exportAiSecretsPdf: (html, defaultName) => ipcRenderer.invoke("export-ai-secrets-pdf", { html, defaultName }),
   generateReport: (tabId, fileName, tagColors, vtEnrichment) => ipcRenderer.invoke("generate-report", { tabId, fileName, tagColors, vtEnrichment }),
   selectSheet: (data) => ipcRenderer.invoke("select-sheet", data),
   searchCount: (tabId, searchTerm, searchMode, searchCondition) => ipcRenderer.invoke("search-count", { tabId, searchTerm, searchMode, searchCondition }),
@@ -128,7 +140,11 @@ contextBridge.exposeInMainWorld("tle", {
   onFtsProgress: (cb) => ipcRenderer.on("fts-progress", (_, d) => cb(d)),
   onIndexProgress: (cb) => ipcRenderer.on("index-progress", (_, d) => cb(d)),
   onJobProgress: (cb) => ipcRenderer.on("job-progress", (_, d) => cb(d)),
-  onAnalysisProgress: (cb) => ipcRenderer.on("analysis-progress", (_, d) => cb(d)),
+  onAnalysisProgress: (cb) => {
+    const handler = (_, d) => cb(d);
+    ipcRenderer.on("analysis-progress", handler);
+    return () => ipcRenderer.removeListener("analysis-progress", handler);
+  },
   onProcessTreeComplete: (cb) => ipcRenderer.on("process-tree-complete", (_, d) => cb(d)),
   onSheetSelection: (cb) => ipcRenderer.on("sheet-selection", (_, d) => cb(d)),
   onRecentFilesUpdated: (cb) => ipcRenderer.on("recent-files-updated", (_, d) => cb(d)),
@@ -157,7 +173,7 @@ contextBridge.exposeInMainWorld("tle", {
   sigmaGetRules: () => ipcRenderer.invoke("sigma-get-rules"),
   sigmaScan: (tabId, options) => ipcRenderer.invoke("sigma-scan", { tabId, options }),
   sigmaDetectFormat: (tabId) => ipcRenderer.invoke("sigma-detect-format", { tabId }),
-  sigmaOpenAsTab: (rows, name, jobId) => ipcRenderer.invoke("sigma-open-as-tab", { rows, name, jobId }),
+  sigmaOpenAsTab: (rows, name, jobId, options) => ipcRenderer.invoke("sigma-open-as-tab", { rows, name, jobId, ...(options || {}) }),
   sigmaOpenDirResultsAsTab: (name, jobId) => ipcRenderer.invoke("sigma-open-dir-results-as-tab", { name, jobId }),
   sigmaHayabusaStatus: () => ipcRenderer.invoke("sigma-hayabusa-status"),
   sigmaHayabusaDownload: () => ipcRenderer.invoke("sigma-hayabusa-download"),
@@ -206,6 +222,7 @@ contextBridge.exposeInMainWorld("tle", {
   sigmaGeoIpDownload: () => ipcRenderer.invoke("sigma-geoip-download"),
   sigmaSelectGeoIpDir: () => ipcRenderer.invoke("sigma-select-geoip-dir"),
   onSigmaProgress: (cb) => ipcRenderer.on("sigma-progress", (_, d) => cb(d)),
+  onAiHistoryProfileProgress: (cb) => ipcRenderer.on("ai-history-profile-progress", (_, d) => cb(d)),
 
   // Menu triggers
   onTriggerOpen: (cb) => ipcRenderer.on("trigger-open", () => cb()),

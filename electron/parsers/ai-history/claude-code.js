@@ -13,6 +13,7 @@ const { readJsonlBounded } = require("./jsonl-reader");
 const { dbg } = require("../../logger");
 const { TOOL_CLAUDE_CODE } = require("./schema");
 const { shouldSkipSubagentPath, filterSidechainRows, tickFileProgress } = require("./extract-plan");
+const { processFilesConcurrently } = require("./file-batch");
 const {
   formatTimestampUtc,
   parseIsoTimestamp,
@@ -347,16 +348,15 @@ async function extractClaudeDir(claudeDir, attribution = {}, options = {}) {
     }
   }
 
-  for (const sessionPath of sessionPaths) {
-    fileIndex += 1;
-    tickFileProgress(onFileProgress, fileIndex, fileCount, sessionPath);
-    try {
-      emitBatch(await extractSessionFile(sessionPath, attribution, parseStats));
-    } catch (e) {
-      dbg("AIHIST", "session jsonl failed", { path: sessionPath, err: e.message });
-    }
-    if (fileIndex % 8 === 0) await new Promise((r) => setImmediate(r));
-  }
+  // Read session files in bounded-concurrency batches (order-independent: sink dedupes, DB/finalize
+  // sorts). Per-file error isolation + progress preserved; yields between batches.
+  await processFilesConcurrently(sessionPaths, {
+    process: (sessionPath) => extractSessionFile(sessionPath, attribution, parseStats),
+    onProgress: (sessionPath) => { fileIndex += 1; tickFileProgress(onFileProgress, fileIndex, fileCount, sessionPath); },
+    onRows: (batch) => emitBatch(batch),
+    onError: (e, sessionPath) => dbg("AIHIST", "session jsonl failed", { path: sessionPath, err: e.message }),
+    checkAbort: options.checkAbort,
+  });
 
   if (onExtractedRows) {
     const out = [];

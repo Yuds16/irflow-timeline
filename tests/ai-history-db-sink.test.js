@@ -10,6 +10,7 @@ const assert = require("node:assert/strict");
 const {
   prepareChunkRowsForDb,
   writeAiHistoryRowsToDb,
+  filterAlreadySeenStreamedRows,
   makeSourceAccumulator,
 } = require("../electron/parsers/ai-history/db-sink");
 const { makeRow } = require("../electron/parsers/ai-history/row-utils");
@@ -70,4 +71,25 @@ test("writeAiHistoryRowsToDb maps rows to header arrays and batches inserts", ()
   writeAiHistoryRowsToDb(fakeDb, "tab-1", AI_HISTORY_COLUMNS, rows);
   assert.deepEqual(calls.map((c) => c.count), [5000, 5000, 2000], "batched at AI_HISTORY_DB_BATCH");
   assert.equal(calls[0].first.length, AI_HISTORY_COLUMNS.length, "each row mapped to a full header-ordered array");
+});
+
+test("filterAlreadySeenStreamedRows drops exact duplicates across streamed sources", () => {
+  const seen = new Set();
+  const first = makeRow({
+    role: "assistant",
+    summary: "same Claude response body with enough text to be useful",
+    sessionId: "sess-1",
+    timestamp: "2026-06-01 10:00:00",
+  }, "Claude Code");
+  const duplicate = { ...first, SourceFile: "/other/source.jsonl" };
+  const differentTool = { ...first, Tool: "Cursor" };
+
+  let result = filterAlreadySeenStreamedRows([first], seen);
+  assert.equal(result.rows.length, 1);
+  assert.equal(result.dropped, 0);
+
+  result = filterAlreadySeenStreamedRows([duplicate, differentTool], seen);
+  assert.equal(result.rows.length, 1, "same app/session/timestamp/role/summary duplicate is dropped");
+  assert.equal(result.rows[0].Tool, "Cursor", "same prompt from a different AI app is retained");
+  assert.equal(result.dropped, 1);
 });

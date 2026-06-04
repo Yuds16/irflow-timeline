@@ -11,6 +11,133 @@ export function openSimpleModal(type, extra = {}) {
   return { type, ...extra };
 }
 
+/** Collect AI Artifacts — discover local AI roots, then extract with live progress. */
+export function openAiHistoryScopeModal({
+  tool,
+  target,
+  label,
+  includeSubagents = false,
+  mode = "extract",
+  scopeQueue = [],
+} = {}) {
+  return {
+    type: "aiHistoryScope",
+    tool,
+    target,
+    label: label || "AI history",
+    includeSubagents,
+    mode,
+    scopeQueue,
+    busy: false,
+  };
+}
+
+export function openAiWorkspaceCorrelateModal({ path, targets }) {
+  return { type: "aiWorkspaceCorrelate", path, targets: targets || [] };
+}
+
+/** AI Secret Hunt (AI Secret & Leak Scan) — credential/key/PII detector over an AI history tab. */
+export function openAiSecretsModal({ tabId, tabName, ...extra } = {}) {
+  return {
+    type: "aiSecrets",
+    phase: "input",
+    autoStart: true, // launch straight into a Quick scan (fewer clicks); Deep is one toggle in results
+    tabId: tabId || null,
+    tabName: tabName || "",
+    scanMode: "quick",
+    redact: true,
+    showFilters: false,
+    data: null,
+    error: null,
+    reveal: {},
+    fSev: "all",
+    fCat: "all",
+    fConf: "all",
+    fTool: "all",
+    fRole: "all",
+    fSession: "all",
+    fWorkspace: "all",
+    fSource: "all",
+    fTag: "all",
+    q: "",
+    evidenceQ: "",
+    viewMode: "incidents",
+    expandedGroup: null,
+    secretTags: {},
+    tagDraft: "",
+    tagMenuGroup: null,
+    showColumnTools: false,
+    incidentColumnWidths: {},
+    timelineColumnWidths: {},
+    evidenceColumnWidths: {},
+    evidenceColumnVisibility: { context: true, secret: true, source: true, actions: true },
+    ...extra,
+  };
+}
+
+/** Single-tool extract with verbose progress (Tools → AI Artifacts → AI Apps → …). */
+export function openAiHistoryExtractModal({
+  tool,
+  target,
+  extractTarget,
+  label,
+  includeSubagents = false,
+} = {}) {
+  const path = extractTarget || target;
+  return {
+    type: "aiHistoryExtract",
+    phase: "extracting",
+    extractRunId: `${tool}:${path}:${Date.now()}`,
+    tool,
+    target,
+    extractTarget: path,
+    label: label || "AI history",
+    includeSubagents: !!includeSubagents,
+    scanning: true,
+    error: null,
+    sourceStatus: path ? { [sourceKey({ tool, path, label })]: "active" } : {},
+    progress: {
+      percent: 2,
+      phase: "extracting",
+      statusDetail: "Starting extraction worker…",
+      rowsSoFar: 0,
+      log: [
+        `Tool: ${label || tool}`,
+        path ? `Path: ${path}` : "",
+        includeSubagents ? "Scope: main + subagent sessions" : "Scope: main sessions only",
+      ].filter(Boolean),
+    },
+  };
+}
+
+function sourceKey(root) {
+  return `${root.tool}:${root.path}`;
+}
+
+export function openAiHistoryProfileScanModal(extra = {}) {
+  return {
+    type: "aiHistoryProfileScan",
+    phase: "choose-target",
+    scanMode: null,
+    scanRoot: null,
+    roots: [],
+    candidateCount: 0,
+    hasScopeChoice: false,
+    includeSubagents: false,
+    scanning: false,
+    error: null,
+    progress: {
+      percent: 0,
+      statusDetail: "Choose where to scan for AI assistant artifacts",
+      phase: "choose-target",
+      rowsSoFar: 0,
+      log: [],
+    },
+    sourceStatus: {},
+    ...extra,
+  };
+}
+
 export function openStackingModal(colName, extra = {}) {
   return { type: "stacking", colName, data: null, loading: true, filterText: "", sortBy: "count", ...extra };
 }

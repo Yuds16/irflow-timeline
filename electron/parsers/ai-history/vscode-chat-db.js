@@ -1,7 +1,8 @@
 /**
  * vscode-chat-db.js — VS Code / Windsurf / Copilot workspace state.vscdb chat extraction.
  *
- * Reads legacy ItemTable keys (aiService.prompts, aichat.chatdata) when chatSessions JSON is empty.
+ * Reads legacy ItemTable keys (aiService.prompts, aichat.chatdata) and modern VS Code chat keys
+ * (agentSessions.model.cache, chat.ChatSessionStore.index) when chatSessions JSON is empty.
  */
 
 const fs = require("fs");
@@ -39,6 +40,111 @@ const ITEM_CHAT_KEYS = [
   "workbench.panel.chat.view.chat.response",
   "workbench.panel.chat.view.copilot.chatdata",
 ];
+
+const AGENT_SESSIONS_KEY = "agentSessions.model.cache";
+const CHAT_SESSION_INDEX_KEY = "chat.ChatSessionStore.index";
+
+const COPILOT_PROVIDER_RE = /copilot|github/i;
+const CODEX_PROVIDER_RE = /codex|openai-codex/i;
+
+function matchesProviderFilter(entry, filter) {
+  if (!filter) return true;
+  if (typeof filter === "function") return filter(entry);
+  if (filter instanceof RegExp) {
+    const hay = `${entry?.providerType || ""} ${entry?.providerLabel || ""}`;
+    return filter.test(hay);
+  }
+  return true;
+}
+
+function sessionIdFromAgentResource(resource) {
+  if (resource == null || resource === "") return "";
+  const s = String(resource);
+  const tail = s.match(/([0-9a-f-]{36})$/i);
+  return tail ? tail[1] : s;
+}
+
+function agentSessionTimestampMs(entry) {
+  const raw = entry?.timing?.created
+    ?? entry?.timing?.lastRequestStarted
+    ?? entry?.timing?.lastRequestEnded;
+  if (raw == null) return null;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    return raw > 1e12 ? raw : raw * 1000;
+  }
+  return parseIsoTimestamp(raw);
+}
+
+function rowsFromAgentSessionsCache(data, sourceFile, toolLabel, attribution, workspace, options = {}) {
+  const rows = [];
+  let alternateAgentSessions = 0;
+  if (!Array.isArray(data)) return { rows, alternateAgentSessions };
+
+  let idx = 0;
+  for (const entry of data) {
+    if (!entry || typeof entry !== "object") continue;
+    if (!matchesProviderFilter(entry, options.providerFilter)) {
+      alternateAgentSessions += 1;
+      continue;
+    }
+    const label = String(entry.label || entry.title || "").trim();
+    if (!label) continue;
+    idx += 1;
+    const sessionId = sessionIdFromAgentResource(entry.resource)
+      || String(entry.sessionId || idx);
+    rows.push(makeRow({
+      timestamp: formatTimestampUtc(agentSessionTimestampMs(entry)),
+      role: "user",
+      recordType: "agent_session",
+      summary: label,
+      sessionId,
+      messageId: String(idx),
+      workspace,
+      model: entry.providerLabel || entry.providerType || "",
+      sourceFile,
+      user: attribution.user || "",
+      host: attribution.host || "",
+      tool: toolLabel,
+      description: "VS Code agent session index (first prompt label; full transcript may not be on disk)",
+    }, toolLabel));
+  }
+  return { rows, alternateAgentSessions };
+}
+
+function rowsFromChatSessionStoreIndex(data, sourceFile, toolLabel, attribution, workspace) {
+  const rows = [];
+  if (!data || typeof data !== "object") return rows;
+  const entries = data.entries && typeof data.entries === "object" ? data.entries : data;
+  if (!entries || typeof entries !== "object" || Array.isArray(entries)) return rows;
+
+  let idx = 0;
+  for (const [key, entry] of Object.entries(entries)) {
+    if (!entry || typeof entry !== "object") continue;
+    const title = String(entry.title || "").trim();
+    if (!title || title === "New Chat") continue;
+    if (entry.isEmpty === true && !title) continue;
+    idx += 1;
+    const sessionId = String(entry.sessionId || key);
+    const tsMs = entry.lastMessageDate ?? entry.timing?.created ?? entry.timing?.lastRequestEnded;
+    rows.push(makeRow({
+      timestamp: formatTimestampUtc(tsMs != null && typeof tsMs === "number"
+        ? (tsMs > 1e12 ? tsMs : tsMs * 1000)
+        : parseIsoTimestamp(tsMs)),
+      role: "system",
+      recordType: "session_index",
+      summary: title,
+      sessionId,
+      messageId: String(idx),
+      workspace,
+      sourceFile,
+      user: attribution.user || "",
+      host: attribution.host || "",
+      tool: toolLabel,
+      description: "VS Code chat session index title (chatSessions file may be an empty shell)",
+    }, toolLabel));
+  }
+  return rows;
+}
 
 function textFromPromptEntry(entry) {
   if (entry == null) return "";
@@ -136,23 +242,55 @@ function rowsFromChatData(data, sessionId, sourceFile, toolLabel, attribution, w
   return rows;
 }
 
-function extractChatFromVscdb(dbPath, toolLabel, attribution, workspaceLabel) {
+function extractChatFromVscdb(dbPath, toolLabel, attribution, workspaceLabel, options = {}) {
   const rows = [];
+  let alternateAgentSessions = 0;
   let db;
   try {
     db = openVscdbReadOnly(dbPath);
     const tables = kvTableNames(db);
-    if (!tables.includes("ItemTable")) return rows;
+    if (!tables.includes("ItemTable")) return { rows, alternateAgentSessions };
 
-    for (const key of ITEM_CHAT_KEYS) {
-      const row = queryKvByKey(db, "ItemTable", key);
-      if (!row) continue;
-      const data = parseKvValue(row.value);
-      const sid = `${path.basename(path.dirname(dbPath))}:${key}`;
-      if (key.includes("prompts") || key.includes("generations")) {
-        rows.push(...rowsFromPromptArray(data, sid, dbPath, toolLabel, attribution, workspaceLabel));
-      } else {
-        rows.push(...rowsFromChatData(data, sid, dbPath, toolLabel, attribution, workspaceLabel));
+    if (!options.agentSessionsOnly) {
+      for (const key of ITEM_CHAT_KEYS) {
+        const row = queryKvByKey(db, "ItemTable", key);
+        if (!row) continue;
+        const data = parseKvValue(row.value);
+        const sid = `${path.basename(path.dirname(dbPath))}:${key}`;
+        if (key.includes("prompts") || key.includes("generations")) {
+          rows.push(...rowsFromPromptArray(data, sid, dbPath, toolLabel, attribution, workspaceLabel));
+        } else {
+          rows.push(...rowsFromChatData(data, sid, dbPath, toolLabel, attribution, workspaceLabel));
+        }
+      }
+    }
+
+    const agentRow = queryKvByKey(db, "ItemTable", AGENT_SESSIONS_KEY);
+    if (agentRow) {
+      const agentData = parseKvValue(agentRow.value);
+      const { rows: agentRows, alternateAgentSessions: alternates } = rowsFromAgentSessionsCache(
+        agentData,
+        dbPath,
+        toolLabel,
+        attribution,
+        workspaceLabel,
+        options,
+      );
+      rows.push(...agentRows);
+      alternateAgentSessions += alternates;
+    }
+
+    if (!options.agentSessionsOnly) {
+      const indexRow = queryKvByKey(db, "ItemTable", CHAT_SESSION_INDEX_KEY);
+      if (indexRow) {
+        const indexData = parseKvValue(indexRow.value);
+        rows.push(...rowsFromChatSessionStoreIndex(
+          indexData,
+          dbPath,
+          toolLabel,
+          attribution,
+          workspaceLabel,
+        ));
       }
     }
   } catch (e) {
@@ -160,7 +298,7 @@ function extractChatFromVscdb(dbPath, toolLabel, attribution, workspaceLabel) {
   } finally {
     safeCloseDb(db);
   }
-  return rows;
+  return { rows, alternateAgentSessions };
 }
 
 /**
@@ -168,7 +306,9 @@ function extractChatFromVscdb(dbPath, toolLabel, attribution, workspaceLabel) {
  */
 async function extractVsCodeUserChatDir(userDir, toolLabel, attribution = {}, options = {}) {
   const rows = [];
-  if (!userDir || !fs.existsSync(userDir)) return { rows, stats: { databases: 0, messageRows: 0 } };
+  if (!userDir || !fs.existsSync(userDir)) {
+    return { rows, stats: { databases: 0, messageRows: 0, alternateAgentSessions: 0 } };
+  }
 
   const dbs = new Set();
   const globalDb = path.join(userDir, "globalStorage", "state.vscdb");
@@ -182,6 +322,7 @@ async function extractVsCodeUserChatDir(userDir, toolLabel, attribution = {}, op
 
   const dbList = [...dbs];
   let fileIndex = 0;
+  let alternateAgentSessions = 0;
   const { onFileProgress, checkAbort } = options;
 
   for (const dbPath of dbList) {
@@ -191,24 +332,77 @@ async function extractVsCodeUserChatDir(userDir, toolLabel, attribution = {}, op
     const wsLabel = dbPath.includes("workspaceStorage")
       ? path.basename(path.dirname(dbPath))
       : "global";
-    rows.push(...extractChatFromVscdb(dbPath, toolLabel, attribution, wsLabel));
+    const chunk = extractChatFromVscdb(dbPath, toolLabel, attribution, wsLabel, options);
+    rows.push(...chunk.rows);
+    alternateAgentSessions += chunk.alternateAgentSessions || 0;
     if (fileIndex % 3 === 0) await new Promise((r) => setImmediate(r));
   }
 
   return {
     rows,
-    stats: { databases: dbList.length, messageRows: rows.length },
+    stats: {
+      databases: dbList.length,
+      messageRows: rows.length,
+      alternateAgentSessions,
+    },
   };
 }
 
 function buildVsCodeChatImportNotice(toolLabel, stats) {
   if (!stats?.messageRows) return "";
-  return `${toolLabel} workspace DB: ${stats.messageRows} message(s) from ${stats.databases} state.vscdb file(s).`;
+  let msg = `${toolLabel} workspace DB: ${stats.messageRows} message(s) from ${stats.databases} state.vscdb file(s).`;
+  if (stats.agentSessionRows) {
+    msg += ` ${stats.agentSessionRows} from VS Code agent session index.`;
+  }
+  return msg;
+}
+
+/**
+ * Read VS Code agentSessions.model.cache rows for Codex (embedded in VS Code, not ~/.codex).
+ */
+async function supplementCodexFromVsCodeAgentSessions(attribution = {}, options = {}) {
+  const { listCopilotUserDirs } = require("./artifact-paths");
+  const { dedupeAiHistoryRows } = require("./row-utils");
+  const { TOOL_CODEX } = require("./schema");
+  const merged = [];
+  let databases = 0;
+  let agentSessionRows = 0;
+
+  for (const userDir of listCopilotUserDirs()) {
+    if (!fs.existsSync(userDir)) continue;
+    const { rows, stats } = await extractVsCodeUserChatDir(userDir, TOOL_CODEX, attribution, {
+      ...options,
+      agentSessionsOnly: true,
+      providerFilter: (entry) => CODEX_PROVIDER_RE.test(`${entry?.providerType || ""} ${entry?.providerLabel || ""}`),
+    });
+    if (stats?.databases) databases += stats.databases;
+    if (rows.length) {
+      merged.push(...rows);
+      agentSessionRows += rows.length;
+    }
+  }
+
+  return {
+    rows: dedupeAiHistoryRows(merged),
+    stats: {
+      databases,
+      messageRows: merged.length,
+      agentSessionRows,
+    },
+  };
 }
 
 module.exports = {
   extractVsCodeUserChatDir,
   extractChatFromVscdb,
   buildVsCodeChatImportNotice,
+  supplementCodexFromVsCodeAgentSessions,
   messageTimestampMs,
+  rowsFromAgentSessionsCache,
+  rowsFromChatSessionStoreIndex,
+  matchesProviderFilter,
+  COPILOT_PROVIDER_RE,
+  CODEX_PROVIDER_RE,
+  AGENT_SESSIONS_KEY,
+  CHAT_SESSION_INDEX_KEY,
 };

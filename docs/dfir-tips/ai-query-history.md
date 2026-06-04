@@ -23,7 +23,7 @@ Supported today:
 
 ### Canonical artifact paths (what IRFlow scans)
 
-IRFlow’s **Scan AI Artifacts**, triage detection, and **File → Open** defaults use the paths below (aligned with [as-aix](https://github.com/acquiredsecurity/as-aix), vendor docs, and DFIR writeups).
+IRFlow’s **Collect AI Artifacts**, triage detection, and **File → Open** defaults use the paths below (aligned with [as-aix](https://github.com/acquiredsecurity/as-aix), vendor docs, and DFIR writeups).
 
 | Tool | Platform | Path |
 |------|----------|------|
@@ -156,9 +156,9 @@ Sessions are stored as `.json` or `.jsonl`. JSONL replays `kind: 0` / `kind: 2` 
 
 ## How to use it in IRFlow
 
-### Scan AI Artifacts (all tools)
+### Collect AI Artifacts (all tools)
 
-**Tools → Analysis → AI Artifacts → Scan AI Artifacts…** opens a progress modal with two targets:
+**Tools → AI Artifacts → Collect AI Artifacts…** opens a progress modal with two targets:
 
 1. **This Mac** — the logged-in analyst profile (same paths as the table below).
 2. **Browse folder…** — KAPE collections, triage packages, mounted disks, or external drives. IRFlow walks the tree and matches **Windows** (`Users\<user>\…`, `AppData\Roaming\…`), **Linux** (`home/<user>/…`, `.config/…`), and **macOS** (`Users/<user>/Library/…`) layouts automatically.
@@ -220,8 +220,8 @@ IRFlow opens a new timeline tab with all extracted messages.
 - **Cancel** — profile imports run in a worker thread; cancel uses a per-job abort check so a second import is not stopped by an earlier cancel.
 - **Row cap** — merged profile extracts stop ingesting after **3,000,000** rows; the tab notice reports when the cap was hit.
 - **Malformed JSONL** — Claude, Codex, and Cursor parsers count lines that fail JSON parse; the import notice reports the total so you know data may be incomplete.
-- **Scope confinement** — when you pick a KAPE folder or collection root for AI extract, discovered artifact paths must resolve **inside** that folder; paths outside the scope (including `..` traversal) are dropped. The same confinement applies whenever a **browse folder** path is set on **Scan AI Artifacts**, even if discovery also probed standard local paths.
-- **Path authorization** — folders and files chosen in **File → Open**, **Tools → AI Artifacts**, and **Scan AI Artifacts** (browse) are registered in a scoped allow-list before read (same model as Sigma/KAPE scan targets). Renderer-supplied paths that were not picked in-app are rejected.
+- **Scope confinement** — when you pick a KAPE folder or collection root for AI extract, discovered artifact paths must resolve **inside** that folder; paths outside the scope (including `..` traversal) are dropped. The same confinement applies whenever a **browse folder** path is set on **Collect AI Artifacts**, even if discovery also probed standard local paths.
+- **Path authorization** — folders and files chosen in **File → Open**, **Tools → AI Artifacts**, and **Collect AI Artifacts** (browse) are registered in a scoped allow-list before read (same model as Sigma/KAPE scan targets). Renderer-supplied paths that were not picked in-app are rejected.
 
 ## Export for reporting
 
@@ -249,7 +249,7 @@ Share the folder with counsel or attach it to a case folder; re-hash sources ind
 
 ## Extraction safeguards
 
-Large profile scans, **Scan AI Artifacts**, and merged folder extracts share the same merge pipeline:
+Large profile scans, **Collect AI Artifacts**, and merged folder extracts share the same merge pipeline:
 
 - **Cancel** — Stop during profile scans and folder-based AI artifact scans; the worker passes an abort token so parsing stops promptly (not only after the merge phase).
 - **Row cap** — Merged timelines stop at **3,000,000** message rows by default; the import notice reports truncation and any skipped sources.

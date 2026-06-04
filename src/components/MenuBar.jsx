@@ -4,9 +4,23 @@ import useTabStore from "../store/useTabStore.js";
 import { toast } from "../store/useToastStore.js";
 import { DT_FORMATS, TIMEZONES } from "../constants/datetime.js";
 import { isIpcError, ipcErrorMessage } from "../utils/ipc-result.js";
+import { handleOpenFileDialogResult } from "../utils/open-file-result.js";
+import { isAiHistorySourceFormat, tabHasActiveExportFilters } from "../utils/ai-history-profile.js";
 // Shared analyzer column/format detection — the single source of truth, also used by
 // the home-screen capability tiles in App.jsx so both launch paths resolve columns identically.
 import { buildProcessInspectorCols, buildLateralMovementCols, buildPersistenceMode } from "../utils/analyzer-launch.js";
+import {
+  AiAppsGroupIcon,
+  AiArtifactsGroupIcon,
+  ChatGptMenuIcon,
+  ClaudeCodeMenuIcon,
+  CopilotMenuIcon,
+  CursorMenuIcon,
+  GeminiMenuIcon,
+  OpenAiMenuIcon,
+  WindsurfMenuIcon,
+  ContinueMenuIcon,
+} from "./ai-artifact-icons.jsx";
 import {
   openAdsModal,
   openBulkActionsModal,
@@ -22,13 +36,17 @@ import {
 	  openPersistenceModal,
 	  openProcessTreeModal,
 	  openProximityModal,
-	  openRdpBitmapCacheModal,
+  openRdpBitmapCacheModal,
 	  openRansomwareModal,
   openSigmaModal,
   openSimpleModal,
   openStackingModal,
   openTimestompingModal,
   openUsnAnalysisModal,
+  openAiHistoryProfileScanModal,
+  openAiHistoryExtractModal,
+  openAiHistoryScopeModal,
+  openAiSecretsModal,
   updateModal,
 } from "../modals/modalRegistry.js";
 
@@ -75,6 +93,80 @@ export default function MenuBar({
   // Search bar slot (FilterBar component rendered by parent)
   searchBar,
 }) {
+  const buildAiHistoryExportOptions = (extra = {}) => {
+    const visSet = new Set(ct.headers.filter((h) => !ct.hiddenColumns.has(h)));
+    if (ct.headers.includes("FullText")) visSet.add("FullText");
+    const visHeaders = ct.headers.filter((h) => visSet.has(h));
+    const af = activeFilters(ct);
+    return {
+      sortCol: ct.sortCol,
+      sortDir: ct.sortDir,
+      searchTerm: ct.searchHighlight ? "" : ct.searchTerm,
+      searchMode: ct.searchMode,
+      searchCondition: ct.searchCondition || "contains",
+      columnFilters: af.columnFilters,
+      checkboxFilters: af.checkboxFilters,
+      bookmarkedOnly: ct.showBookmarkedOnly,
+      visibleHeaders: visHeaders,
+      tagFilter: (ct.disabledFilters || new Set()).has("__tags__") ? null : (ct.tagFilter || null),
+      rowIdFilter: ct.rowIdFilter || null,
+      dateRangeFilters: ct.dateRangeFilters || {},
+      advancedFilters: ct.advancedFilters || [],
+      filtersApplied: tabHasActiveExportFilters(ct, activeFilters),
+      ...extra,
+    };
+  };
+
+  const exportAiHistoryPackage = async (sourcesOnlyManifest = false) => {
+    if (!ct?.dataReady || !tle?.exportAiHistoryPackage) return;
+    const r = await tle.exportAiHistoryPackage(
+      ct.id,
+      buildAiHistoryExportOptions(sourcesOnlyManifest ? { sourcesOnlyManifest: true } : {}),
+      ct.name,
+      ct.sourceFormat,
+    );
+    if (r?.canceled) return;
+    if (isIpcError(r)) {
+      toast.error(sourcesOnlyManifest ? "Source manifest export failed" : "AI history export failed", { detail: ipcErrorMessage(r) });
+      return;
+    }
+    toast.success(sourcesOnlyManifest ? "Source manifest exported" : "AI history package exported", {
+      detail: sourcesOnlyManifest
+        ? `${r.sourceFileCount || 0} source file(s) (no timeline CSV)\n${r.dirPath}`
+        : `${(r.rowCount || 0).toLocaleString()} rows, ${r.sourceFileCount || 0} source file(s)\n${r.dirPath}`,
+      ttl: 10000,
+    });
+  };
+
+  const decodeAiHistory = async (tool, label) => {
+    const r = await tle.decodeAiHistory(null, tool, { promptScope: true, prepareOnly: true });
+    if (r?.canceled) return;
+    if (r?.needsScopeChoice) {
+      setModal(openAiHistoryScopeModal({
+        tool: r.tool || tool,
+        target: r.target,
+        extractTarget: r.extractTarget,
+        label: r.label || label,
+      }));
+      return;
+    }
+    if (isIpcError(r)) { toast.error(`${label} extraction failed`, { detail: ipcErrorMessage(r) }); return; }
+    if (r?.error) { toast.warning(label, { detail: r.error }); return; }
+    if (r?.prepared) {
+      setModal(openAiHistoryExtractModal({
+        tool: r.tool || tool,
+        target: r.target,
+        extractTarget: r.extractTarget,
+        label: r.label || label,
+        includeSubagents: false,
+      }));
+    }
+  };
+
+  const scanAiHistoryProfile = () => {
+    setModal(openAiHistoryProfileScanModal());
+  };
+
   // Zustand selectors
   const setModal = useUIStore((s) => s.setModal);
   const fileMenuOpen = useUIStore((s) => s.fileMenuOpen);
@@ -130,7 +222,9 @@ export default function MenuBar({
   };
 
   // ── Dropdown style ────────────────────────────────────────────
-  const ddStyle = { position: "absolute", top: "100%", left: 0, marginTop: 4, background: th.modalBg + "EE", backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)", border: `1px solid ${th.glassBorder}`, borderRadius: 10, padding: "6px 0", zIndex: 150, boxShadow: `0 12px 40px rgba(0,0,0,0.4), 0 0 0 1px ${th.glassBorder}`, minWidth: 220, whiteSpace: "nowrap", animation: "tle-modal-in var(--m-fast) var(--ease-out)" };
+  // Menu panels are OPAQUE (th.modalBg, no alpha suffix) — a dropdown must be readable, never let the
+  // bright grid text behind it bleed through. The blur+border keep the elevated-surface look.
+  const ddStyle = { position: "absolute", top: "100%", left: 0, marginTop: 4, background: th.modalBg, backdropFilter: "blur(16px)", WebkitBackdropFilter: "blur(16px)", border: `1px solid ${th.glassBorder}`, borderRadius: 10, padding: "6px 0", zIndex: 150, boxShadow: `0 12px 40px rgba(0,0,0,0.4), 0 0 0 1px ${th.glassBorder}`, minWidth: 220, whiteSpace: "nowrap", animation: "tle-modal-in var(--m-fast) var(--ease-out)" };
   const backdrop = (closeFn) => <div onClick={closeFn} style={{ position: "fixed", inset: 0, zIndex: 149 }} />;
 
   // ── Keyboard navigation for open dropdown menus (WAI-ARIA menu pattern) ──
@@ -202,6 +296,21 @@ export default function MenuBar({
       { label: "Burst Detection", icon: ic(<><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" fill={th.accent+"33"}/></>, th.danger), action: () => {
         if (ct?.dataReady && ct?.tsColumns?.size) setModal(openBurstAnalysisModal([...ct.tsColumns][0]));
       }, disabled: !ct?.dataReady || !ct?.tsColumns?.size },
+      // ── AI assistant artifacts — native extractors (not EZ-Tool CSV decoders). Triage can
+      //    merge multiple sources; these entries are the per-tool manual import path. ──
+      { group: "AI Artifacts", icon: <AiArtifactsGroupIcon th={th} />, items: [
+        { label: "Collect AI Artifacts", icon: ic(<><path d="M4 13v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5" fill={(th.accent) + "14"} /><path d="M12 3.5v9.5" /><polyline points="8.5 9.5 12 13 15.5 9.5" /></>, th.accent), action: scanAiHistoryProfile },
+        { group: "AI Apps", icon: <AiAppsGroupIcon th={th} />, items: [
+          { label: "Claude Code", icon: <ClaudeCodeMenuIcon th={th} />, action: () => decodeAiHistory("claude-code", "Claude Code AI History") },
+          { label: "OpenAI Codex", icon: <OpenAiMenuIcon th={th} />, action: () => decodeAiHistory("codex", "OpenAI Codex AI History") },
+          { label: "ChatGPT Desktop", icon: <ChatGptMenuIcon th={th} />, action: () => decodeAiHistory("chatgpt", "ChatGPT AI History") },
+          { label: "Gemini CLI", icon: <GeminiMenuIcon th={th} />, action: () => decodeAiHistory("gemini-cli", "Gemini CLI AI History") },
+          { label: "Cursor", icon: <CursorMenuIcon th={th} />, action: () => decodeAiHistory("cursor", "Cursor AI History") },
+          { label: "GitHub Copilot", icon: <CopilotMenuIcon th={th} />, action: () => decodeAiHistory("copilot", "GitHub Copilot AI History") },
+          { label: "Windsurf", icon: <WindsurfMenuIcon th={th} />, action: () => decodeAiHistory("windsurf", "Windsurf AI History") },
+          { label: "Continue", icon: <ContinueMenuIcon th={th} />, action: () => decodeAiHistory("continue", "Continue AI History") },
+        ] },
+      ] },
       // ── Detection — cross-platform threat detection. Sigma rules span Windows EVTX, Linux
       //    auditd, macOS & cloud, so this lives outside the Windows platform group. ──
       { section: "Detection" },
@@ -210,6 +319,7 @@ export default function MenuBar({
         // (1-click scan); otherwise open on EVTX Folder for a raw .evtx directory scan.
         setModal(openSigmaModal({ scanMode: ct?.dataReady ? "tab" : "evtx-dir" }));
       } },
+      { label: "AI Secret Hunt", icon: ic(<><rect x="5" y="11" width="14" height="9" rx="2" fill={(th.accent) + "22"}/><path d="M8 11V8a4 4 0 0 1 8 0v3"/><circle cx="12" cy="15" r="1.4" fill={th.accent} stroke="none"/></>, th.accent), action: () => { if (ct?.dataReady) setModal(openAiSecretsModal({ tabId: ct.id, tabName: ct.name })); }, disabled: !ct?.dataReady || !isAiHistorySourceFormat(ct?.sourceFormat) },
       // ── Platform-specific forensics. Each OS is a collapsible group; click to reveal its tools. ──
       { section: "Platforms" },
       { group: "Windows", icon: ic(<><rect x="3" y="3" width="8" height="8" rx="1" fill={th.accent+"33"}/><rect x="13" y="3" width="8" height="8" rx="1" fill={th.accent+"33"}/><rect x="3" y="13" width="8" height="8" rx="1" fill={th.accent+"33"}/><rect x="13" y="13" width="8" height="8" rx="1" fill={th.accent+"33"}/></>, th.accent), items: [
@@ -271,6 +381,8 @@ export default function MenuBar({
         { label: "Okta System Log", icon: ic(<><circle cx="12" cy="12" r="9" fill={th.textMuted+"14"}/><circle cx="12" cy="12" r="4"/></>, th.textMuted), action: () => {}, disabled: true },
       ] },
       { section: "Export" },
+      { label: "Export AI History Package", icon: ic(<><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M12 11v6M9 14h6"/></>, th.accent), action: () => exportAiHistoryPackage(false), disabled: !ct?.dataReady || !isAiHistorySourceFormat(ct?.sourceFormat) },
+      { label: "Export Source Manifest (sources only)", icon: ic(<><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="8" y1="13" x2="16" y2="13"/></>, th.accent), action: () => exportAiHistoryPackage(true), disabled: !ct?.dataReady || !isAiHistorySourceFormat(ct?.sourceFormat) },
       { label: "Generate Report", icon: ic(<><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="9" y1="13" x2="15" y2="13"/><line x1="9" y1="17" x2="15" y2="17"/></>, th.success), action: async () => { if (ct?.dataReady) await tle.generateReport(ct.id, ct.name, ct.tagColors || {}, ct.vtEnrichment || null); }, disabled: !ct?.dataReady },
     ];
   };
@@ -281,8 +393,8 @@ export default function MenuBar({
       onMouseEnter={(e) => { if (!item.disabled) { e.currentTarget.style.background = `${th.accent}15`; e.currentTarget.style.borderLeft = `2px solid ${th.accent}`; e.currentTarget.style.paddingLeft = `${indent}px`; } }}
       onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.borderLeft = "2px solid transparent"; e.currentTarget.style.paddingLeft = `${indent}px`; }}
       style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: `7px 14px 7px ${indent}px`, background: "none", border: "none", borderLeft: "2px solid transparent", color: item.disabled ? th.textMuted : th.text, fontSize: 13, cursor: item.disabled ? "default" : "pointer", textAlign: "left", fontFamily: "-apple-system, sans-serif", opacity: item.disabled ? 0.4 : 1, transition: "background var(--m-fast) var(--ease-out), border-color var(--m-fast) var(--ease-out)" }}>
-      {item.icon}
-      {item.label}
+      <span style={{ flexShrink: 0, display: "flex" }}>{item.icon}</span>
+      <span style={{ whiteSpace: "nowrap", flexShrink: 0 }}>{item.label}</span>
     </button>
   );
 
@@ -306,7 +418,7 @@ export default function MenuBar({
             onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
             style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: `7px 14px 7px ${indent}px`, background: "none", border: "none", borderLeft: "2px solid transparent", color: th.text, fontSize: 13, cursor: "pointer", textAlign: "left", fontFamily: "-apple-system, sans-serif", transition: "background var(--m-fast) var(--ease-out), border-color var(--m-fast) var(--ease-out)" }}>
             {item.icon}
-            <span style={{ flex: 1 }}>{item.group}</span>
+            <span style={{ flex: 1, whiteSpace: "nowrap", overflow: "visible" }}>{item.group}</span>
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke={th.textMuted} strokeWidth="1.5" strokeLinecap="round" style={{ transform: expanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform var(--m-base) ease", flexShrink: 0 }}>
               <polyline points="3,1 7,5 3,9" />
             </svg>
@@ -393,7 +505,10 @@ export default function MenuBar({
             {backdrop(() => setFileMenuOpen(false))}
             <div style={ddStyle} role="menu" ref={focusFirstMenuItem} onKeyDown={menuKeyDown}>
               {[
-                { label: "Open", shortcut: "⌘O", action: () => tle?.openFileDialog() },
+                { label: "Open", shortcut: "⌘O", action: async () => {
+                  const r = await tle?.openFileDialog();
+                  handleOpenFileDialogResult(tle, setModal, r);
+                } },
                 { label: "Export", shortcut: "⌘E", action: handleExport, disabled: !ct?.dataReady },
                 { type: "separator" },
                 { label: "Save Session", shortcut: "⌘S", action: handleSaveSession, disabled: tabs.length === 0 },
@@ -416,7 +531,7 @@ export default function MenuBar({
                         <span>{item.label}</span>
                         <span style={{ fontSize: 10, color: th.textMuted, marginLeft: 12 }}>▶</span>
                       </div>
-                      <div data-submenu style={{ display: "none", position: "absolute", left: "100%", top: -6, background: th.modalBg + "f2", border: `1px solid ${th.glassBorder}`, borderRadius: 10, backdropFilter: "blur(20px) saturate(180%)", WebkitBackdropFilter: "blur(20px) saturate(180%)", padding: "6px 0", zIndex: 151, boxShadow: "0 12px 40px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.04) inset", minWidth: 260, whiteSpace: "nowrap" }}>
+                      <div data-submenu style={{ display: "none", position: "absolute", left: "100%", top: -6, background: th.modalBg, border: `1px solid ${th.glassBorder}`, borderRadius: 10, backdropFilter: "blur(20px) saturate(180%)", WebkitBackdropFilter: "blur(20px) saturate(180%)", padding: "6px 0", zIndex: 151, boxShadow: "0 12px 40px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.04) inset", minWidth: 260, whiteSpace: "nowrap" }}>
                         {recentFiles.length > 0 ? (<>
                           {recentFiles.map((fp, ri) => (
                             <div key={ri} onClick={() => { setFileMenuOpen(false); tle?.openRecentFile(fp).then((r) => { if (r?.error) toast.error("Could not open file", { detail: `${r.error}\n${fp}` }); }); }}
@@ -483,7 +598,7 @@ export default function MenuBar({
           <button className="tle-tb" role="menuitem" aria-haspopup="true" aria-expanded={toolsOpen} onKeyDown={menuButtonKeyDown} onClick={() => setToolsOpen((v) => !v)} style={{ ...tb, color: toolsOpen ? th.accent : th.textDim }}>Tools ▾</button>
           {toolsOpen && (<>
             {backdrop(() => setToolsOpen(false))}
-            <div style={{ ...ddStyle, minWidth: 240 }} role="menu" ref={focusFirstMenuItem} onKeyDown={menuKeyDown}>
+            <div style={{ ...ddStyle, minWidth: 280, width: "max-content", maxWidth: "min(420px, 92vw)" }} role="menu" ref={focusFirstMenuItem} onKeyDown={menuKeyDown}>
               {buildToolsItems().map((item, i) => renderToolsNode(item, 0, i === 0))}
             </div>
           </>)}
@@ -498,7 +613,7 @@ export default function MenuBar({
               {[
                 { label: "Quick Help", icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={th.accent} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>, action: () => setModal(openSimpleModal("quickHelp")) },
                 { label: "Keyboard Shortcuts", shortcut: "⌘/", icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={th.accent} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M18 12h.01M8 16h8"/></svg>, action: () => setModal(openSimpleModal("shortcuts")) },
-                { label: checkingForUpdates ? "Checking for Updates..." : "Check for Updates...", icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={th.accent} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>, action: handleCheckForUpdates },
+                { label: checkingForUpdates ? "Checking for Updates" : "Check for Updates", icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={th.accent} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>, action: handleCheckForUpdates },
                 { type: "separator" },
                 { label: "Website", icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={th.accent} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>, action: () => window.open("https://r3nzsec.github.io/irflow-timeline/", "_blank") },
                 { label: "About IRFlow Timeline", icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={th.accent} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="16" x2="12" y2="12"/><line x1="12" y1="8" x2="12.01" y2="8"/></svg>, action: () => setModal(openSimpleModal("about")) },

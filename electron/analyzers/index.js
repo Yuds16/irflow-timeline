@@ -11,6 +11,7 @@ const { analyzeADS } = require("./ads");
 const { getFileActivityHeatmap } = require("./file-activity");
 const { scanRansomwareExtensions, analyzeRansomware } = require("./ransomware");
 const { analyzeUsnJournal, resolveUsnPaths } = require("./usn-journal");
+const { analyzeAiHistory } = require("./ai-history");
 const rdpBitmapCache = require("./rdp-bitmap-cache");
 
 module.exports = {
@@ -21,5 +22,6 @@ module.exports = {
   analyzeRansomware,
   analyzeUsnJournal,
   resolveUsnPaths,
+  analyzeAiHistory,
   rdpBitmapCache,
 };

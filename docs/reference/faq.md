@@ -38,7 +38,7 @@ Yes. **Tools → Detection → Sigma Scan** provides a dual-engine detection wor
 
 ### Does it support KAPE output?
 
-Yes. IRFlow Timeline auto-detects 26 KAPE / EZ Tools profiles including MFTECmd, EvtxECmd, PECmd, AmcacheParser, RECmd, SBECmd, AppCompatCache, JLECmd, LECmd, SrumECmd, Hayabusa, and Chainsaw. Columns are automatically pinned, ordered, and formatted for each profile. See [KAPE Integration](/workflows/kape-integration) and [KAPE Profiles](/reference/kape-profiles) for details.
+Yes. IRFlow Timeline auto-detects 26 KAPE / EZ Tools profiles including MFTECmd, EvtxECmd, PECmd, AmcacheParser, RECmd, SBECmd, AppCompatCache, JLECmd, LECmd, SrumECmd, Hayabusa, and Chainsaw. Columns are automatically ordered and hidden (empty columns) per profile; pin columns yourself via the header context menu if needed. See [KAPE Integration](/workflows/kape-integration) and [KAPE Profiles](/reference/kape-profiles) for details.
 
 ---
 

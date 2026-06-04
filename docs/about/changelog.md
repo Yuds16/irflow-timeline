@@ -8,16 +8,16 @@ description: IRFlow Timeline changelog — version history, new features, perfor
 
 ### New Features
 
-- **AI Artifacts / AI Query History** — New **Tools → Analysis → AI Artifacts → Scan AI Artifacts** workflow for turning local AI assistant activity into timeline evidence
+- **AI Artifacts / AI Query History** — New **Tools → AI Artifacts → Collect AI Artifacts** workflow for turning local AI assistant activity into timeline evidence
   - Parses prompts, assistant responses, invoked tool/action records, timestamps, sessions, workspace paths, source files, models, and endpoint user/host attribution when available
   - Supports Claude Code, OpenAI Codex, ChatGPT Desktop, Gemini CLI, Cursor, GitHub Copilot, Windsurf, and Continue
   - Scans the current Mac or a selected KAPE / triage / mounted-disk folder across Windows, Linux, and macOS profile layouts
   - Merges discovered sources into one **AI Query History** tab with consistent columns and provenance fields
 
-- **AI Secret Scan** — New review workflow for finding sensitive data exposed through AI history
+- **AI Secret Hunt** — New **Tools → Detection → AI Secret Hunt** workflow for finding sensitive data exposed through AI history
   - Detects API keys, private keys, tokens, credentials, and high-confidence secret patterns across prompts, responses, and tool output
-  - Groups repeated evidence by fingerprint, redacts cleartext by default, and supports analyst tagging for triage
-  - Exports tagged secret findings to CSV for reporting
+  - Groups repeated evidence by fingerprint, redacts cleartext by default (cleartext is never written to disk), and supports analyst tagging for triage
+  - Group findings by tool or session, then export a redacted PDF / HTML exposure brief or a redacted CSV of findings
 
 ### Data Quality
 

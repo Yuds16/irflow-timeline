@@ -10,7 +10,7 @@ const { readJsonlBounded } = require("./jsonl-reader");
 const { dbg } = require("../../logger");
 const { TOOL_COPILOT } = require("./schema");
 const { tickFileProgress } = require("./extract-plan");
-const { formatTimestampUtc, makeRow, finalizeAiHistoryRows } = require("./row-utils");
+const { formatTimestampUtc, makeRow, finalizeAiHistoryRows, aiHistoryDedupeKey, dedupeAiHistoryRows } = require("./row-utils");
 const { decodeWorkspaceUri, formatWorkspaceDisplay } = require("./workspace-utils");
 const { buildCopilotExtractionStats } = require("./import-meta");
 
@@ -218,12 +218,20 @@ async function readJsonlSnapshot(filePath) {
   return finalizeSnapshotState(state);
 }
 
+// Cap untrusted single-file .json sessions before buffering them whole (parity with vscdb-kv 32MB /
+// chatgpt 64MB). The .jsonl sibling already streams via readJsonlBounded; this guards the .json path
+// so a large/inflated session can't OOM the worker.
+const MAX_SESSION_JSON_BYTES = 32 * 1024 * 1024;
+
 function readJsonSnapshot(filePath) {
   let data;
   // Untrusted single-file path: a malformed file (JSON.parse throw) or a literal `null`/primitive
   // must yield null, not crash. The previous `data && ...` short-circuit still fell through to
-  // `data.requests` on a null document.
-  try { data = JSON.parse(fs.readFileSync(filePath, "utf8")); } catch { return null; }
+  // `data.requests` on a null document. Size-gate FIRST so a huge .json is never read into memory.
+  try {
+    if (fs.statSync(filePath).size > MAX_SESSION_JSON_BYTES) { dbg("AIHIST", "skip large copilot json", { path: filePath }); return null; }
+    data = JSON.parse(fs.readFileSync(filePath, "utf8"));
+  } catch { return null; }
   if (!data || typeof data !== "object") return null;
   if (data.kind === 0 && data.v) return data.v;
   if (Array.isArray(data.requests)) return data;
@@ -441,6 +449,43 @@ async function extractSessionFile(filePath, workspace, attribution, stats) {
   return rows;
 }
 
+const isMsgRow = (r) => r.Role === "user" || r.Role === "assistant";
+
+/**
+ * Streaming-or-accumulate emitter for session rows. When `onExtractedRows` is set (the streamed
+ * worker path) each file's rows go STRAIGHT to the sink — peak heap stays at one file's rows instead
+ * of the whole workspace corpus (the prior code accumulated every row, FullText and all, until return).
+ * It also remembers each streamed row's dedupe KEY (small strings, not full rows) so the vscdb
+ * supplement below can still dedupe session↔vscdb without holding the session rows. In the in-memory
+ * path it accumulates into `rows` exactly as before (behaviour byte-identical).
+ */
+function makeRowEmitter(rows, onExtractedRows) {
+  const streamedKeys = onExtractedRows ? new Set() : null;
+  let streamMsg = 0;
+  const emit = (chunk) => {
+    if (!chunk || !chunk.length) return;
+    if (onExtractedRows) {
+      // Skip rows whose dedupe key already streamed (inter-session dedup — mirrors the in-memory
+      // supplement's dedupeAiHistoryRows), then stream straight to the sink. Peak heap = one file's
+      // rows + the (small, key-string) Set, not the whole workspace corpus.
+      const fresh = [];
+      for (const r of chunk) {
+        const k = aiHistoryDedupeKey(r);
+        if (streamedKeys.has(k)) continue;
+        streamedKeys.add(k);
+        if (isMsgRow(r)) streamMsg += 1;
+        fresh.push(r);
+      }
+      if (fresh.length) onExtractedRows(fresh);
+    } else {
+      rows.push(...chunk);
+    }
+  };
+  // msg count: the live counter while streaming, else derived from the accumulated rows.
+  const getMsgCount = () => (onExtractedRows ? streamMsg : rows.filter(isMsgRow).length);
+  return { emit, streamedKeys, getMsgCount };
+}
+
 async function extractChatSessionsDir(chatSessionsDir, workspace, attribution = {}, options = {}) {
   const files = pickSessionFiles(listSessionFilesInDir(chatSessionsDir));
   const rows = [];
@@ -451,18 +496,20 @@ async function extractChatSessionsDir(chatSessionsDir, workspace, attribution = 
     jsonlFiles: 0,
     jsonFiles: 0,
   };
+  const { emit } = makeRowEmitter(rows, options.onExtractedRows);
   let fileIndex = 0;
 
   for (const filePath of files) {
     fileIndex += 1;
     tickFileProgress(options.onFileProgress, fileIndex, files.length, filePath);
     try {
-      rows.push(...await extractSessionFile(filePath, workspace, attribution, stats));
+      emit(await extractSessionFile(filePath, workspace, attribution, stats));
     } catch (e) {
       dbg("AIHIST", "copilot session failed", { path: filePath, err: e.message });
     }
   }
 
+  // Streamed: `rows` is empty (everything went to the sink); the return carries only _copilotStats.
   rows._copilotStats = stats;
   return rows;
 }
@@ -494,6 +541,7 @@ async function extractWorkspaceStorageDir(storageDir, attribution = {}, options 
     buckets.push({ chatDir: globalDir, workspace: "(no workspace — empty window)" });
   }
 
+  const { emit, streamedKeys, getMsgCount } = makeRowEmitter(rows, options.onExtractedRows);
   let fileIndex = 0;
   const totalFiles = buckets.reduce((n, b) => n + listSessionFilesInDir(b.chatDir).length, 0);
 
@@ -503,15 +551,14 @@ async function extractWorkspaceStorageDir(storageDir, attribution = {}, options 
       fileIndex += 1;
       tickFileProgress(options.onFileProgress, fileIndex, Math.max(totalFiles, 1), filePath);
       try {
-        const chunk = await extractSessionFile(filePath, workspace, attribution, combinedStats);
-        rows.push(...chunk);
+        emit(await extractSessionFile(filePath, workspace, attribution, combinedStats));
       } catch (e) {
         dbg("AIHIST", "copilot session failed", { path: filePath, err: e.message });
       }
     }
   }
 
-  const msgCount = rows.filter((r) => r.Role === "user" || r.Role === "assistant").length;
+  const msgCount = getMsgCount();
   const sparseSessions = combinedStats.sessionsScanned > 0
     && combinedStats.sessionsWithMessages < combinedStats.sessionsScanned;
   const needsVscdbSupplement = msgCount < 8
@@ -520,27 +567,45 @@ async function extractWorkspaceStorageDir(storageDir, attribution = {}, options 
   if (needsVscdbSupplement) {
     try {
       const userDir = path.dirname(storageDir);
-      const { extractVsCodeUserChatDir } = require("./vscode-chat-db");
-      const { dedupeAiHistoryRows } = require("./row-utils");
-      const { rows: vscRows } = await extractVsCodeUserChatDir(
+      const { extractVsCodeUserChatDir, COPILOT_PROVIDER_RE } = require("./vscode-chat-db");
+      // extractVsCodeUserChatDir RETURNS its rows (never streams) — pass onExtractedRows:undefined so
+      // we always get the array to dedupe the supplement against the session rows.
+      const { rows: vscRows, stats: vscStats } = await extractVsCodeUserChatDir(
         userDir,
         TOOL_COPILOT,
         attribution,
-        options,
+        {
+          ...options,
+          onExtractedRows: undefined,
+          providerFilter: (entry) => COPILOT_PROVIDER_RE.test(`${entry?.providerType || ""} ${entry?.providerLabel || ""}`),
+        },
       );
+      if (vscStats?.alternateAgentSessions) {
+        combinedStats.alternateAgentSessions = (combinedStats.alternateAgentSessions || 0)
+          + vscStats.alternateAgentSessions;
+      }
       if (vscRows.length) {
-        const beforeMsg = msgCount;
-        const merged = dedupeAiHistoryRows([...rows, ...vscRows]);
-        rows.length = 0;
-        rows.push(...merged);
-        const afterMsg = rows.filter((r) => r.Role === "user" || r.Role === "assistant").length;
-        combinedStats.vscdbSupplement = Math.max(0, afterMsg - beforeMsg);
+        if (options.onExtractedRows) {
+          // Streamed: session rows already went to the sink. Dedupe the supplement against their keys
+          // (and within itself) and stream the survivors — only the key Set was held, not the rows.
+          const fresh = dedupeAiHistoryRows(vscRows.filter((r) => !streamedKeys.has(aiHistoryDedupeKey(r))));
+          combinedStats.vscdbSupplement = fresh.filter(isMsgRow).length;
+          if (fresh.length) options.onExtractedRows(fresh);
+        } else {
+          const beforeMsg = msgCount;
+          const merged = dedupeAiHistoryRows([...rows, ...vscRows]);
+          rows.length = 0;
+          rows.push(...merged);
+          const afterMsg = rows.filter(isMsgRow).length;
+          combinedStats.vscdbSupplement = Math.max(0, afterMsg - beforeMsg);
+        }
       }
     } catch (e) {
       dbg("AIHIST", "copilot vscdb supplement failed", { err: e.message });
     }
   }
 
+  // Streamed: `rows` is empty (everything went to the sink); return carries only _copilotStats.
   rows._copilotStats = combinedStats;
   return rows;
 }

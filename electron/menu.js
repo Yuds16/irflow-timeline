@@ -8,7 +8,9 @@
 const { Menu, dialog, shell } = require("electron");
 const path = require("path");
 const fs = require("fs");
+const { planImportPaths } = require("./parsers/ai-history-import");
 const { loadTempDirSetting, saveTempDirSetting, isUsable } = require("./utils/temp-dir");
+const { openDialogOptions } = require("./utils/open-dialog");
 
 /**
  * Build and set the native application menu.
@@ -34,7 +36,9 @@ function buildMenu(deps) {
           toolTip: fp,
           click: () => {
             if (fs.existsSync(fp)) {
-              enqueueImport(fp);
+              for (const item of planImportPaths([fp])) {
+                enqueueImport(item.path, item.opts || {});
+              }
             } else {
               const files = loadRecentFiles().filter((f) => f !== fp);
               saveRecentFiles(files);
@@ -207,11 +211,11 @@ function buildMenu(deps) {
         {
           label: "Set Temp Storage Folder…",
           click: async () => {
-            const res = await dialog.showOpenDialog(activeWindow(), {
+            const res = await dialog.showOpenDialog(activeWindow(), openDialogOptions({
               title: "Choose Temp Storage Folder",
               message: "Large imports build their database and indexes here. Pick a folder on a volume with plenty of free space.",
               properties: ["openDirectory", "createDirectory"],
-            }).catch(() => null);
+            })).catch(() => null);
             if (!res || res.canceled || !res.filePaths?.[0]) return;
             const dir = res.filePaths[0];
             if (!isUsable(dir)) {

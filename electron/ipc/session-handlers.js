@@ -1,27 +1,100 @@
 const path = require("path");
 const fs = require("fs");
 const fsp = require("fs/promises");
-const { dialog, app } = require("electron");
+const { dialog, app, shell } = require("electron");
+const { planImportPaths } = require("../parsers/ai-history-import");
+const {
+  defaultAiHistoryOpenPath,
+  aiHistoryOpenDialogFilters,
+} = require("../parsers/ai-history/open-dialog-paths");
+const { openDialogOptions } = require("../utils/open-dialog");
+const { authorizeAiArtifactPick, assertAiReadablePath } = require("../parsers/ai-history/path-auth");
 
-module.exports = function registerSessionHandlers(safeHandle, safeSend, ctx) {
+function enqueuePlannedImports(planned, enqueueImport) {
+  const scopePending = [];
+  let enqueued = 0;
+  for (const item of planned || []) {
+    if (!item?.path || !fs.existsSync(item.path)) continue;
+    if (item.needsScopeChoice) {
+      scopePending.push({
+        tool: item.scopeTool,
+        target: item.scopeTarget || item.path,
+        label: item.scopeLabel || item.scopeTool,
+      });
+      continue;
+    }
+    enqueueImport(item.path, item.opts || {});
+    enqueued += 1;
+  }
+  return { enqueued, scopePending };
+}
+
+function applyClientAiScopeChoices(planned, items) {
+  if (!Array.isArray(items) || !items.length) return planned;
+  const choices = new Map();
+  for (const item of items) {
+    if (!item?.path || !item?.opts?.aiHistoryTool) continue;
+    choices.set(`${path.resolve(item.path)}:${item.opts.aiHistoryTool}`, !!item.opts.aiHistoryIncludeSubagents);
+  }
+  return (planned || []).map((item) => {
+    const tool = item?.opts?.aiHistoryTool;
+    if (!item?.path || !tool) return item;
+    const key = `${path.resolve(item.path)}:${tool}`;
+    if (!choices.has(key)) return item;
+    return {
+      ...item,
+      opts: {
+        ...(item.opts || {}),
+        aiHistoryIncludeSubagents: choices.get(key),
+      },
+      // The user has already resolved this scope prompt in the renderer; keep the
+      // main-process-derived tool/path, only carry the boolean scope choice forward.
+      needsScopeChoice: false,
+    };
+  });
+}
+
+async function openAuthorizedAiSource({ filePath, lineNumber } = {}, openPath = shell.openPath) {
+  if (!filePath || typeof filePath !== "string") {
+    return { __ipcError: true, message: "No source file path." };
+  }
+
+  let canonical;
+  try {
+    canonical = assertAiReadablePath(filePath);
+  } catch (e) {
+    return { __ipcError: true, message: e.message || "AI source path is not authorized." };
+  }
+
+  const err = await openPath(canonical);
+  if (err) return { __ipcError: true, message: err };
+  return { ok: true, lineNumber: lineNumber != null ? String(lineNumber) : "" };
+}
+
+function registerSessionHandlers(safeHandle, safeSend, ctx) {
   const { db, _activeWindow, enqueueImport, _loadRecentFiles, _saveRecentFiles, _rebuildMenu, _tabMeta, _pendingIndexTabs, nextTabId, updateController, jobManager, scheduleIndexBuild } = ctx;
 
   // Open file dialog
   safeHandle("open-file-dialog", async () => {
-    const result = await dialog.showOpenDialog(_activeWindow(), {
-      properties: ["openFile", "multiSelections"],
-      filters: [
-        { name: "All Supported Files", extensions: ["*"] },
-        { name: "CSV Files", extensions: ["csv", "tsv", "txt", "log"] },
-        { name: "Excel Files", extensions: ["xlsx", "xls", "xlsm"] },
-        { name: "EVTX Files", extensions: ["evtx"] },
-        { name: "Plaso / Timeline Files", extensions: ["plaso", "timeline"] },
-        { name: "NTFS Artifacts ($MFT, $J)", extensions: ["mft", "bin"] },
-      ],
-    });
+    const result = await dialog.showOpenDialog(_activeWindow(), openDialogOptions({
+      properties: ["openFile", "openDirectory", "multiSelections"],
+      defaultPath: defaultAiHistoryOpenPath(),
+      filters: aiHistoryOpenDialogFilters(),
+    }));
     if (result.canceled) return null;
-    for (const fp of result.filePaths) enqueueImport(fp);
-    return true;
+    for (const picked of result.filePaths || []) {
+      if (picked) authorizeAiArtifactPick(picked);
+    }
+    const { enqueued, scopePending } = enqueuePlannedImports(
+      planImportPaths(result.filePaths),
+      enqueueImport,
+    );
+    if (scopePending.length) return { scopePending };
+    return enqueued > 0 ? true : null;
+  });
+
+  safeHandle("open-ai-source", async (_event, { filePath, lineNumber } = {}) => {
+    return openAuthorizedAiSource({ filePath, lineNumber });
   });
 
   safeHandle("check-for-updates", async () => updateController.checkForUpdatesFromRenderer());
@@ -32,7 +105,9 @@ module.exports = function registerSessionHandlers(safeHandle, safeSend, ctx) {
 
   safeHandle("open-recent-file", (event, { filePath }) => {
     if (fs.existsSync(filePath)) {
-      enqueueImport(filePath);
+      authorizeAiArtifactPick(filePath);
+      const { scopePending } = enqueuePlannedImports(planImportPaths([filePath]), enqueueImport);
+      if (scopePending.length) return { scopePending };
       return true;
     }
     // Remove stale entry
@@ -50,14 +125,14 @@ module.exports = function registerSessionHandlers(safeHandle, safeSend, ctx) {
 
   // IOC matching
   safeHandle("load-ioc-file", async () => {
-    const result = await dialog.showOpenDialog(_activeWindow(), {
+    const result = await dialog.showOpenDialog(_activeWindow(), openDialogOptions({
       properties: ["openFile"],
       filters: [
         { name: "IOC Files", extensions: ["txt", "csv", "ioc", "tsv", "xlsx", "xls"] },
         { name: "All Files", extensions: ["*"] },
       ],
       title: "Open IOC List",
-    });
+    }));
     if (result.canceled || !result.filePaths.length) return null;
     const filePath = result.filePaths[0];
     const fileName = path.basename(filePath);
@@ -236,10 +311,10 @@ module.exports = function registerSessionHandlers(safeHandle, safeSend, ctx) {
 
   // Session load
   safeHandle("load-session", async () => {
-    const result = await dialog.showOpenDialog(_activeWindow(), {
+    const result = await dialog.showOpenDialog(_activeWindow(), openDialogOptions({
       properties: ["openFile"],
       filters: [{ name: "TLE Session", extensions: ["tle"] }],
-    });
+    }));
     if (result.canceled || !result.filePaths.length) return null;
     try {
       const raw = fs.readFileSync(result.filePaths[0], "utf-8");
@@ -285,9 +360,11 @@ module.exports = function registerSessionHandlers(safeHandle, safeSend, ctx) {
   });
 
   // Import files by path (used for drag-and-drop)
-  safeHandle("import-files", async (event, { filePaths }) => {
-    for (const fp of filePaths) { if (fs.existsSync(fp)) enqueueImport(fp); }
-    return true;
+  safeHandle("import-files", async (event, { filePaths, items } = {}) => {
+    const planned = applyClientAiScopeChoices(planImportPaths(filePaths || []), items);
+    const { enqueued, scopePending } = enqueuePlannedImports(planned, enqueueImport);
+    if (scopePending.length) return { scopePending };
+    return enqueued > 0;
   });
 
   // Import file for session restore (no dialog)
@@ -353,4 +430,8 @@ module.exports = function registerSessionHandlers(safeHandle, safeSend, ctx) {
     await fsp.writeFile(piAnalystProfilePath, JSON.stringify(next, null, 2));
     return next;
   });
-};
+}
+
+module.exports = registerSessionHandlers;
+module.exports._applyClientAiScopeChoices = applyClientAiScopeChoices;
+module.exports._openAuthorizedAiSource = openAuthorizedAiSource;

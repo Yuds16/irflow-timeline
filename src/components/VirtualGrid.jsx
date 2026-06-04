@@ -2,6 +2,14 @@ import { BkmkIcon, CheckboxIcon } from "./icons.jsx";
 import { formatNumber } from "../utils/format.js";
 import { applyColors } from "../utils/color-rules.js";
 import useUIStore from "../store/useUIStore.js";
+import { toast } from "../store/useToastStore.js";
+import { isIpcError, ipcErrorMessage } from "../utils/ipc-result.js";
+import {
+  isAiHistorySourceFormat,
+  aiHistoryDetailCellValue,
+  aiHistoryDetailPinnedFields,
+  aiHistoryDetailHeaderOrder,
+} from "../utils/ai-history-profile.js";
 import { ROW_HEIGHT, HEADER_HEIGHT, FILTER_HEIGHT, BKMK_COL_WIDTH, CHECKBOX_COL_WIDTH, TAG_COL_WIDTH_MIN, VT_COL_WIDTH, EVIDENCE_COL_WIDTH, EVIDENCE_COL_MIN_WIDTH } from "../constants/grid.js";
 import { pillToneFor } from "../utils/evidence-pills.js";
 import { Badge, Tooltip, Loading } from "./primitives/index.js";
@@ -44,6 +52,8 @@ export default function VirtualGrid({
   extracting, extractProgress,
   // Detail panel
   detailPanelRef, detailPanelHeight,
+  onFilterToSession,
+  onCorrelateWorkspace,
   // Import progress component
   ImportProgress,
   // Sorting timer
@@ -750,19 +760,79 @@ export default function VirtualGrid({
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "4px 12px", background: th.toolbarBg, backdropFilter: "blur(20px) saturate(180%)", WebkitBackdropFilter: "blur(20px) saturate(180%)", borderBottom: `1px solid ${th.glassBorder}`, flexShrink: 0 }}>
                 <span style={{ color: th.accent, fontSize: 11, fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>
                   Row Detail — Row {selectedRow + 1} (ID: {selectedRowData.__idx})
+                  {selectedRowData.LineNumber ? ` · line ${selectedRowData.LineNumber}` : ""}
                 </span>
-                <button onClick={() => setDetailPanelOpen(false)} aria-label="Close row detail" title="Close row detail" style={{ background: "none", border: "none", color: th.textMuted, cursor: "pointer", fontSize: 13, padding: "2px 6px" }}>✕</button>
+                <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  {onFilterToSession && selectedRowData.SessionId && isAiHistorySourceFormat(ct?.sourceFormat) && (
+                    <button
+                      type="button"
+                      onClick={() => onFilterToSession(selectedRowData.SessionId)}
+                      title="Filter grid to this SessionId"
+                      style={{ background: th.bgAlt, border: `1px solid ${th.border}`, color: th.accent, cursor: "pointer", fontSize: 10, padding: "2px 8px", borderRadius: 4 }}
+                    >
+                      Filter session
+                    </button>
+                  )}
+                  {onCorrelateWorkspace && (selectedRowData.Workspace || selectedRowData.SourceFile) && isAiHistorySourceFormat(ct?.sourceFormat) && (
+                    <button
+                      type="button"
+                      onClick={() => onCorrelateWorkspace(selectedRowData.Workspace, selectedRowData.SourceFile)}
+                      title="Filter open Prefetch, EVTX, or Amcache tabs by this workspace path"
+                      style={{ background: th.bgAlt, border: `1px solid ${th.border}`, color: th.accent, cursor: "pointer", fontSize: 10, padding: "2px 8px", borderRadius: 4 }}
+                    >
+                      Correlate path
+                    </button>
+                  )}
+                  {selectedRowData.SourceFile && tle?.openAiSource && (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const r = await tle.openAiSource(selectedRowData.SourceFile, selectedRowData.LineNumber || "");
+                        if (isIpcError(r)) toast.error("Open source failed", { detail: ipcErrorMessage(r) });
+                      }}
+                      title="Open source file in the default app (JSONL line shown in header when available)"
+                      style={{ background: th.bgAlt, border: `1px solid ${th.border}`, color: th.text, cursor: "pointer", fontSize: 10, padding: "2px 8px", borderRadius: 4 }}
+                    >
+                      Open source
+                    </button>
+                  )}
+                  <button onClick={() => setDetailPanelOpen(false)} aria-label="Close row detail" title="Close row detail" style={{ background: "none", border: "none", color: th.textMuted, cursor: "pointer", fontSize: 13, padding: "2px 6px" }}>✕</button>
+                </div>
               </div>
               <div style={{ flex: 1, overflow: "auto", padding: "4px 12px" }}>
-                {ct.headers.map((h) => (
+                {isAiHistorySourceFormat(ct?.sourceFormat) && aiHistoryDetailPinnedFields(selectedRowData).length > 0 && (
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, padding: "6px 0 10px", marginBottom: 6, borderBottom: `1px solid ${th.border}` }}>
+                    {aiHistoryDetailPinnedFields(selectedRowData).map(({ field, label, value }) => (
+                      <span
+                        key={field}
+                        title={`${label}: ${value}`}
+                        style={{
+                          fontSize: 10,
+                          padding: "2px 8px",
+                          borderRadius: 4,
+                          background: th.bgAlt,
+                          border: `1px solid ${th.border}`,
+                          color: th.text,
+                          fontFamily: "-apple-system, sans-serif",
+                        }}
+                      >
+                        <span style={{ color: th.textMuted, marginRight: 4 }}>{label}</span>
+                        <span style={{ fontFamily: "'SF Mono', Menlo, monospace" }}>{value}</span>
+                      </span>
+                    ))}
+                  </div>
+                )}
+                {(isAiHistorySourceFormat(ct?.sourceFormat) ? aiHistoryDetailHeaderOrder(ct.headers) : ct.headers).map((h) => (
                   <div key={h} style={{ display: "flex", gap: 12, padding: "3px 0", borderBottom: `1px solid ${th.bgAlt}`, alignItems: "flex-start" }}>
                     <span style={{ width: 180, minWidth: 180, fontWeight: 600, color: ct.hiddenColumns.has(h) ? th.textMuted : th.textDim, fontSize: 11, flexShrink: 0, fontFamily: "-apple-system, sans-serif" }}>
                       {h}{ct.hiddenColumns.has(h) && <span style={{ fontSize: 9, marginLeft: 4, color: th.textMuted }}>(hidden)</span>}
                     </span>
                     <span style={{ flex: 1, color: th.text, fontSize: 11, fontFamily: "'SF Mono', Menlo, monospace", wordBreak: "break-all", whiteSpace: "pre-wrap" }}>
-                      {selectedRowData[h] || ""}
+                      {isAiHistorySourceFormat(ct?.sourceFormat)
+                        ? aiHistoryDetailCellValue(selectedRowData, h) || fmtCell(h, selectedRowData[h])
+                        : fmtCell(h, selectedRowData[h])}
                     </span>
-                    <button onClick={() => copyCell(selectedRowData[h])} style={{ background: "none", border: "none", color: th.textMuted, cursor: "pointer", fontSize: 10, flexShrink: 0, padding: "1px 4px" }} title="Copy value">
+                    <button onClick={() => copyCell(selectedRowData[h], h)} style={{ background: "none", border: "none", color: th.textMuted, cursor: "pointer", fontSize: 10, flexShrink: 0, padding: "1px 4px" }} title="Copy value">
                       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
                     </button>
                   </div>

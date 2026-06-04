@@ -5,6 +5,7 @@ const path = require("path");
 const crypto = require("crypto");
 
 const { PathAuthorizer, isPathInside } = require("../utils/path-authorizer");
+const { openDialogOptions } = require("../utils/open-dialog");
 const {
   collectRdpBitmapCacheFiles,
   convertBmpToPng,
@@ -594,7 +595,7 @@ function createRdpBitmapHandlers({
   return {
     async selectSource() {
       if (!dialog?.showOpenDialog) throw new Error("Native file selection is unavailable.");
-      const result = await dialog.showOpenDialog(getWindow(), {
+      const result = await dialog.showOpenDialog(getWindow(), openDialogOptions({
         title: "Select RDP Bitmap Cache Source",
         buttonLabel: "Select Cache Source",
         properties: ["openFile", "openDirectory", "multiSelections"],
@@ -602,7 +603,7 @@ function createRdpBitmapHandlers({
           { name: "RDP Bitmap Cache", extensions: ["bmc", "bin"] },
           { name: "All Files", extensions: ["*"] },
         ],
-      });
+      }));
       if (result.canceled || !result.filePaths?.length) return null;
       const grants = authorizeSelectedSources(authorizer, result.filePaths);
       const preflight = await preflightSources(authorizer, result.filePaths);
@@ -615,14 +616,14 @@ function createRdpBitmapHandlers({
 
     async selectTool() {
       if (!dialog?.showOpenDialog) throw new Error("Native file selection is unavailable.");
-      const result = await dialog.showOpenDialog(getWindow(), {
+      const result = await dialog.showOpenDialog(getWindow(), openDialogOptions({
         title: "Select bmc-tools",
         buttonLabel: "Select bmc-tools",
         properties: ["openFile"],
         filters: [
           { name: "bmc-tools", extensions: ["py", "exe", "*"] },
         ],
-      });
+      }));
       if (result.canceled || !result.filePaths?.length) return null;
       const grant = authorizer.authorize(TOOL_SCOPE, result.filePaths[0], {
         recursive: false,

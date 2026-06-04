@@ -89,7 +89,7 @@ export default function QuickHelpModal() {
         <Li>Double-click any cell to see its full content in a popup.</Li>
         <Li>Drop files directly onto the window to import them.</Li>
         <Li>The status bar (bottom) shows active filters, row counts, and sort state. Double-click the file path to copy it.</Li>
-        <Li>IRFlow Timeline checks for updates automatically; use <b>Help ▸ Check for Updates…</b> to check on demand and install with one click.</Li>
+        <Li>IRFlow Timeline checks for updates automatically; use <b>Help ▸ Check for Updates</b> to check on demand and install with one click.</Li>
       </div>
     </Modal>
   );
