@@ -18,9 +18,9 @@ const config = {
     // The bundled Hayabusa binary (extraResources) is universal (arm64+x86_64)
     // Mach-O, identical in both the x64 and arm64 sub-builds. @electron/universal
     // refuses to merge an identical Mach-O unless it's explicitly allowed here, so
-    // this tells it to copy the (already-fat) binaries through as-is. Without this the
+    // this tells it to copy the (already-fat) binary through as-is. Without this the
     // universal build fails with "not covered by the x64ArchFiles rule".
-    x64ArchFiles: "**/{hayabusa/hayabusa}",
+    x64ArchFiles: "**/hayabusa/hayabusa",
     target: [
       {
         target: "dmg",
