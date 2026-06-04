@@ -10,11 +10,17 @@ The feature creates an **AI Query History** timeline tab from local desktop, CLI
 
 ## Opening AI Artifacts
 
-- **Menu:** **Tools -> Analysis -> AI Artifacts -> Collect AI Artifacts**
-- **Single artifact:** **File -> Open...** on a supported AI app folder or file
+- **Menu:** **Tools → Analysis → AI Artifacts → Collect AI Artifacts**
+- **Per-app import:** **Tools → Analysis → AI Artifacts → AI Apps → …** (Claude Code, Codex, ChatGPT Desktop, Gemini CLI, Cursor, Copilot, Windsurf, Continue)
+- **Home launcher:** **Collect AI Artifacts** tile on the capability launcher
+- **Single artifact:** **File → Open…** on a supported AI app folder or file
 - **Output:** one **AI Query History** timeline tab
 
-Use the scan workflow for live Mac triage, KAPE collections, mounted disks, copied profile folders, or external triage packages. Use **File -> Open...** when you already know the specific AI artifact root, such as `.claude`, `.codex`, `.cursor`, `.gemini`, or a supported app data directory.
+![Tools → Analysis → AI Artifacts with Collect AI Artifacts and the AI Apps submenu](/dfir-tips/Tools-Menu-AI-Artifacts.png)
+
+Use **Collect AI Artifacts** for live Mac triage, KAPE collections, mounted disks, copied profile folders, or external triage packages. Use **AI Apps** or **File → Open…** when you already know the specific AI artifact root, such as `.claude`, `.codex`, `.cursor`, `.gemini`, or a supported app data directory.
+
+![Home capability launcher with Collect AI Artifacts shortcut](/dfir-tips/Home-Capability-Launcher-v107.png)
 
 ## What It Captures
 
@@ -27,7 +33,7 @@ Use the scan workflow for live Mac triage, KAPE collections, mounted disks, copi
 | Workspace paths | Connects AI activity to repositories, production directories, mounted evidence, or sensitive project paths. |
 | Source files and line hints | Lets analysts trace a row back to the original local artifact. |
 | User and host attribution | Helps map AI activity back to an endpoint profile or KAPE collection path. |
-| Possible secrets | Review with **Tools -> Detection -> AI Secret Hunt** for exposed keys, private keys, tokens, and credentials. |
+| Possible secrets | Review with **Tools → Detection → AI Secret Hunt** for exposed keys, private keys, tokens, and credentials. |
 
 ## Supported AI Apps
 
@@ -47,7 +53,7 @@ IRFlow scans local artifacts from these AI apps:
 
 For exact paths, collection notes, and parser caveats, see [AI Query History and AI App Artifacts](/dfir-tips/ai-query-history).
 
-## Scan Modes
+## Collect Modes
 
 ### This Mac
 
@@ -57,11 +63,15 @@ Scans the current analyst profile using the same local paths IRFlow knows how to
 
 Scans a selected folder such as a KAPE collection, copied user profile, mounted disk, or triage package. IRFlow walks common Windows, macOS, and Linux profile layouts and only reads AI roots that resolve inside the selected scope.
 
+![Collect AI Artifacts — This Mac or Browse folder for KAPE/triage collections](/dfir-tips/Collect-AI-Artifacts-Target.png)
+
 This scope confinement matters for incident response: a scan pointed at a collection folder should not silently read unrelated local analyst data.
 
 ## AI Secret Hunt
 
-**Tools -> Detection -> AI Secret Hunt** reviews the extracted AI history for possible sensitive data exposure. It is designed for analyst triage, not as a replacement for enterprise secret-scanning controls.
+On an **AI Query History** tab, run **Tools → Detection → AI Secret Hunt** to review extracted history for possible sensitive data exposure. It is designed for analyst triage, not as a replacement for enterprise secret-scanning controls.
+
+![Tools → Detection with Sigma Scan and AI Secret Hunt on an AI history tab](/dfir-tips/Tools-Menu-Detection-AI-Secret-Hunt.png)
 
 It helps find:
 
@@ -71,7 +81,9 @@ It helps find:
 - Credentials and connection strings
 - High-confidence provider-specific secret formats
 
-Results are redacted by default. Analysts can reveal evidence when needed, tag findings, open source rows, and export tagged results for reporting.
+Results are **redacted by default** (cleartext is never written to disk). Analysts can reveal evidence when needed, tag findings, group by tool or session, open source rows, and export a redacted PDF/HTML exposure brief or CSV.
+
+![AI Secret Hunt results with grouped findings, severity, and redacted previews](/dfir-tips/AI-Secret-Hunt-Results.png)
 
 ## Key Columns
 
@@ -95,7 +107,7 @@ Results are redacted by default. Analysts can reveal evidence when needed, tag f
 - Merged AI timelines cap at 3,000,000 rows and report truncation.
 - Malformed JSONL lines are skipped and counted in the import notice.
 - Subagent or sidechain content can be included for broader hunts, but main-session-only scans are faster for first-pass triage.
-- Export packages include the filtered timeline CSV plus a manifest of source files and hashes for the first 250 sources.
+- **Tools → Export → Export AI History Package…** includes the filtered timeline CSV plus a manifest of source files and hashes for the first 250 sources.
 
 ## Limitations
 
