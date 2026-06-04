@@ -97,6 +97,7 @@ export default defineConfig({
           items: [
             { text: 'Histogram', link: '/features/histogram' },
             { text: 'Sigma Detection', link: '/features/sigma-detection' },
+            { text: 'AI Artifacts', link: '/features/ai-artifacts' },
             { text: 'Process Inspector', link: '/features/process-tree' },
             { text: 'Analyst Profiles', link: '/features/analyst-profiles' },
             { text: 'Lateral Movement Tracker', link: '/features/lateral-movement' },
@@ -147,7 +148,6 @@ export default defineConfig({
             { text: 'Insider Threat & Exfiltration', link: '/dfir-tips/insider-threat-exfiltration' },
             { text: 'Log Tampering Detection', link: '/dfir-tips/log-tampering-detection' },
             { text: 'Persistence Hunting', link: '/dfir-tips/persistence-hunting' },
-            { text: 'AI Query History', link: '/dfir-tips/ai-query-history' },
             { text: 'KAPE Triage Workflow', link: '/dfir-tips/kape-triage-workflow' },
             { text: 'Threat Intel IOC Sweeps', link: '/dfir-tips/threat-intel-ioc-sweeps' },
             { text: 'Building the Final Report', link: '/dfir-tips/building-final-report' }
