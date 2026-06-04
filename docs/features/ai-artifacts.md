@@ -10,7 +10,7 @@ The feature creates an **AI Query History** timeline tab from local desktop, CLI
 
 ## Opening AI Artifacts
 
-- **Menu:** **Tools -> Analysis -> AI Artifacts -> Scan AI Artifacts**
+- **Menu:** **Tools -> Analysis -> AI Artifacts -> Collect AI Artifacts**
 - **Single artifact:** **File -> Open...** on a supported AI app folder or file
 - **Output:** one **AI Query History** timeline tab
 
@@ -27,7 +27,7 @@ Use the scan workflow for live Mac triage, KAPE collections, mounted disks, copi
 | Workspace paths | Connects AI activity to repositories, production directories, mounted evidence, or sensitive project paths. |
 | Source files and line hints | Lets analysts trace a row back to the original local artifact. |
 | User and host attribution | Helps map AI activity back to an endpoint profile or KAPE collection path. |
-| Possible secrets | Feeds AI Secret Scan for exposed keys, private keys, tokens, and credentials. |
+| Possible secrets | Review with **Tools -> Detection -> AI Secret Hunt** for exposed keys, private keys, tokens, and credentials. |
 
 ## Supported AI Apps
 
@@ -59,9 +59,9 @@ Scans a selected folder such as a KAPE collection, copied user profile, mounted 
 
 This scope confinement matters for incident response: a scan pointed at a collection folder should not silently read unrelated local analyst data.
 
-## AI Secret Scan
+## AI Secret Hunt
 
-AI Secret Scan reviews the extracted AI history for possible sensitive data exposure. It is designed for analyst triage, not as a replacement for enterprise secret-scanning controls.
+**Tools -> Detection -> AI Secret Hunt** reviews the extracted AI history for possible sensitive data exposure. It is designed for analyst triage, not as a replacement for enterprise secret-scanning controls.
 
 It helps find:
 
