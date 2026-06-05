@@ -1,7 +1,6 @@
 # IRFlow Timeline
-<img width="1297" height="771" alt="IRFlow-Timeline-Github" src="https://github.com/user-attachments/assets/4e966f3f-6b82-4efa-990c-d201ebd0c23f" />
 
-https://github.com/user-attachments/assets/d0a94f52-8b2a-4735-bd01-c55e2459f7b4
+![IRFlow Timeline home screen — capability launcher with Process Inspector, Lateral Movement, Persistence, Sigma, Collect AI Artifacts, Master File Table, USN Journal, and Open & Explore](assets/IRFlow-Timeline-Home.jpg)
 
 A high-performance native macOS application for DFIR timeline analysis. Built on Electron + SQLite to handle millions of rows from CSV, TSV, XLSX, EVTX, Plaso, raw `$MFT`, and `$J` (`$UsnJrnl`) files without breaking a sweat.
 
@@ -9,6 +8,7 @@ Inspired by Eric Zimmerman's Timeline Explorer for Windows.
 
 ### Key Features
 
+- **AI Artifacts** — Collect local AI history from Claude Code, Codex, ChatGPT Desktop, Gemini CLI, Cursor, Copilot, Windsurf, and Continue into one timeline tab; **AI Secret Hunt** for exposed keys, tokens, and credentials
 - **Raw NTFS Artifact Import** — Direct ingestion of `$MFT` and `$UsnJrnl` (`$J`) with full path reconstruction, SI/FN timestamps, and change reason mapping
 - **Ransomware Analytics** — Automated impact analysis from `$MFT` data: bulk rename detection, entropy-based extension analysis, ransom note identification, and temporal clustering
 - **VirusTotal Enrichment** — IOC matching with bulk VT lookups, malware family extraction, verdict badges, relationship pivoting, and local caching
