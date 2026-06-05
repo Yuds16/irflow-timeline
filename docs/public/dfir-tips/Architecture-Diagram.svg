@@ -115,7 +115,7 @@
   <text x="1108" y="440" class="item">HTML / PDF report</text>
   <text x="1108" y="462" class="item">.tle sessions</text>
   <text x="1108" y="484" class="item">Sigma triage</text>
-  <text x="1108" y="506" class="item">RDP evidence</text>
+  <text x="1108" y="506" class="item">RDP · AI history pkg</text>
 
   <rect x="1088" y="700" width="152" height="210" class="side" stroke="#3fb950" stroke-opacity="0.55" filter="url(#shadow)"/>
   <circle cx="1106" cy="726" r="4" fill="#3fb950"/>
@@ -152,7 +152,7 @@
   <rect x="300" y="349" width="680" height="62" class="panel" fill="url(#preloadGrad)" stroke="#a371f7" stroke-width="2"/>
   <circle cx="328" cy="377" r="4.5" fill="#a371f7"/>
   <text x="342" y="381" fill="#a371f7" class="section">PRELOAD BRIDGE · SECURE BOUNDARY</text>
-  <text x="328" y="401" class="csub">window.tle API · context-isolated, node-integration off</text>
+  <text x="328" y="401" class="csub">window.tle API · VT · Sigma · AI history / Secret Hunt IPC</text>
 
   <!-- preload -> main -->
   <line x1="640" y1="411" x2="640" y2="446" class="spine" stroke="#a371f7" marker-end="url(#aViolet)"/>
@@ -173,8 +173,8 @@
   <text x="543" y="577" class="csub">pipeline · menu · updates</text>
   <rect x="782" y="532" width="250" height="58" class="card"/>
   <rect x="794" y="544" width="4" height="34" rx="2" fill="#58a6ff"/>
-  <text x="810" y="559" class="ctitle">ipc/ · 13 modules</text>
-  <text x="810" y="577" class="csub">162 IPC handlers across domains</text>
+  <text x="810" y="559" class="ctitle">ipc/ · 14 modules</text>
+  <text x="810" y="577" class="csub">ai-history-handlers + domains</text>
 
   <!-- main -> workers -->
   <line x1="640" y1="608" x2="640" y2="643" class="spine" stroke="#58a6ff" marker-end="url(#aBlue)"/>
@@ -186,16 +186,18 @@
   <text x="262" y="677" fill="#d29922" class="section">WORKER THREADS · electron/jobs</text>
   <rect x="248" y="691" width="192" height="56" class="card"/>
   <rect x="260" y="703" width="4" height="32" rx="2" fill="#d29922"/>
-  <text x="276" y="717" class="ctitle">import-worker</text>
-  <text x="276" y="734" class="csub">parse + insert</text>
+  <text x="276" y="712" class="ctitle">import-worker</text>
+  <text x="276" y="728" class="csub">parse + insert</text>
+  <text x="276" y="742" class="csub">ai-history decode</text>
   <rect x="452" y="691" width="192" height="56" class="card"/>
   <rect x="464" y="703" width="4" height="32" rx="2" fill="#3fb950"/>
   <text x="480" y="717" class="ctitle">index-worker</text>
   <text x="480" y="734" class="csub">index + FTS5</text>
   <rect x="656" y="691" width="192" height="56" class="card"/>
   <rect x="668" y="703" width="4" height="32" rx="2" fill="#f85149"/>
-  <text x="684" y="717" class="ctitle">analyzer-worker</text>
-  <text x="684" y="734" class="csub">forensic detectors</text>
+  <text x="684" y="712" class="ctitle">ai-profile-worker</text>
+  <text x="684" y="728" class="csub">Collect AI Artifacts</text>
+  <text x="684" y="742" class="csub">profile-scan merge</text>
   <rect x="860" y="691" width="172" height="56" class="card"/>
   <rect x="872" y="703" width="4" height="32" rx="2" fill="#f85149"/>
   <text x="888" y="717" class="ctitle">sigma-worker</text>
@@ -216,12 +218,12 @@
   <text x="276" y="929" class="csub">query · tag · analytics · UDFs</text>
   <rect x="515" y="884" width="250" height="58" class="card"/>
   <rect x="527" y="896" width="4" height="34" rx="2" fill="#f85149"/>
-  <text x="543" y="911" class="ctitle">analyzers/ · 10 domains</text>
-  <text x="543" y="929" class="csub">ransomware · ADS · USN · LM</text>
+  <text x="543" y="911" class="ctitle">analyzers/ · 11 domains</text>
+  <text x="543" y="929" class="csub">LM · Sigma · ai-history secrets</text>
   <rect x="782" y="884" width="250" height="58" class="card"/>
   <rect x="794" y="896" width="4" height="34" rx="2" fill="#f85149"/>
-  <text x="810" y="911" class="ctitle">detection engines</text>
-  <text x="810" y="929" class="csub">Sigma (JS+Hayabusa) · RDP</text>
+  <text x="810" y="911" class="ctitle">AI Secret Hunt</text>
+  <text x="810" y="929" class="csub">analyze-ai-history · regex+entropy</text>
 
   <!-- data -> parser -->
   <line x1="640" y1="960" x2="640" y2="995" class="spine" stroke="#3fb950" marker-end="url(#aGreen)"/>
@@ -238,8 +240,10 @@
   <text x="529" y="1087" text-anchor="middle" class="csub">csv · xlsx</text>
   <rect x="632" y="1069" width="178" height="28" class="card"/>
   <text x="721" y="1087" text-anchor="middle" class="csub">evtx · plaso</text>
-  <rect x="824" y="1069" width="208" height="28" class="card"/>
-  <text x="928" y="1087" text-anchor="middle" class="csub">mft · usn · import.js</text>
+  <rect x="824" y="1069" width="100" height="28" class="card"/>
+  <text x="874" y="1087" text-anchor="middle" class="csub">mft · usn</text>
+  <rect x="932" y="1069" width="100" height="28" class="card"/>
+  <text x="982" y="1087" text-anchor="middle" class="csub">ai-history/</text>
 
   <!-- ============ SIDE CONNECTORS ============ -->
   <line x1="192" y1="250" x2="220" y2="250" class="rail" stroke="#d29922" marker-end="url(#aAmber)"/>
