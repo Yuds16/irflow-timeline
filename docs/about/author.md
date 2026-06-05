@@ -21,6 +21,7 @@ import { withBase } from 'vitepress'
     <div style="display: flex; gap: 12px; margin-top: 12px;">
       <a href="https://www.linkedin.com/in/renzoncruz/" target="_blank" rel="noopener" style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 6px; background: var(--vp-c-brand-soft); color: var(--vp-c-brand-1); font-size: 13px; font-weight: 600; text-decoration: none;">LinkedIn</a>
       <a href="https://x.com/r3nzsec" target="_blank" rel="noopener" style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 6px; background: var(--vp-c-bg-soft); color: var(--vp-c-text-1); font-size: 13px; font-weight: 600; text-decoration: none;">@r3nzsec</a>
+      <a href="mailto:renzoncruz.26@gmail.com" style="display: inline-flex; align-items: center; gap: 6px; padding: 6px 14px; border-radius: 6px; background: var(--vp-c-bg-soft); color: var(--vp-c-text-1); font-size: 13px; font-weight: 600; text-decoration: none;">renzoncruz.26@gmail.com</a>
     </div>
   </div>
 </div>
