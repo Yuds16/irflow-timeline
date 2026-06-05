@@ -55,17 +55,18 @@ features:
 
 ## What is IRFlow Timeline?
 
-IRFlow Timeline is a native macOS application purpose-built for digital forensics and incident response (DFIR) investigators. Inspired by Eric Zimmerman's Timeline Explorer for Windows, it brings high-performance timeline analysis to macOS with a modern interface and advanced analytics.
+IRFlow Timeline is a native macOS application purpose-built for digital forensics and incident response (DFIR) investigators. Inspired by Eric Zimmerman's Timeline Explorer for Windows, it brings high-performance timeline analysis to macOS — from EVTX and KAPE super-timelines to **local AI assistant artifacts** — with a modern interface, built-in detection analytics, and **AI Secret Hunt** for credential exposure in AI history.
 
 ### Who Is This For?
 
-- **Incident Responders** — reconstruct kill chains across endpoints on macOS, no Windows VM required
-- **SOC Analysts** — triage KAPE collections and hunt through millions of event log entries at native speed
+- **Incident Responders** — reconstruct kill chains across endpoints on macOS, no Windows VM required; review local AI assistant usage on triaged endpoints
+- **SOC Analysts** — triage KAPE collections and hunt through millions of event log entries at native speed; include AI app artifacts in collection triage
 - **Forensic Examiners** — correlate MFT, Prefetch, Amcache, and registry artifacts in a single unified timeline
 - **Threat Hunters** — detect lateral movement patterns, stack column values, and sweep IOC lists across your environment
 - **IR Consultants** — deliver tagged and bookmarked evidence packages ready for client reporting
+- **AI-assisted incident investigators** — collect Claude, Codex, Cursor, Copilot, and other local AI history into timeline evidence; hunt pasted secrets and correlate prompts with endpoint activity
 
-If you've hit Excel's 1M-row limit on a super-timeline, or you're tired of spinning up a Windows VM just to run Timeline Explorer — this is the tool that replaces both.
+If you've hit Excel's 1M-row limit on a super-timeline, you're tired of spinning up a Windows VM just to run Timeline Explorer, or you need to preserve **AI-assisted activity** as evidence alongside EVTX and KAPE output — this is the tool that replaces both.
 
 ### Supported Formats
 
