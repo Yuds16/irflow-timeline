@@ -1,6 +1,6 @@
 # IRFlow Timeline
 
-![IRFlow Timeline home screen — capability launcher with Process Inspector, Lateral Movement, Persistence, Sigma, Collect AI Artifacts, Master File Table, USN Journal, and Open & Explore](assets/IRFlow-Timeline-Home.jpg)
+![IRFlow Timeline home screen — capability launcher with Process Inspector, Lateral Movement, Persistence, Sigma, Collect AI Artifacts, Master File Table, USN Journal, and Open & Explore](assets/IRFlow-Timeline-Home.png)
 
 A high-performance native macOS application for DFIR timeline analysis. Built on Electron + SQLite to handle millions of rows from CSV, TSV, XLSX, EVTX, Plaso, raw `$MFT`, and `$J` (`$UsnJrnl`) files without breaking a sweat.
 
