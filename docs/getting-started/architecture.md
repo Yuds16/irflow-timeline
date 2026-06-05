@@ -6,7 +6,7 @@ description: IRFlow Timeline architecture — React renderer, Electron main proc
 
 Technical overview of IRFlow Timeline's architecture for developers and contributors.
 
-> **v1.0.6 is a modular refactor.** What was once a ~20K-line `App.jsx` and monolithic `electron/parser.js` / `electron/db.js` is now decomposed into ~200 focused modules across the renderer and main process (`parsers/`, `ipc/`, `jobs/`, `analyzers/`, and related trees). The file references below reflect that layout.
+> **v1.0.6+ modular layout (current: v1.0.7).** What was once a ~20K-line `App.jsx` and monolithic `electron/parser.js` / `electron/db.js` is now decomposed into ~200 focused modules across the renderer and main process (`parsers/`, `ipc/`, `jobs/`, `analyzers/`, and related trees). v1.0.7 adds **`parsers/ai-history/`** and AI artifact IPC for **Collect AI Artifacts** and **AI Secret Hunt**. The file references below reflect that layout.
 
 ## System Architecture
 
@@ -31,7 +31,7 @@ The diagram uses a **semantic color system** — color maps to function, not jus
 
 The renderer runs in a sandboxed browser context with no direct Node.js access — all system operations go through the IPC bridge. `App.jsx` is now a thin top-level coordinator; responsibility is distributed across focused trees:
 
-- **`components/`** — `VirtualGrid`, `MenuBar`, `FilterBar`, `TabBar`, `StatusBar`; `primitives/` (Modal, Button, Toast, ConfirmDialog, …); `modals/` (one file per analysis modal — Sigma, Lateral Movement, Persistence, Ransomware, USN, ADS, Timestomping, RDP bitmap cache, …); `process-analyzer/` (process-tree UI subsystem)
+- **`components/`** — `VirtualGrid`, `MenuBar`, `FilterBar`, `TabBar`, `StatusBar`; `primitives/` (Modal, Button, Toast, ConfirmDialog, …); `modals/` (one file per analysis modal — Sigma, Lateral Movement, Persistence, Ransomware, USN, ADS, Timestomping, RDP bitmap cache, AI history extract/secret hunt, …); `process-analyzer/` (process-tree UI subsystem)
 - **`store/`** — Zustand stores: `useTabStore`, `useUIStore`, `useGridInteractionStore`, `useConfirmStore`, `useToastStore`
 - **`hooks/`**, **`modals/modalRegistry.js`** (namespaced modal state), **`constants/`** (`themes.js`, `presets.js`, `kape-profiles.js`, …), **`utils/`** (`ipc-result.js`, `datetime.js`, a mirror of `forensic-normalize`, …)
 - **`detection-rules.js`** (~400 lines) + **`detection-rules/`** (`tool-aliases.js` — the canonical RMM/tunnel/exfil tool catalog), mapped to MITRE ATT&CK and consumed by the process analyzer
@@ -64,7 +64,7 @@ The main process runs with full Node.js access and acts as the orchestrator:
 
 CPU-heavy work runs off the main thread in `worker_threads`, coordinated by `job-manager.js`:
 
-- **`import-worker`** — streams a source file through `parsers/index.js` into a temp SQLite DB
+- **`import-worker`** — streams a source file through `parsers/index.js` into a temp SQLite DB (including AI history folder/profile merges)
 - **`index-worker`** — builds column indexes, then the FTS5 index, in the background
 - **`analyzer-worker`** — runs forensic detectors
 - **`sigma-worker`** — runs Sigma / Hayabusa scans
@@ -128,6 +128,7 @@ Streaming parsers convert source files into batched SQLite inserts:
 - **`plaso.js`** — Plaso SQLite databases via ATTACH + zlib
 - **`mft.js`** — two-pass raw `$MFT` parser (pass 1 builds directory + FN attribute maps, pass 2 reconstructs full paths); outputs **34 columns** matching MFTECmd, with SI-vs-FN timestamp comparison and resident-data detection
 - **`usn.js`** — raw `$UsnJrnl:$J` parser with reason-flag decoding and file-reference extraction
+- **`ai-history/`** — per-app parsers (Claude, Codex, ChatGPT, Gemini CLI, Cursor, Copilot, Windsurf, Continue) merged by profile scan or folder import into **AI Query History** tabs
 
 ## Data Flow
 

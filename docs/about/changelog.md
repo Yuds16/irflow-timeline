@@ -67,7 +67,7 @@ description: IRFlow Timeline changelog — version history, new features, perfor
 
 ### UI Improvements
 
-- **Tools menu restructure** — Reorganized into Analysis, Detection (Sigma Scan), Platforms (Windows tools, with Linux/macOS/Cloud teasers), and Export sections
+- **Tools menu restructure** — Reorganized into Analysis, Detection (Sigma Scan), Platforms (Windows tools, with Linux/macOS/Cloud teasers), and Export sections (v1.0.7 adds **AI Artifacts** under Analysis and **AI Secret Hunt** under Detection)
 
 - **Lateral Movement Tracker** — **15** configurable built-in event rules (added RMM / Remote Access + Scheduled Task execution presets)
 

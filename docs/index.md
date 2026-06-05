@@ -53,6 +53,8 @@ features:
 - **AI Secret Hunt** — Review AI history for exposed API keys, private keys, tokens, credentials, and other sensitive strings via **Tools → Detection → AI Secret Hunt**: redacted-by-default handling (cleartext never written to disk), analyst tags, source-row evidence, group-by tool/session, and a redacted PDF / HTML exposure brief (plus CSV export)
 - **AI app coverage** — Parses local history from Claude Code, OpenAI Codex, ChatGPT Desktop, Gemini CLI, Cursor, GitHub Copilot, Windsurf, and Continue, including KAPE/triage folder scans across Windows, Linux, and macOS profile layouts
 
+[Full changelog →](/about/changelog)
+
 ## What is IRFlow Timeline?
 
 IRFlow Timeline is a native macOS application purpose-built for digital forensics and incident response (DFIR) investigators. Inspired by Eric Zimmerman's Timeline Explorer for Windows, it brings high-performance timeline analysis to macOS — from EVTX and KAPE super-timelines to **local AI assistant artifacts** — with a modern interface, built-in detection analytics, and **AI Secret Hunt** for credential exposure in AI history.

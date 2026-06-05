@@ -79,6 +79,19 @@ Analytics tools run against the currently filtered dataset. Applying date range 
 - **Use CSV over XLSX** for very large datasets — CSV streaming is faster than Excel parsing
 - **Pre-filter with external tools** if you only need a subset of the data
 
+## AI History Performance
+
+**Collect AI Artifacts** and large folder imports run in a worker thread so the UI stays responsive.
+
+| Tip | Why |
+|-----|-----|
+| **Main sessions only** on first pass | Skips `subagents/` and sidechain rows — much faster on hosts with 80k+ JSONL lines |
+| **Browse folder scope** | Point at the KAPE/triage root so discovery does not also read unrelated local Mac paths |
+| **Filter before export** | **Export AI History Package** respects active filters — narrow to tagged secret findings or a date window before writing the CSV |
+| **Scroll large AI tabs** | AI Query History tabs with 100k+ rows use the same virtual scroll window as EVTX timelines; avoid keeping many huge AI tabs open at once |
+
+Merged AI timelines stop at **3,000,000** rows and report truncation in the import notice. Malformed JSONL lines are skipped and counted so you know when a source may be incomplete.
+
 ## Search Performance
 
 ### Background Indexing

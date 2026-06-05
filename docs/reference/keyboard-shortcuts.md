@@ -70,7 +70,7 @@ description: Keyboard shortcuts reference for IRFlow Timeline — file operation
 | `Cmd+Plus` / `Cmd+-` | Increase / decrease font size (macOS **Tools → Font Size**) |
 | Toolbar **☀ / 🌙** | Toggle dark / light theme |
 
-Analysis tools in the **in-app Tools** menu are grouped in four sections: **Analysis** (Stack Values, Gap Analysis, Log Sources, Burst Detection), **Detection** (Sigma Scan), **Platforms** (Windows, Linux, macOS, and Cloud — Windows tools are active; other OS groups are placeholders), and **Export** (Generate Report).
+Analysis tools in the **in-app Tools** menu are grouped in four sections: **Analysis** (Stack Values, Gap Analysis, Log Sources, Burst Detection, **AI Artifacts** with Collect AI Artifacts and per-app **AI Apps**), **Detection** (Sigma Scan and **AI Secret Hunt** on AI history tabs), **Platforms** (Windows, Linux, macOS, and Cloud — Windows tools are active; other OS groups are placeholders), and **Export** (Generate Report, **Export AI History Package**, **Export Source Manifest** on AI tabs).
 
 ![Tools → Analysis → AI Artifacts with Collect AI Artifacts and AI Apps](/dfir-tips/Tools-Menu-AI-Artifacts.png)
 

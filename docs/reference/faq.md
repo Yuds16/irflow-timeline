@@ -30,7 +30,12 @@ IRFlow Timeline is inspired by Eric Zimmerman's Timeline Explorer but adds capab
 - IOC Matching with 17+ indicator types
 - Gap & Burst Analysis for anomaly detection
 - Log Source Coverage heatmap
+- **AI Artifacts** — collect local AI assistant history into timeline evidence; **AI Secret Hunt** for exposed keys, tokens, and credentials
 - Handles 30GB+ files via SQLite streaming (no row limits)
+
+### Can I analyze local AI assistant history?
+
+Yes. **Tools → Analysis → AI Artifacts → Collect AI Artifacts** discovers and merges local stores from Claude Code, OpenAI Codex, ChatGPT Desktop, Gemini CLI, Cursor, GitHub Copilot, Windsurf, and Continue — from this Mac or a KAPE/triage folder. On the resulting **AI Query History** tab, run **Tools → Detection → AI Secret Hunt** to review possible credential exposure (redacted by default). See [AI Artifacts](/features/ai-artifacts) and [AI Query History](/dfir-tips/ai-query-history).
 
 ### Does it run Sigma rules?
 

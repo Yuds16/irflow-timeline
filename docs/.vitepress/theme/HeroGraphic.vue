@@ -20,7 +20,7 @@
       </div>
       <div class="title-right">
         <span class="brand-name">IRFlow</span>
-        <span class="brand-version">v1.0.3-beta</span>
+        <span class="brand-version">v1.0.7</span>
       </div>
     </div>
 
@@ -164,7 +164,7 @@
       </div>
       <div class="status-right">
         <span class="status-accent">⚡ 12ms query time</span>
-        <span class="status-item">CSV • EVTX • XLSX • Plaso</span>
+        <span class="status-item">CSV • EVTX • XLSX • Plaso • $MFT • AI history</span>
       </div>
     </div>
 
