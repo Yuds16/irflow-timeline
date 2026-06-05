@@ -1,7 +1,7 @@
 {
   "name": "irflow-timeline",
   "version": "1.0.6",
-  "description": "IRFlow Timeline — High-performance DFIR timeline viewer for macOS (30-50GB+ CSV/XLSX)",
+  "description": "IRFlow Timeline — Native macOS DFIR timeline analysis with AI Artifacts, AI Secret Hunt, EVTX/CSV/XLSX/Plaso/$MFT/$J import, and built-in investigation analytics",
   "main": "electron/main.js",
   "author": "DFIR Community",
   "license": "Apache-2.0",

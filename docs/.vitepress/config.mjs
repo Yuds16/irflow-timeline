@@ -2,7 +2,7 @@ import { defineConfig } from 'vitepress'
 
 export default defineConfig({
   title: 'IRFlow Timeline',
-  description: 'High-performance DFIR timeline analysis tool for macOS',
+  description: 'Native macOS DFIR timeline analysis — EVTX, CSV, XLSX, Plaso, $MFT, $J, and local AI app artifacts with AI Secret Hunt and built-in investigation analytics',
   base: '/irflow-timeline/',
   lastUpdated: true,
   cleanUrls: true,
@@ -17,20 +17,20 @@ export default defineConfig({
   head: [
     ['link', { rel: 'icon', type: 'image/svg+xml', href: '/irflow-timeline/logo.svg' }],
     ['meta', { property: 'og:title', content: 'IRFlow Timeline' }],
-    ['meta', { property: 'og:description', content: 'High-performance DFIR timeline analysis tool for macOS — search, visualize, and investigate 30GB+ forensic timelines' }],
+    ['meta', { property: 'og:description', content: 'Native macOS DFIR timeline analysis — EVTX, CSV, XLSX, Plaso, $MFT, $J, and local AI app artifacts with AI Secret Hunt and built-in investigation analytics' }],
     ['meta', { property: 'og:image', content: 'https://r3nzsec.github.io/irflow-timeline/IRFlow-Timeline-Github.png' }],
     ['meta', { property: 'og:type', content: 'website' }],
     ['meta', { property: 'og:url', content: 'https://r3nzsec.github.io/irflow-timeline/' }],
     ['meta', { name: 'twitter:card', content: 'summary_large_image' }],
     ['meta', { name: 'twitter:title', content: 'IRFlow Timeline' }],
-    ['meta', { name: 'twitter:description', content: 'High-performance DFIR timeline analysis tool for macOS — search, visualize, and investigate 30GB+ forensic timelines' }],
+    ['meta', { name: 'twitter:description', content: 'Native macOS DFIR timeline analysis — EVTX, CSV, XLSX, Plaso, $MFT, $J, and local AI app artifacts with AI Secret Hunt and built-in investigation analytics' }],
     ['meta', { name: 'twitter:image', content: 'https://r3nzsec.github.io/irflow-timeline/IRFlow-Timeline-Github.png' }],
     ['script', { 'data-goatcounter': 'https://irflowtimeline.goatcounter.com/count', async: '', src: '//gc.zgo.at/count.js' }],
     ['script', { type: 'application/ld+json' }, JSON.stringify({
       '@context': 'https://schema.org',
       '@type': 'SoftwareApplication',
       name: 'IRFlow Timeline',
-      description: 'High-performance DFIR timeline analysis tool for macOS. Handles 30GB+ forensic timelines with SQLite-backed virtual scrolling.',
+      description: 'Native macOS DFIR timeline analysis for EVTX, CSV, XLSX, Plaso, $MFT, $J, and local AI assistant artifacts — with AI Secret Hunt and SQLite-backed investigation analytics.',
       operatingSystem: 'macOS',
       applicationCategory: 'SecurityApplication',
       url: 'https://r3nzsec.github.io/irflow-timeline/',

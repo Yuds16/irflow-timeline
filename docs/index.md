@@ -1,11 +1,11 @@
 ---
 layout: home
-description: High-performance DFIR timeline analysis tool for macOS — search, visualize, and investigate 30GB+ forensic timelines.
+description: Native macOS DFIR timeline analysis — EVTX, CSV, XLSX, Plaso, $MFT, $J, and local AI app artifacts with AI Secret Hunt and built-in investigation analytics.
 
 hero:
   name: IRFlow Timeline
   text: DFIR Timeline Analysis
-  tagline: Native macOS forensic timeline analysis. Import, search, and investigate EVTX, CSV, XLSX, and Plaso timelines with the analytics DFIR professionals actually need.
+  tagline: Native macOS forensic timeline analysis. Import, search, and investigate EVTX, CSV, XLSX, Plaso, $MFT, $J, and local AI assistant artifacts — with AI Secret Hunt and the analytics DFIR professionals actually need.
   actions:
     - theme: brand
       text: Get Started
