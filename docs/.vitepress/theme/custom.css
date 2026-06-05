@@ -141,10 +141,15 @@
   background-color: #141720;
 }
 
-/* Hero logo image */
-.VPHero .VPImage {
-  max-width: 320px;
-  max-height: 320px;
+/* Hero logo image + AI Apps graphic slot */
+.VPHero .VPImage,
+.VPHero .image-container .hero-ai-apps {
+  max-width: 300px;
+  max-height: 300px;
+}
+
+.VPHero .image-container {
+  pointer-events: auto;
 }
 
 .dark .VPHero .image-bg {
