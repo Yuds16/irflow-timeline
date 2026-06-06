@@ -144,18 +144,20 @@
 /* Hero logo image + AI Apps graphic slot */
 .VPHero .VPImage,
 .VPHero .image-container .hero-ai-apps {
-  max-width: 440px;
-  max-height: 460px;
+  max-width: 520px;
+  max-height: 400px;
 }
 
 .VPHero .image-container {
   pointer-events: auto;
-  flex: 1 1 440px;
+  flex: 1 1 520px;
+  display: flex;
+  justify-content: flex-end;
 }
 
 @media (min-width: 961px) {
   .VPHero .image {
-    min-width: 380px;
+    min-width: 420px;
   }
 }
 

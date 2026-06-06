@@ -4,7 +4,7 @@
     @mouseenter="pauseCycle"
     @mouseleave="resumeCycle"
   >
-    <svg viewBox="0 0 300 292" class="hero-ai-apps-svg" role="img" aria-label="AI Apps scan merges local assistant history into one timeline tab">
+    <svg viewBox="0 0 300 232" class="hero-ai-apps-svg" role="img" aria-label="AI Apps scan merges local assistant history into one timeline tab">
       <defs>
         <linearGradient id="heroAiHub" x1="0" y1="0" x2="1" y2="1">
           <stop offset="0%" stop-color="#E85D2A" stop-opacity="0.55" />
@@ -75,16 +75,16 @@
         :aria-label="`Highlight ${app.label} scan path`"
       >
         <circle
-          :cx="app.x" :cy="app.y" :r="isActive(i) ? 18 : 15"
+          :cx="app.x" :cy="app.y" :r="isActive(i) ? 19 : 16"
           fill="rgba(15, 17, 20, 0.55)"
           :stroke="app.color"
           :stroke-width="isActive(i) ? 1.5 : 1"
           :stroke-opacity="isActive(i) ? 0.95 : 0.55"
         />
         <circle v-if="isActive(i)" :cx="app.x" :cy="app.y" r="24" fill="none" :stroke="app.color" stroke-width="0.8" stroke-opacity="0.35" class="hero-ai-node-ring" />
-        <foreignObject :x="app.x - 11" :y="app.y - 11" width="22" height="22">
+        <foreignObject :x="app.x - 12" :y="app.y - 12" width="24" height="24">
           <div xmlns="http://www.w3.org/1999/xhtml" class="hero-ai-icon-wrap">
-            <HeroAiAppIcon :id="app.id" :size="22" />
+            <HeroAiAppIcon :id="app.id" :size="24" />
           </div>
         </foreignObject>
         <text
@@ -103,13 +103,7 @@
         </text>
       </g>
 
-      <!-- Secret Hunt footer -->
-      <rect x="44" y="254" width="100" height="22" rx="4" fill="#FF3B3B12" stroke="#FF3B3B" stroke-width="0.7" stroke-opacity="0.45" class="hero-ai-chip" />
-      <text x="94" y="268" fill="#FF6B6B" font-size="6.5" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-weight="600">AI SECRET HUNT</text>
-      <rect x="156" y="254" width="100" height="22" rx="4" fill="#E85D2A10" stroke="#E85D2A" stroke-width="0.7" stroke-opacity="0.4" class="hero-ai-chip hero-ai-chip-delay" />
-      <text x="206" y="268" fill="#E85D2A" font-size="6.5" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-weight="600">KAPE / TRIAGE</text>
     </svg>
-    <p class="hero-ai-hint">Hover an app · auto-cycles scan paths</p>
   </div>
 </template>
 
@@ -181,8 +175,8 @@ onUnmounted(() => {
 <style scoped>
 .hero-ai-apps {
   width: 100%;
-  max-width: 440px;
-  margin: 0 auto;
+  max-width: 520px;
+  margin: 0 0 0 24px;
   pointer-events: auto;
   cursor: default;
 }
@@ -191,16 +185,6 @@ onUnmounted(() => {
   width: 100%;
   height: auto;
   display: block;
-}
-
-.hero-ai-hint {
-  margin: 10px 0 0;
-  text-align: center;
-  font-size: 10px;
-  letter-spacing: 0.6px;
-  color: var(--vp-c-text-3);
-  font-family: 'JetBrains Mono', 'Fira Code', monospace;
-  opacity: 0.85;
 }
 
 /* Ambient + hub motion */
@@ -263,8 +247,8 @@ onUnmounted(() => {
 }
 
 .hero-ai-icon-wrap {
-  width: 22px;
-  height: 22px;
+  width: 24px;
+  height: 24px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -281,14 +265,6 @@ onUnmounted(() => {
 .hero-ai-label-active {
   fill: #ddd;
   font-weight: 600;
-}
-
-.hero-ai-chip {
-  animation: hero-ai-chip-glow 3s ease-in-out infinite;
-}
-
-.hero-ai-chip-delay {
-  animation-delay: 1.2s;
 }
 
 @keyframes hero-ai-aura-pulse {
@@ -326,39 +302,28 @@ onUnmounted(() => {
   50% { opacity: 0.7; transform: scale(1.08); }
 }
 
-@keyframes hero-ai-chip-glow {
-  0%, 100% { stroke-opacity: 0.35; }
-  50% { stroke-opacity: 0.75; }
-}
-
 @media (prefers-reduced-motion: reduce) {
   .hero-ai-aura,
   .hero-ai-hub,
   .hero-ai-orbit,
   .hero-ai-ray,
   .hero-ai-packet,
-  .hero-ai-node-ring,
-  .hero-ai-chip {
+  .hero-ai-node-ring {
     animation: none !important;
   }
-
-  .hero-ai-hint { display: none; }
 }
 
 @media (max-width: 960px) {
   .hero-ai-apps {
-    max-width: 340px;
-    margin-top: 12px;
+    max-width: 400px;
+    margin: 12px auto 0;
   }
 }
 
 @media (max-width: 640px) {
   .hero-ai-apps {
-    max-width: 300px;
-  }
-
-  .hero-ai-hint {
-    font-size: 9px;
+    max-width: 340px;
+    margin-left: auto;
   }
 }
 </style>
