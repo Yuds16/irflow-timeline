@@ -95,6 +95,18 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Keep this before the Electron rebuild. npm ci installs better-sqlite3 for
+      # the Node ABI, so SQLite-backed tests run here instead of being skipped
+      # after the native module is rebuilt for Electron.
+      - name: Run test suite
+        run: npm test
+
+      - name: Build renderer
+        run: npm run build:renderer
+
+      - name: Build documentation
+        run: npm run docs:build
+
       - name: Build universal better-sqlite3 native module
         shell: bash
         run: |
@@ -155,8 +167,8 @@ jobs:
           # Clean any stale artifacts from prior runs before building.
           rm -rf release
           # --config.npmRebuild=false: skip electron-builder's built-in native module
-          # rebuild since we already pre-built the universal fat binary above.
-          npm run build:renderer
+          # rebuild since we already pre-built the universal fat binary above. The
+          # renderer was built and validated before the native-module rebuild.
           npx electron-builder --config electron-builder.config.cjs --mac --config.npmRebuild=false
 
       - name: Collect release artifacts
