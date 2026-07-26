@@ -99,6 +99,7 @@ jobs:
       # the Node ABI, so SQLite-backed tests run here instead of being skipped
       # after the native module is rebuilt for Electron.
       - name: Run test suite
+        timeout-minutes: 10
         run: npm test
 
       - name: Build renderer
