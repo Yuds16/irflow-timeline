@@ -173,7 +173,8 @@ function computeSysmonRdpAndCoverage(state) {
         }
       } catch (_cnErr) { warnings.push(`Sysmon CLIENTNAME detector failed: ${_cnErr.message}`); }
 
-      _normalizeFindingEvidenceRefs();
+      // Evidence refs are normalized once by the orchestrator after every emitter has
+      // run; calling it here as well doubled an already O(findings x events) pass.
 
       // === Session Grouping (Map-based, not adjacency-dependent) ===
       const _groupMap = new Map();
@@ -181,7 +182,9 @@ function computeSysmonRdpAndCoverage(state) {
         const gk = `${s.source}|${s.target}|${s.user}|${s.technique || s.status}`;
         let g = _groupMap.get(gk);
         if (!g) {
-          g = { sessions: [], count: 0, status: s.status, source: s.source, target: s.target, user: s.user, timeRange: { from: s.startTime || "", to: s.endTime || s.effectiveEnd || s.startTime || "" }, representativeSession: s, evidenceRefs: [], itemRowids: [] };
+          // `key` is exposed so the UI can track expansion by identity instead of by
+          // position in a sorted array (re-sorting used to open a different group).
+          g = { key: gk, sessions: [], count: 0, status: s.status, source: s.source, target: s.target, user: s.user, timeRange: { from: s.startTime || "", to: s.endTime || s.effectiveEnd || s.startTime || "" }, representativeSession: s, evidenceRefs: [], itemRowids: [] };
           _groupMap.set(gk, g);
         }
         g.sessions.push(s);

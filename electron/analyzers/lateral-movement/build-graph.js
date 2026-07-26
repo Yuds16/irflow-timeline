@@ -114,6 +114,14 @@ function buildGraphAndChains(state) {
           const pd1 = (row._payloadData1 || row.user || "").trim();
           const pd2 = (row._payloadData2 || row.logonType || "").trim();
           const pd3 = (row._payloadData3 || "").trim();
+          // Raw EVTX has no PayloadData columns, so every regex below misses and the
+          // record would be dropped at the !sourceHost guard. The same values arrive as
+          // dedicated UserData columns instead — fall back to them, but only after the
+          // PayloadData path has had its chance, so EvtxECmd behavior is unchanged.
+          const rawSrc = (v) => {
+            const s = String(v == null ? "" : v).trim().toUpperCase();
+            return (!s || s === "LOCAL" || EXCLUDED_IPS.has(s)) ? "" : s;
+          };
 
           if (isLocalSessionMgr || ["20","21","22","23","24","25","32","33","34","35","39","40"].includes(eventId)) {
             // LocalSessionManager: PD1="User: DOMAIN\user", PD2="Session ID: N", PD3="Source Network Address: x.x.x.x"
@@ -137,15 +145,29 @@ function buildGraphAndChains(state) {
               const srcIP = ipMatch[1].trim();
               if (srcIP && srcIP !== "LOCAL" && !EXCLUDED_IPS.has(srcIP.toUpperCase())) { sourceHost = srcIP.toUpperCase(); sourceFieldType = "ip"; }
             }
+            // Raw EVTX: Address (LSM) — Param3 covers a tab that also holds RCM records.
+            if (!sourceHost) {
+              const raw = rawSrc(row._rawAddress) || rawSrc(row._rawParam3) || rawSrc(row.source);
+              if (raw) { sourceHost = raw; sourceFieldType = "ip"; }
+            }
+            if (!sessionId) sessionId = extractFirstInteger(row._rawSessionId) || "";
           } else if (isRemoteConnMgr || eventId === "1149") {
             // RemoteConnectionManager 1149: PD1="User: username", PD2="Domain: DOMAIN", PD3="Source Network Address: x.x.x.x"
             const userMatch = pd1.match(/(?:^User:\s*|^)(.+)$/i);
             if (userMatch) user = userMatch[1].trim();
+            // Raw EVTX: Param1 is the user. _rawUser covers a tab that also holds LSM
+            // records, where columns.user resolved to the LSM `User` column instead.
+            if (!user) user = String(row._rawParam1 || row._rawUser || "").trim();
             const ipMatch2 = pd3.match(/Source\s*Network\s*Address:\s*(.+)/i);
             if (ipMatch2) {
               const srcIP = ipMatch2[1].trim();
               if (srcIP && !EXCLUDED_IPS.has(srcIP.toUpperCase())) { sourceHost = srcIP.toUpperCase(); sourceFieldType = "ip"; }
             }
+            if (!sourceHost) {
+              const raw = rawSrc(row._rawParam3) || rawSrc(row._rawAddress) || rawSrc(row.source);
+              if (raw) { sourceHost = raw; sourceFieldType = "ip"; }
+            }
+            if (!sessionId) sessionId = extractFirstInteger(row._rawSessionId) || "";
           }
 
         // === 4778/4779: Session reconnect/disconnect — ClientName/ClientAddress ===
@@ -302,7 +324,7 @@ function buildGraphAndChains(state) {
             if (eventId === "40") {
               if (isEvtxECmd) { const m = (row._payloadData3 || row._payloadData2 || "").match(/Reason\s*(?:Code)?:?\s*(\d+)/i); if (m) _drc = m[1]; }
               else if (compact) { _drc = compactGet(compact, "Reason", "ReasonCode") || undefined; }
-              if (!_drc) { const r = row.Param3 || row.Reason || row.ReasonCode; if (r) _drc = extractFirstInteger(r) || undefined; }
+              if (!_drc) { const r = row._rawReason || row._rawParam3; if (r) _drc = extractFirstInteger(r) || undefined; }
             }
             rdpEvents.push({ eventId, ts: row.ts || "", user, sourceHost: "", targetHost, logonType, sessionId, channel: channelNorm || channelRaw, ...(_drc ? { disconnectReasonCode: _drc } : {}), ...provenance });
           }
@@ -335,7 +357,7 @@ function buildGraphAndChains(state) {
           }
           if (!disconnectReasonCode) {
             // Raw EVTX: check for Param3 or dedicated Reason column
-            const rawReason = row.Param3 || row.Reason || row.ReasonCode;
+            const rawReason = row._rawReason || row._rawParam3;
             if (rawReason) disconnectReasonCode = extractFirstInteger(rawReason) || undefined;
           }
         }
@@ -441,6 +463,10 @@ function buildGraphAndChains(state) {
               if (kcMatch) { subStatus = kcMatch[1].toUpperCase(); break; }
             }
           }
+          // Raw EVTX names this field Status, not SubStatus, so the dedicated
+          // subStatus column is empty and the brute-force severity stayed capped
+          // at medium regardless of the actual Kerberos failure code.
+          if (!subStatus && row._statusCol) subStatus = row._statusCol.toString().trim().toUpperCase();
         }
 
         timeOrdered.push({ source: sourceHost, target: targetHost, user, ts, logonType, eventId, shareName: shareName || undefined, relativeTargetName: relativeTargetName || undefined, subStatus, sourceFieldType, ...provenance });
@@ -567,7 +593,27 @@ function buildGraphAndChains(state) {
         }
         // Session-active events: 21, 22, 25
         else if (["21","22","25"].includes(eid)) {
-          const session = openSessions.get(sessionKey) || findNearestSession(baseKey, evt.ts, 30000);
+          let session = openSessions.get(sessionKey) || findNearestSession(baseKey, evt.ts, 30000);
+          // LocalSessionManager 21 (session logon) and 25 (reconnect) are themselves session
+          // starts. They only ever attached to an existing session because 1149 was assumed
+          // present — true when RemoteConnectionManager is imported alongside, false when the
+          // analyst has only the LSM channel or RCM was an empty stub. Without this, a
+          // populated LocalSessionManager log yields no sessions at all. 22 stays
+          // attach-only: a shell-start with no preceding logon is not a session.
+          if (!session && (eid === "21" || eid === "25")) {
+            session = {
+              id: rdpSessions.length, source: evt.sourceHost || "", target: evt.targetHost,
+              user: evt.user, sessionId: evt.sessionId || "",
+              events: [], startTime: evt.ts, endTime: null,
+              status: "connecting", isReconnect: eid === "25",
+              hasAdmin: false, hasFailed: false,
+              evidenceRefs: [], itemRowids: [],
+            };
+            rdpSessions.push(session);
+            openSessions.set(sessionKey, session);
+            if (!openByBase.has(baseKey)) openByBase.set(baseKey, new Set());
+            openByBase.get(baseKey).add(sessionKey);
+          }
           if (session) {
             session.status = "active";
             _pushRdpSessionEvent(session, evt, desc, evt.logonType || "");
@@ -848,6 +894,8 @@ function buildGraphAndChains(state) {
         if (evt.logonType === "13") return "Cached Unlock";
         return null;
       };
+      // Surfaced on the result so a capped chain set is visibly capped.
+      const chainWarnings = [];
       // Collect all valid hop events, keeping each distinct time instance
       const _hopEvents = [];
       for (const evt of timeOrdered) {
@@ -888,11 +936,21 @@ function buildGraphAndChains(state) {
       // Different-user gap: 15 min (requires tighter temporal proximity)
       const HOP_GAP_SAME_USER_MS = 1800000; // 30 min
       const HOP_GAP_DIFF_USER_MS = 900000;  // 15 min
-      const MAX_CHAINS = 100;
+      // Chains are capped AFTER dedup and ranking (see below), not while seeding.
+      // Seeding used to stop at the first 100 raw chains, and because `_hops` is in
+      // ascending time order that meant only the earliest activity ever produced
+      // chains — on a busy dataset every later pivot silently yielded none, which also
+      // zeroed the Lateral Pivot findings and the chain-membership triage bonus.
+      // Seeds are still bounded so a pathological hop count cannot run away.
+      const MAX_CHAINS = 500;
+      const MAX_CHAIN_SEEDS = 20000;
       const rawChains = [];
+      const _seedHops = _hops.length > MAX_CHAIN_SEEDS ? _hops.slice(0, MAX_CHAIN_SEEDS) : _hops;
+      if (_hops.length > MAX_CHAIN_SEEDS) {
+        chainWarnings.push(`Chain detection considered the first ${MAX_CHAIN_SEEDS.toLocaleString()} of ${_hops.length.toLocaleString()} hops`);
+      }
 
-      for (const startHop of _hops) {
-        if (rawChains.length >= MAX_CHAINS) break;
+      for (const startHop of _seedHops) {
         const chain = [startHop];
         const visitedHosts = new Set([startHop.source, startHop.target]);
         let currentHop = startHop;
@@ -941,8 +999,15 @@ function buildGraphAndChains(state) {
       }
 
       // Step 4: Build chain objects (confidence scoring deferred until after findings/shared vars)
+      // Rank before capping so the cap keeps the longest, most-repeated chains rather
+      // than whichever happened to be seeded first.
+      const _dedupEntries = [..._chainDedup.values()]
+        .sort((a, b) => (b.chain.length - a.chain.length) || (b.occurrences - a.occurrences));
+      if (_dedupEntries.length > MAX_CHAINS) {
+        chainWarnings.push(`Showing the top ${MAX_CHAINS} of ${_dedupEntries.length.toLocaleString()} distinct chains (longest and most frequent first)`);
+      }
       const chains = [];
-      for (const [, entry] of _chainDedup) {
+      for (const entry of _dedupEntries.slice(0, MAX_CHAINS)) {
         const ch = entry.chain;
         const hops = ch.length;
         const path = [ch[0].source, ...ch.map(h => h.target)];
@@ -1417,7 +1482,7 @@ function buildGraphAndChains(state) {
       }
 
 
-  return { rdpSessions, chains, findings, fid, _outlierHosts, _computerHosts, _conventionOutliers, detectOutlier };
+  return { rdpSessions, chains, findings, fid, _outlierHosts, _computerHosts, _conventionOutliers, detectOutlier, chainWarnings };
 }
 
 module.exports = { buildGraphAndChains };

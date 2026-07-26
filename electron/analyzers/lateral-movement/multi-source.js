@@ -16,6 +16,7 @@
  */
 
 const { dbg } = require("../../logger");
+const { resolveSpineEventIds } = require("./detector-registry");
 const { getLateralMovement } = require("./index");
 const { isHayabusaDataset, isChainsawLogonDataset } = require("../evtx-utils");
 
@@ -59,11 +60,13 @@ function detectTabColumns(meta, ctx) {
   const detailsCol = isHayabusa ? detect([/^Details$/i]) : null;
   const extraCol = isHayabusa ? detect([/^ExtraFieldInfo$/i]) : null;
 
-  // Detect if this is a raw EVTX file (has "datetime", "Provider", "Channel" fixed fields)
+  // Detect if this is a raw EVTX file. Must match the single-tab predicate in index.js
+  // exactly (datetime + Provider) — this copy additionally required Channel, so the same
+  // tab could be classified raw-EVTX on its own and NOT raw-EVTX inside a merge, which
+  // changed which columns were mapped for it.
   const isRawEvtx = !isEvtxECmd && !isHayabusa && !isChainsaw
     && meta.headers.some(h => /^datetime$/i.test(h))
-    && meta.headers.some(h => /^Provider$/i.test(h))
-    && meta.headers.some(h => /^Channel$/i.test(h));
+    && meta.headers.some(h => /^Provider$/i.test(h));
 
   // Detect TerminalServices logs: EID 21-25/39/40/1149 with User/Address/SessionID columns
   const isTermSvcEvtx = isRawEvtx && (
@@ -102,7 +105,17 @@ function detectTabColumns(meta, ctx) {
     // same usernames (notably 4672 admin-privilege attribution).
     _userNameFallback: isEvtxECmd ? detect([/^UserName$/i]) : null,
     _channel: detect([/^Channel$/i, /^SourceName$/i, /^Provider$/i]),
+    // Raw-EVTX TerminalServices leaves — mirrors single-tab index.js so a raw TS tab
+    // merged with others still resolves its source host, user and session id.
+    _rawAddress:   isTermSvcEvtx ? detect([/^Address$/i]) : null,
+    _rawParam1:    isTermSvcEvtx ? detect([/^Param1$/i]) : null,
+    _rawParam2:    isTermSvcEvtx ? detect([/^Param2$/i]) : null,
+    _rawParam3:    isTermSvcEvtx ? detect([/^Param3$/i]) : null,
+    _rawSessionId: isTermSvcEvtx ? detect([/^SessionID$/i, /^Session_ID$/i]) : null,
+    _rawUser:      isTermSvcEvtx ? detect([/^User$/i]) : null,
+    _rawReason:    isTermSvcEvtx ? detect([/^Reason$/i, /^ReasonCode$/i]) : null,
     subStatus: detect([/^SubStatus$/i, /^Sub_Status$/i]),
+    _statusCol: detect([/^Status$/i]),
     ticketEncryptionType: detect([/^TicketEncryptionType$/i, /^Ticket_Encryption_Type$/i]),
     serviceName: detect([/^ServiceName$/i, /^Service_Name$/i, /^TargetServiceName$/i]),
     ticketOptions: detect([/^TicketOptions$/i, /^Ticket_Options$/i]),
@@ -135,9 +148,24 @@ function detectTabColumns(meta, ctx) {
  */
 function queryTabRows(meta, columns, options, ctx) {
   const {
-    eventIds = ["4624","4625","4634","4647","4648","4672","4769","4776","4778","4779","5140","5145","1149","21","22","23","24","25","39","40"],
+    eventIds: userEventIds,
+    extraEventIds = [],
     maxRows = 500000,
   } = options;
+
+  // Same contract as the single-tab analyzer: an explicit list wins, otherwise derive
+  // from enabled detectors. The old hardcoded default here was narrower still than
+  // index.js's — it additionally dropped 4771 and the RDP shadow ids.
+  const eventIds = Array.isArray(userEventIds) && userEventIds.length > 0
+    ? [...new Set([...userEventIds.map(String), ...extraEventIds.map(String)])]
+    : resolveSpineEventIds(options.disabledDetectors || [], extraEventIds);
+
+  // Interpolated into LIMIT below — sanitise before it reaches SQL (see index.js).
+  const _maxRows = (() => {
+    const n = Math.floor(Number(maxRows));
+    if (!Number.isFinite(n) || n <= 0) return 500000;
+    return Math.min(Math.max(n, 1000), 2000000);
+  })();
 
   const db = meta.db;
   const params = [];
@@ -161,7 +189,8 @@ function queryTabRows(meta, columns, options, ctx) {
     if (colName && meta.colMap[colName]) selectParts.push(`${meta.colMap[colName]} as [${key}]`);
   }
   // Also include underscore columns needed for EvtxECmd parsing
-  for (const key of ["_remoteHost", "_payloadData1", "_payloadData2", "_payloadData3", "_payloadData4", "_payloadData5", "_channel", "_userNameFallback"]) {
+  for (const key of ["_remoteHost", "_payloadData1", "_payloadData2", "_payloadData3", "_payloadData4", "_payloadData5", "_channel", "_userNameFallback",
+    "_rawAddress", "_rawParam1", "_rawParam2", "_rawParam3", "_rawSessionId", "_rawUser", "_rawReason", "_statusCol"]) {
     const colName = columns[key];
     if (colName && meta.colMap[colName]) selectParts.push(`${meta.colMap[colName]} as [${key}]`);
   }
@@ -175,7 +204,7 @@ function queryTabRows(meta, columns, options, ctx) {
     if (columns.ts) ctx.ensureIndex(meta.tabId, columns.ts);
   } catch (_) { /* best effort */ }
 
-  const sql = `SELECT ${selectParts.join(", ")} FROM data ${whereClause} ${orderClause} LIMIT ${maxRows}`;
+  const sql = `SELECT ${selectParts.join(", ")} FROM data ${whereClause} ${orderClause} LIMIT ${_maxRows}`;
   return db.prepare(sql).all(...params);
 }
 
@@ -204,7 +233,13 @@ function getMultiSourceLateralMovement(metas, options = {}, ctx) {
   const warnings = [];
   let primaryColumns = null; // columns from the first successfully-detected tab
 
-  const perTabMaxRows = Math.floor((options.maxRows || 500000) / metas.length);
+  // Guard against NaN/0: a bad maxRows here would divide down to 0 and silently return
+  // no rows for every tab. queryTabRows re-clamps, but keep this arm honest too.
+  const _totalMaxRows = (() => {
+    const n = Math.floor(Number(options.maxRows));
+    return Number.isFinite(n) && n > 0 ? Math.min(n, 2000000) : 500000;
+  })();
+  const perTabMaxRows = Math.max(1000, Math.floor(_totalMaxRows / Math.max(1, metas.length)));
 
   for (const { meta, tabId, label } of metas) {
     const detection = detectTabColumns(meta, ctx);
