@@ -31,8 +31,8 @@ This page outlines the planned direction for IRFlow Timeline. Priorities may shi
 - Share `.tle` session files with annotations via a link
 - Real-time collaborative analysis for team-based investigations
 
-### AI-Assisted Analysis
-- Planned for a future release (not in the current app build)
+### AI-Assisted Analysis (LLM — planned)
+- **Not the same as v1.0.7 AI Artifacts** — local AI history collection and **AI Secret Hunt** already ship today; see [AI Artifacts](/features/ai-artifacts) and [AI Query History](/dfir-tips/ai-query-history)
 - LLM-powered summarization of tagged findings for report drafting
 - Natural language queries against timeline data ("show me all lateral movement after 3 AM")
 - Anomaly detection suggestions based on statistical patterns
@@ -55,6 +55,7 @@ This page outlines the planned direction for IRFlow Timeline. Priorities may shi
 
 See the [Changelog](/about/changelog) for detailed release notes on everything shipped so far. Highlights from recent releases:
 
+- **AI Artifacts (v1.0.7)** — **Collect AI Artifacts** merges local assistant stores (Claude, Codex, ChatGPT Desktop, Gemini CLI, Cursor, Copilot, Windsurf, Continue) into one **AI Query History** tab from this Mac or KAPE/triage folders; **AI Secret Hunt** finds exposed keys, tokens, and credentials with redacted-by-default triage and exportable exposure briefs
 - **Sigma Detection** — Dual JS Sigma + Hayabusa engine scanning raw EVTX, EvtxECmd output, and imported timelines, with custom rule collections, MITRE ATT&CK mapping, a triage dashboard, noisy-rule suppression, and persistent scan history
 - **RDP Bitmap Cache** — ANSSI-FR `bmc-tools` integration to recover bitmap tiles from `bcache*.bmc` / `cache????.bin` artifacts with an exportable, hashed evidence package
 - **Lateral Movement expansion** — Accounts and Exec Sessions tabs, pair-based Incidents, multi-hop Campaign clustering, and a Telemetry Coverage panel

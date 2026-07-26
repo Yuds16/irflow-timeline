@@ -76,9 +76,16 @@ If auto-detection doesn't trigger (e.g., modified column names), you can't curre
 When exporting from EZ Tools, use the default column configurations to ensure IRFlow Timeline recognizes the output format. Custom column selections may prevent auto-detection.
 :::
 
+## AI App Artifacts in KAPE Collections
+
+KAPE profile auto-detection covers EZ Tools CSV/XLSX output. **AI assistant history** is separate: collect local app paths from user profiles (`.claude`, `.codex`, `.cursor`, `.gemini`, `.continue`, ChatGPT app-data folders, VS Code-family `workspaceStorage/*/chatSessions/`, etc.) into your KAPE or triage package, then run **Tools → Analysis → AI Artifacts → Collect AI Artifacts** on the collection root.
+
+IRFlow walks Windows, Linux, and macOS profile layouts and merges discovered AI stores into one **AI Query History** tab. See [KAPE Triage Workflow](/dfir-tips/kape-triage-workflow) and [AI Query History](/dfir-tips/ai-query-history) for collection paths and investigation tips.
+
 ## See Also
 
 - [Color Rules](/features/color-rules) — KAPE profiles auto-apply color rule presets per tool
 - [Merging Timelines](/workflows/merge-tabs) — merge multiple KAPE tool outputs into a unified timeline
 - [Virtual Grid](/features/virtual-grid) — auto-configured column layouts for each KAPE profile
 - [KAPE Profiles Reference](/reference/kape-profiles) — full list of supported profiles and column mappings
+- [AI Artifacts](/features/ai-artifacts) — collect and review local AI assistant history from KAPE folders

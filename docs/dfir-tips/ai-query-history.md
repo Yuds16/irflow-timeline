@@ -2,6 +2,8 @@
 
 IRFlow Timeline includes a native **AI Query History** extractor for investigating local AI assistant usage during incident response. It parses local desktop, CLI, and editor-assistant stores into one timeline so analysts can review prompts, responses, tool calls, workspaces, source files, and possible pasted secrets.
 
+For the feature-level overview, see [AI Artifacts](/features/ai-artifacts). This guide is the deeper artifact inventory and investigation workflow.
+
 ## AI History vs AI Prompts
 
 IRFlow collects user prompts, but the evidence scope is broader than prompts alone. **AI Query History** includes prompts, assistant responses, tool calls or invoked actions, session metadata, timestamps, workspace paths, source files, model data, and endpoint user/host attribution when available.

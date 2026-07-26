@@ -9,7 +9,8 @@ Every investigation culminates in a report. The analysis work -- the searching, 
 ::: info Features Used
 - [Bookmarks & Tags](/features/bookmarks-tags) -- review and organize all annotated findings
 - [Merging Timelines](/workflows/merge-tabs) -- combine relevant tabs into a unified view
-- [Export & Reports](/workflows/export-reports) -- generate CSV, XLSX, and HTML outputs
+- [Export & Reports](/workflows/export-reports) -- generate CSV, XLSX, HTML, and AI history packages
+- [AI Artifacts](/features/ai-artifacts) -- AI history export and AI Secret Hunt exposure briefs
 - [Sessions](/workflows/sessions) -- save the complete analysis state for peer review
 - [Histogram](/features/histogram) -- visualize the incident timeline for report graphics
 - [Stacking](/features/stacking) -- produce frequency summaries for key columns
@@ -30,7 +31,7 @@ Before touching IRFlow Timeline, establish the structure of your report. A well-
 | **Indicators of Compromise** | Actionable IOCs for detection teams | Stacking results on IPs, hashes, domains |
 | **Affected Systems & Accounts** | Scope of the compromise | Stacking results on hosts and usernames |
 | **Recommendations** | Remediation and hardening actions | Written narrative informed by findings |
-| **Appendix** | Raw data exports and supporting evidence | CSV/XLSX exports, HTML report attachment |
+| **Appendix** | Raw data exports and supporting evidence | CSV/XLSX exports, HTML report attachment, AI history package, secret-exposure brief |
 
 ## Step-by-Step Workflow
 
@@ -132,7 +133,18 @@ Produce the raw data exports that support your report narrative.
    - Filtered to specific tags (e.g., only `c2` tagged rows) for the network team
    - Filtered to `credential-access` and `lateral-movement` tags for the identity team
 
-### 8. Generate the HTML Report
+### 8. Export AI History Evidence (when applicable)
+
+If the investigation includes **AI Query History** tabs, preserve them for counsel and peer review:
+
+1. On each AI history tab, run **Tools → Detection → AI Secret Hunt** and tag findings worth reporting
+2. Export a redacted **PDF / HTML exposure brief** or CSV from the AI Secret Hunt results modal
+3. Use **Tools → Export → Export AI History Package…** for a filtered timeline CSV plus `manifest.json` source hashes
+4. Reference AI prompts, workspaces, and secret findings in the written narrative — not cleartext secrets unless your disclosure policy requires it
+
+See [Export & Reports — AI History Package](/workflows/export-reports#ai-history-package) and [AI Query History](/dfir-tips/ai-query-history#export-for-reporting).
+
+### 9. Generate the HTML Report
 
 The HTML report is a self-contained deliverable that combines summary statistics, tagged event tables, and bookmarked rows.
 
@@ -151,7 +163,7 @@ The HTML file has no external dependencies. It can be emailed, uploaded to a cas
 The HTML report is for human consumption -- it tells the story. The CSV/XLSX exports are for machine consumption and detailed review. Include both in your case file. Reference the HTML report in the body of your written report and attach the data exports as appendices.
 :::
 
-### 9. Save the Session for Peer Review
+### 10. Save the Session for Peer Review
 
 Before closing IRFlow Timeline, save your complete analysis state.
 
@@ -169,7 +181,7 @@ A saved session allows a peer reviewer to open the exact same view you used to r
 Save sessions at key milestones during the investigation, not just at the end. Use filenames like `incident-0042-initial-triage.tle`, `incident-0042-lateral-movement-analysis.tle`, and `incident-0042-final-report.tle`. This creates an audit trail of your analytical process.
 :::
 
-### 10. Assemble the Written Report
+### 11. Assemble the Written Report
 
 With all data exported and the HTML report generated, write the final document. Use the following outline as a template, pulling data from the IRFlow Timeline outputs at each step.
 
@@ -200,6 +212,7 @@ Use this checklist to verify report completeness:
 - [ ] CSV export of bookmarked timeline attached
 - [ ] XLSX export for stakeholder review attached
 - [ ] HTML report generated and attached
+- [ ] AI history package and secret-exposure brief attached (if AI artifacts were in scope)
 - [ ] Session file saved alongside evidence
 - [ ] IOC list extracted from stacking results
 - [ ] Affected systems and accounts enumerated

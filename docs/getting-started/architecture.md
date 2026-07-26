@@ -6,7 +6,7 @@ description: IRFlow Timeline architecture — React renderer, Electron main proc
 
 Technical overview of IRFlow Timeline's architecture for developers and contributors.
 
-> **v1.0.6 is a modular refactor.** What was once a ~20K-line `App.jsx` and monolithic `electron/parser.js` / `electron/db.js` is now decomposed into ~200 focused modules across the renderer and main process (`parsers/`, `ipc/`, `jobs/`, `analyzers/`, and related trees). The file references below reflect that layout.
+> **v1.0.6+ modular layout (current: v1.0.7).** What was once a ~20K-line `App.jsx` and monolithic `electron/parser.js` / `electron/db.js` is now decomposed into ~200 focused modules across the renderer and main process (`parsers/`, `ipc/`, `jobs/`, `analyzers/`, and related trees). v1.0.7 adds **`parsers/ai-history/`** and AI artifact IPC for **Collect AI Artifacts** and **AI Secret Hunt**. The file references below reflect that layout.
 
 ## System Architecture
 
@@ -31,7 +31,7 @@ The diagram uses a **semantic color system** — color maps to function, not jus
 
 The renderer runs in a sandboxed browser context with no direct Node.js access — all system operations go through the IPC bridge. `App.jsx` is now a thin top-level coordinator; responsibility is distributed across focused trees:
 
-- **`components/`** — `VirtualGrid`, `MenuBar`, `FilterBar`, `TabBar`, `StatusBar`; `primitives/` (Modal, Button, Toast, ConfirmDialog, …); `modals/` (one file per analysis modal — Sigma, Lateral Movement, Persistence, Ransomware, USN, ADS, Timestomping, RDP bitmap cache, …); `process-analyzer/` (process-tree UI subsystem)
+- **`components/`** — `VirtualGrid`, `MenuBar`, `FilterBar`, `TabBar`, `StatusBar`; `primitives/` (Modal, Button, Toast, ConfirmDialog, …); `modals/` (one file per analysis modal — Sigma, Lateral Movement, Persistence, Ransomware, USN, ADS, Timestomping, RDP bitmap cache, AI history extract/secret hunt, …); `process-analyzer/` (process-tree UI subsystem)
 - **`store/`** — Zustand stores: `useTabStore`, `useUIStore`, `useGridInteractionStore`, `useConfirmStore`, `useToastStore`
 - **`hooks/`**, **`modals/modalRegistry.js`** (namespaced modal state), **`constants/`** (`themes.js`, `presets.js`, `kape-profiles.js`, …), **`utils/`** (`ipc-result.js`, `datetime.js`, a mirror of `forensic-normalize`, …)
 - **`detection-rules.js`** (~400 lines) + **`detection-rules/`** (`tool-aliases.js` — the canonical RMM/tunnel/exfil tool catalog), mapped to MITRE ATT&CK and consumed by the process analyzer
@@ -44,15 +44,31 @@ Responsibilities: grid rendering with virtual scrolling, user-interaction handli
 
 The preload script creates a secure bridge between renderer and main using Electron's `contextBridge`. It exposes a **whitelisted `window.tle` API** with `contextIsolation` enabled and `nodeIntegration` disabled. All renderer↔main calls go through here as invoke-only channels; listener registrations return unsubscribe functions. Channels cover file ops, queries, tag/bookmark ops, IOC/VirusTotal enrichment, analysis (NTFS, lateral movement, Sigma, RDP bitmap cache), jobs, session persistence, filter presets, and auto-update.
 
+**v1.0.7 AI Artifacts / Secret Hunt surface** (same invoke-only pattern):
+
+| `window.tle` method | IPC channel | Purpose |
+|---------------------|-------------|---------|
+| `discoverAiHistoryProfile` | `discover-ai-history-profile` | Profile scan before **Collect AI Artifacts** |
+| `extractAiHistoryProfile` | `extract-ai-history-profile` | Merged multi-app extract into one tab |
+| `cancelAiHistoryExtract` | `cancel-ai-history-extract` | Cancel in-flight profile extract |
+| `decodeAiHistory` | `decode-ai-history` | Per-app folder/file import (**AI Apps** menu) |
+| `pickAiHistoryScanFolder` | `pick-ai-history-scan-folder` | Browse-folder target picker |
+| `analyzeAiHistory` | `analyze-ai-history` | **AI Secret Hunt** over an AI Query History tab |
+| `exportAiHistoryPackage` | `export-ai-history-package` | Forensic export package + source manifest |
+| `exportAiSecretsPdf` | `export-ai-secrets-pdf` | Secret Hunt results PDF |
+| `openAiSource` | `open-ai-source` | Jump to source file/line from a grid row |
+
+Progress for profile extract streams on `ai-history-profile-progress`.
+
 ### Main Process (Electron)
 
-**Files:** `main.js` (~520 lines) · `import.js` (~240) · `menu.js` (~290) · `updater.js` (~545) · `logger.js` (~50) · `ipc/` (13 modules)
+**Files:** `main.js` (~520 lines) · `import.js` (~240) · `menu.js` (~290) · `updater.js` (~545) · `logger.js` (~50) · `ipc/` (14 modules)
 
 The main process runs with full Node.js access and acts as the orchestrator:
 
 - **`main.js`** — creates the `BrowserWindow`, wires crash guards, defines the `safeHandle` / `safeSend` IPC primitives, owns the serialized import queue and the deferred index/FTS build queue, and delegates IPC registration to `ipc/index.js`, menus to `menu.js`, and updates to `updater.js`. Raises the V8 heap to **16 GB** for large imports.
 - **`import.js`** — import pipeline: validation, XLSX sheet selection, large-file warnings, USN↔MFT path resolution, and index scheduling.
-- **`ipc/`** — one registration module per domain (`query-`, `tag-`, `analysis-`, `export-`, `session-`, `vt-`, `sigma-`, `job-`, `rdp-bitmap-cache-`), all registered by `ipc/index.js`. Each handler is wrapped by `safeHandle()`.
+- **`ipc/`** — one registration module per domain (`query-`, `tag-`, `analysis-`, `export-`, `session-`, `vt-`, `sigma-`, `job-`, `rdp-bitmap-cache-`, `ai-history-handlers`), all registered by `ipc/index.js`. Each handler is wrapped by `safeHandle()`. Collect/extract routes live in `ai-history-handlers.js`; Secret Hunt runs through `analysis-handlers.js`; AI exports through `export-handlers.js`.
 - **`updater.js`** — auto-update lifecycle (check → download → install) via `electron-updater`.
 - **`logger.js`** — shared singleton debug logger (`electron/logger.js`) with ~5 MB rotation and a write buffer (`~/tle-debug.log`); `dbg(scope, message, data?)` is used across main-process modules (not the legacy monolithic `parser.js` / `db.js` paths).
 
@@ -60,13 +76,14 @@ The main process runs with full Node.js access and acts as the orchestrator:
 
 ### Worker Threads
 
-**Files:** `electron/jobs/job-manager.js` + `import-worker.js` · `index-worker.js` · `analyzer-worker.js` · `sigma-worker.js`
+**Files:** `electron/jobs/job-manager.js` + `import-worker.js` · `index-worker.js` · `analyzer-worker.js` · `sigma-worker.js` · `ai-history-profile-worker.js`
 
 CPU-heavy work runs off the main thread in `worker_threads`, coordinated by `job-manager.js`:
 
-- **`import-worker`** — streams a source file through `parsers/index.js` into a temp SQLite DB
+- **`import-worker`** — streams a source file through `parsers/index.js` into a temp SQLite DB (single AI app folders via `parsers/ai-history/` decode path)
+- **`ai-history-profile-worker`** — **Collect AI Artifacts** merged extract: walks profile/collection trees with `parsers/ai-history/profile-scan.js`, streams rows into a temp SQLite DB without holding the full merge in memory
 - **`index-worker`** — builds column indexes, then the FTS5 index, in the background
-- **`analyzer-worker`** — runs forensic detectors
+- **`analyzer-worker`** — runs forensic detectors (including AI Secret Hunt via `analyzers/ai-history/`)
 - **`sigma-worker`** — runs Sigma / Hayabusa scans
 
 Workers parse/scan into their own temp SQLite files that the main process then **adopts** (`db.adoptTabFromFile()`). Progress streams over IPC; cancellation is `postMessage('cancel')` → 250 ms grace → `terminate()`.
@@ -101,12 +118,12 @@ CREATE TABLE color_rules (id, col_name, condition, value, bg_color, fg_color);
 
 ### Forensic Analyzers & Detection
 
-**Directory:** `electron/analyzers/` — **10 domains**
+**Directory:** `electron/analyzers/` — **11 domains**
 
 The renderer never touches SQLite directly; the main process owns the `db` facade and delegates specialized detection to analyzer modules, each querying the tab DB and returning findings with severity / MITRE mapping:
 
 - Standalone modules: `ransomware.js`, `timestomping.js`, `ads.js`, `file-activity.js`, `usn-journal.js`
-- Subsystems: `lateral-movement/`, `persistence/`, `process-tree/`, `rdp-bitmap-cache/`, `sigma/`
+- Subsystems: `lateral-movement/`, `persistence/`, `process-tree/`, `rdp-bitmap-cache/`, `sigma/`, `ai-history/` (**AI Secret Hunt** — regex + entropy scan over `FullText` on AI Query History tabs)
 
 **Dual Sigma / Hayabusa detection engine** (`analyzers/sigma/`, ~26 modules):
 1. **In-app JS Sigma engine** — `condition-compiler.js` compiles Sigma detection YAML to a JS predicate; `field-mapper.js` resolves fields across formats (raw EVTX / EvtxECmd / Hayabusa / Chainsaw); `logsource-mapper.js` pre-filters candidate rows; `rule-cache`/`rule-parser`/`rule-compatibility`/`rule-suppression`/`rule-diff` manage rules; `result-store.js` persists findings.
@@ -128,6 +145,7 @@ Streaming parsers convert source files into batched SQLite inserts:
 - **`plaso.js`** — Plaso SQLite databases via ATTACH + zlib
 - **`mft.js`** — two-pass raw `$MFT` parser (pass 1 builds directory + FN attribute maps, pass 2 reconstructs full paths); outputs **34 columns** matching MFTECmd, with SI-vs-FN timestamp comparison and resident-data detection
 - **`usn.js`** — raw `$UsnJrnl:$J` parser with reason-flag decoding and file-reference extraction
+- **`ai-history/`** — per-app parsers (Claude, Codex, ChatGPT, Gemini CLI, Cursor, Copilot, Windsurf, Continue) merged by profile scan or folder import into **AI Query History** tabs
 
 ## Data Flow
 
@@ -144,6 +162,17 @@ open → main.enqueueImport() → import-worker (parsers/index.js, streaming)
 3. `import-worker` streams the file into a temp SQLite DB; progress via `import-progress`.
 4. On completion the main process adopts the worker's DB; the initial row window + metadata go to the renderer.
 5. After the queue drains, `index-worker` builds column indexes, then the FTS5 index, in the background (`index-progress` / `fts-progress`).
+
+### AI Artifacts Pipeline (v1.0.7)
+
+```
+Collect AI Artifacts → discover-ai-history-profile (main)
+                    → extract-ai-history-profile → ai-history-profile-worker
+                    → parsers/ai-history/profile-scan + per-app parsers
+                    → temp SQLite DB → adoptTabFromFile() → AI Query History tab
+Per-app import     → decode-ai-history → import-worker (ai-history parsers)
+AI Secret Hunt     → analyze-ai-history → analyzers/ai-history/ (in-process or analyzer-worker)
+```
 
 ### Query Pipeline
 
@@ -196,8 +225,8 @@ External binaries bundled as `extraResources`: **Hayabusa** (Sigma over raw EVTX
 
 - **Context isolation** enabled — the renderer has no Node.js access
 - **Preload bridge** exposes only a whitelisted `window.tle` surface (invoke-only channels)
-- **Offline-first** — all forensic processing runs locally; no remote content is loaded
-- **Minimal network access** — only opt-in VirusTotal lookups (user-provided API key) and auto-update checks
+- **Offline-first core** — timeline import, query, tagging, and most analyzers (including AI Artifacts and AI Secret Hunt) run locally with no required network access
+- **Optional network** — opt-in VirusTotal lookups (user-provided API key), auto-update checks/downloads, and Hayabusa rule/binary maintenance when you trigger those actions
 - **Path authorization** — external-tool and scan inputs are validated through `utils/path-authorizer.js` scopes
 - **Hardened runtime** + notarization for macOS distribution
 - **VirusTotal API key** stored locally in `userData`, transmitted only to VirusTotal's API endpoint

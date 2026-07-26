@@ -1,11 +1,11 @@
 ---
 layout: home
-description: High-performance DFIR timeline analysis tool for macOS — search, visualize, and investigate 30GB+ forensic timelines.
+description: Native macOS DFIR timeline analysis — EVTX, CSV, XLSX, Plaso, $MFT, $J, and local AI app artifacts with AI Secret Hunt and built-in investigation analytics.
 
 hero:
   name: IRFlow Timeline
   text: DFIR Timeline Analysis
-  tagline: Native macOS forensic timeline analysis. Import, search, and investigate EVTX, CSV, XLSX, and Plaso timelines with the analytics DFIR professionals actually need.
+  tagline: Native macOS forensic timeline analysis. Import, search, and investigate EVTX, CSV, XLSX, Plaso, $MFT, $J, and local AI assistant artifacts — with AI Secret Hunt and the analytics DFIR professionals actually need.
   actions:
     - theme: brand
       text: Get Started
@@ -47,25 +47,24 @@ features:
     details: Bookmarks, color-coded tags, conditional formatting with KAPE-aware presets, and full session save/restore.
 ---
 
-## What's New
+## What's New · v1.0.7
 
-- **AI Artifacts and AI Query History** — New **Tools → Analysis → AI Artifacts → Collect AI Artifacts** workflow for preserving AI-assisted activity as timeline evidence: user prompts, assistant responses, tool calls, session metadata, workspace paths, source files, and possible secret exposure from local AI apps
-- **AI Secret Hunt** — Review AI history for exposed API keys, private keys, tokens, credentials, and other sensitive strings via **Tools → Detection → AI Secret Hunt**: redacted-by-default handling (cleartext never written to disk), analyst tags, source-row evidence, group-by tool/session, and a redacted PDF / HTML exposure brief (plus CSV export)
-- **AI app coverage** — Parses local history from Claude Code, OpenAI Codex, Grok Build, ChatGPT Desktop, Gemini CLI, Cursor, GitHub Copilot, Windsurf, and Continue, including KAPE/triage folder scans across Windows, Linux, and macOS profile layouts
+[Full changelog →](/about/changelog)
 
 ## What is IRFlow Timeline?
 
-IRFlow Timeline is a native macOS application purpose-built for digital forensics and incident response (DFIR) investigators. Inspired by Eric Zimmerman's Timeline Explorer for Windows, it brings high-performance timeline analysis to macOS with a modern interface and advanced analytics.
+Native macOS timeline analysis for DFIR — EVTX, KAPE super-timelines, and local AI artifacts in one app. Timeline Explorer–style workflow on Mac, plus built-in detection analytics and **AI Secret Hunt**.
 
 ### Who Is This For?
 
-- **Incident Responders** — reconstruct kill chains across endpoints on macOS, no Windows VM required
-- **SOC Analysts** — triage KAPE collections and hunt through millions of event log entries at native speed
-- **Forensic Examiners** — correlate MFT, Prefetch, Amcache, and registry artifacts in a single unified timeline
-- **Threat Hunters** — detect lateral movement patterns, stack column values, and sweep IOC lists across your environment
-- **IR Consultants** — deliver tagged and bookmarked evidence packages ready for client reporting
+- **Incident Responders** — kill-chain reconstruction on macOS; review AI usage on triaged endpoints
+- **SOC Analysts** — triage KAPE collections and hunt millions of events at native speed
+- **Forensic Examiners** — MFT, Prefetch, Amcache, and registry in one unified timeline
+- **Threat Hunters** — lateral movement detection, column stacking, and IOC sweeps
+- **IR Consultants** — tagged, bookmarked evidence packages for client reporting
+- **AI-assisted investigations** — collect local AI history, hunt pasted secrets, correlate with endpoint activity
 
-If you've hit Excel's 1M-row limit on a super-timeline, or you're tired of spinning up a Windows VM just to run Timeline Explorer — this is the tool that replaces both.
+Excel row limits, Windows VM overhead, or missing AI evidence — IRFlow is the macOS alternative to Timeline Explorer.
 
 ### Supported Formats
 
@@ -81,8 +80,4 @@ If you've hit Excel's 1M-row limit on a super-timeline, or you're tired of spinn
 
 ### Built for Scale
 
-IRFlow Timeline uses a SQLite-backed architecture with streaming import, lazy indexing, and virtual scrolling to deliver responsive performance even on the largest forensic timelines. Handle large CSV files (tested with 30GB+), search across millions of rows, and visualize your timeline — all without freezing. Concurrent index builds are memory-capped, analytics queries are optimized to avoid redundant table scans, and all long-running operations are crash-safe with graceful recovery.
-
-### KAPE-Ready
-
-Automatic detection and pre-configuration for 26 KAPE / EZ Tools output formats including MFTECmd, EvtxECmd, Hayabusa, Chainsaw, AmcacheParser, PECmd, RECmd, SBECmd, and more. Open your KAPE output and start analyzing immediately with optimized column layouts and color rules.
+SQLite streaming import, lazy indexing, and virtual scrolling keep 30GB+ timelines responsive. Search millions of rows without freezing — memory-capped index builds and crash-safe long-running jobs.
