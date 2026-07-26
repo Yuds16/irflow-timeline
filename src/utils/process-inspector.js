@@ -391,6 +391,12 @@ export const PI_CHAIN_RULES = [
       { label: "Severity", value: "Level 3 (critical): direct malware indicators. Level 2 (high): likely malicious. Level 1 (medium): suspicious, needs context. Level 0 (low): informational" },
       { label: "Condition", value: "Exact parent\u2192child process name match (case-insensitive, .exe stripped). Highest severity wins if multiple rules match." },
     ] },
+  { id: "pi-60", group: "exec", sev: "critical", name: "Grandparent multi-hop chains (Office/script \u2192 shell \u2192 shell)", technique: "T1059, T1204.002", count: 16,
+    logic: [
+      { label: "Type", value: "Grandparent \u2192 Parent \u2192 Child triple match (16 high-value paths)" },
+      { label: "Examples", value: "winword\u2192cmd\u2192powershell, mshta\u2192cmd\u2192powershell, w3wp\u2192powershell\u2192cmd, cmd\u2192ps\u2192certutil" },
+      { label: "Condition", value: "Fires on the leaf process when both parent and grandparent names match a known multi-hop attack path (uses consistentParentKey so PID-reuse does not invent chains)" },
+    ] },
 ];
 
 const PI_RULES = [
@@ -1088,6 +1094,67 @@ const PI_RULES = [
   // pi-17 (RMM Tools \u2014 Normal Parent) removed: it fired on every endpoint that merely HAS
   // an RMM tool installed (a level-0 inventory note), which is pure noise. Genuinely
   // suspicious RMM usage is covered by pi-12 (unusual parent) and pi-24 (tunnels).
+
+  // --- Adjacent telemetry (EID 3 / 22 / 7 / 11) — requires tree-builder enrichment ---
+  { id: "pi-61", group: "lateral", level: 2, reason: "Outbound network from suspicious process", tid: ["T1071"], beh: "network",
+    sev: "high", name: "Network Connect after suspicious process (Sysmon EID 3)", technique: "T1071",
+    logic: [
+      { label: "Condition", value: "Process has correlated Sysmon EID 3 NetworkConnect events AND is already flagged primary OR has 3+ distinct destinations" },
+      { label: "High", value: "Rare external destinations or high connection volume from shell/script/LOLBin parents" },
+    ],
+    test: (c) => {
+      if (!c.network || !(c.network.eventCount > 0)) return false;
+      const dests = c.network.destCount || 0;
+      const rare = c.network.rareDestCount || 0;
+      if (rare >= 1 || dests >= 5) return { override: dests >= 10 || rare >= 3 ? 3 : 2 };
+      // Lower-signal presence when shell-like process
+      if (_RX_SHELL_CHILDREN.test(c.n) || _RX_PS_NAME.test(c.n)) return { override: 1, cat: "context" };
+      return false;
+    } },
+  { id: "pi-62", group: "discovery", level: 1, reason: "DNS queries from process", tid: ["T1071.004"], beh: "dns",
+    sev: "medium", name: "DNS Query activity (Sysmon EID 22)", technique: "T1071.004",
+    logic: [
+      { label: "Condition", value: "Process has correlated Sysmon EID 22 DNS queries" },
+      { label: "High", value: "Many distinct query names (beacon / staging) or queries alongside other primary detections" },
+    ],
+    test: (c) => {
+      if (!c.dns || !(c.dns.eventCount > 0)) return false;
+      const names = c.dns.queryCount || 0;
+      if (names >= 8) return { override: 2 };
+      if (names >= 2) return { override: 1 };
+      return { override: 0, cat: "context" };
+    } },
+  { id: "pi-63", group: "evasion", level: 2, reason: "Unsigned / rare image load", tid: ["T1574.002"], beh: "image-load",
+    sev: "high", name: "Suspicious Image Load (Sysmon EID 7)", technique: "T1574.002",
+    logic: [
+      { label: "Condition", value: "Process loaded modules correlated via EID 7 with unsigned or non-Microsoft signed samples" },
+      { label: "Critical", value: "Unsigned DLL from user-writable path loaded into a trusted process" },
+    ],
+    test: (c) => {
+      if (!c.imageLoads || !(c.imageLoads.eventCount > 0)) return false;
+      const unsigned = c.imageLoads.unsignedCount || 0;
+      const writable = c.imageLoads.writablePathCount || 0;
+      if (unsigned >= 1 && writable >= 1) return { override: 3 };
+      if (unsigned >= 2 || writable >= 1) return { override: 2 };
+      if (unsigned >= 1) return { override: 1 };
+      return false;
+    } },
+  { id: "pi-64", group: "evasion", level: 2, reason: "File create then execute staging", tid: ["T1105"], beh: "file-drop",
+    sev: "high", name: "File Create activity (Sysmon EID 11)", technique: "T1105",
+    logic: [
+      { label: "Condition", value: "Process created files (EID 11) especially PE/script extensions in user-writable paths" },
+      { label: "High", value: "Dropped .exe/.dll/.ps1/.hta/.js under Temp/AppData/Downloads" },
+    ],
+    test: (c) => {
+      if (!c.fileCreates || !(c.fileCreates.eventCount > 0)) return false;
+      const pe = c.fileCreates.peCount || 0;
+      const script = c.fileCreates.scriptCount || 0;
+      const writable = c.fileCreates.writablePathCount || 0;
+      if ((pe >= 1 || script >= 1) && writable >= 1) return { override: pe >= 1 ? 3 : 2 };
+      if (pe >= 1 || script >= 2) return { override: 2 };
+      if (c.fileCreates.eventCount >= 5) return { override: 1, cat: "context" };
+      return false;
+    } },
 ];
 
 // Rules whose default category is "context" — pre-computed so the hot loop
@@ -1108,6 +1175,29 @@ export const PI_TECHNIQUE_GROUPS = PI_RULE_GROUPS.map((g) => ({
   ...g,
   ruleIds: PI_ALL_RULES.filter((r) => r.group === g.id).map((r) => r.id),
 }));
+
+// Grandparent multi-hop chains — exact basename triples (no .exe).
+// Fires as pi-60 so intermediate hop demotion does not hide the full path.
+const _GP_CHAIN_RULES = [
+  { g: "winword", p: "cmd", c: "powershell", level: 3, reason: "Word \u2192 cmd \u2192 PowerShell \u2014 multi-hop macro execution [T1059.001]", tid: ["T1059.001", "T1204.002"], beh: "script-exec" },
+  { g: "winword", p: "cmd", c: "pwsh", level: 3, reason: "Word \u2192 cmd \u2192 pwsh \u2014 multi-hop macro execution [T1059.001]", tid: ["T1059.001", "T1204.002"], beh: "script-exec" },
+  { g: "excel", p: "cmd", c: "powershell", level: 3, reason: "Excel \u2192 cmd \u2192 PowerShell \u2014 multi-hop macro execution [T1059.001]", tid: ["T1059.001", "T1204.002"], beh: "script-exec" },
+  { g: "excel", p: "cmd", c: "pwsh", level: 3, reason: "Excel \u2192 cmd \u2192 pwsh \u2014 multi-hop macro execution [T1059.001]", tid: ["T1059.001", "T1204.002"], beh: "script-exec" },
+  { g: "winword", p: "powershell", c: "cmd", level: 3, reason: "Word \u2192 PS \u2192 cmd \u2014 multi-hop macro execution [T1059.003]", tid: ["T1059.003", "T1204.002"], beh: "shell-exec" },
+  { g: "excel", p: "powershell", c: "cmd", level: 3, reason: "Excel \u2192 PS \u2192 cmd \u2014 multi-hop macro execution [T1059.003]", tid: ["T1059.003", "T1204.002"], beh: "shell-exec" },
+  { g: "outlook", p: "cmd", c: "powershell", level: 3, reason: "Outlook \u2192 cmd \u2192 PowerShell \u2014 phishing multi-hop [T1566.001]", tid: ["T1566.001", "T1059.001"], beh: "script-exec" },
+  { g: "wscript", p: "cmd", c: "powershell", level: 2, reason: "WScript \u2192 cmd \u2192 PowerShell \u2014 script multi-hop [T1059.005]", tid: ["T1059.005", "T1059.001"], beh: "script-exec" },
+  { g: "cscript", p: "cmd", c: "powershell", level: 2, reason: "CScript \u2192 cmd \u2192 PowerShell \u2014 script multi-hop [T1059.005]", tid: ["T1059.005", "T1059.001"], beh: "script-exec" },
+  { g: "mshta", p: "cmd", c: "powershell", level: 3, reason: "mshta \u2192 cmd \u2192 PowerShell \u2014 HTA multi-hop [T1218.005]", tid: ["T1218.005", "T1059.001"], beh: "script-exec" },
+  { g: "mshta", p: "powershell", c: "cmd", level: 3, reason: "mshta \u2192 PS \u2192 cmd \u2014 HTA multi-hop [T1218.005]", tid: ["T1218.005", "T1059.003"], beh: "shell-exec" },
+  { g: "powershell", p: "cmd", c: "bitsadmin", level: 2, reason: "PS \u2192 cmd \u2192 bitsadmin \u2014 multi-hop download stage [T1105]", tid: ["T1105", "T1059"], beh: "download" },
+  { g: "cmd", p: "powershell", c: "bitsadmin", level: 2, reason: "cmd \u2192 PS \u2192 bitsadmin \u2014 multi-hop download stage [T1105]", tid: ["T1105", "T1059"], beh: "download" },
+  { g: "cmd", p: "powershell", c: "certutil", level: 2, reason: "cmd \u2192 PS \u2192 certutil \u2014 multi-hop decode/download [T1140]", tid: ["T1140", "T1105"], beh: "download" },
+  { g: "w3wp", p: "cmd", c: "powershell", level: 3, reason: "IIS \u2192 cmd \u2192 PowerShell \u2014 webshell multi-hop [T1505.003]", tid: ["T1505.003", "T1059.001"], beh: "script-exec" },
+  { g: "w3wp", p: "powershell", c: "cmd", level: 3, reason: "IIS \u2192 PS \u2192 cmd \u2014 webshell multi-hop [T1505.003]", tid: ["T1505.003", "T1059.003"], beh: "shell-exec" },
+];
+const _GP_CHAIN_MAP = new Map(_GP_CHAIN_RULES.map((r) => [`${r.g}:${r.p}:${r.c}`, r]));
+const _matchGrandparentChain = (g, p, c) => _GP_CHAIN_MAP.get(`${g}:${p}:${c}`) || null;
 
 export const getSusInfo = (node, parentNode, opts) => {
   const n = (node.processName || "").toLowerCase();
@@ -1160,6 +1250,23 @@ export const getSusInfo = (node, parentNode, opts) => {
       }
     }
   }
+  // 1b. Grandparent multi-hop chains (e.g. winword → cmd → powershell). These fire even when
+  // intermediate hops are demoted by the chain gate, because the full path is the signal.
+  const gpNode = opts?.grandparentNode || null;
+  const gpBase = (gpNode?.processName || "").toLowerCase().replace(/\.exe$/, "");
+  if (gpBase && pnBase && nBase && !disabled?.has("pi-60")) {
+    const gpHit = _matchGrandparentChain(gpBase, pnBase, nBase);
+    if (gpHit) {
+      evidence.push({
+        cat: "chain",
+        level: gpHit.level,
+        reason: gpHit.reason,
+        ruleId: "pi-60",
+        tid: gpHit.tid,
+        beh: gpHit.beh || "shell-exec",
+      });
+    }
+  }
   // 2. Standalone + context checks. Rules live in module-scope PI_RULES so the
   // array (and its 80+ regexes) is built once at load, not per process row.
   // Each rule.test(ctx) takes the per-call context object below.
@@ -1182,6 +1289,11 @@ export const getSusInfo = (node, parentNode, opts) => {
     // uniqueHighRisk, services: [...] }. Null means no privilege audit events
     // were correlated to this process.
     privilege: node.privilegeUse || null,
+    // Adjacent Sysmon telemetry (EID 3/22/7/11) — counts/samples from tree builder.
+    network: node.networkActivity || null,
+    dns: node.dnsActivity || null,
+    imageLoads: node.imageLoads || null,
+    fileCreates: node.fileCreates || null,
     // Parent-image the child ROW reported, before any backfill. When the linked
     // parent (parentNode.image → c.pil) differs, the child is claiming a parent
     // that wasn't actually running at that PID — the classic parent PID spoof
@@ -1211,24 +1323,32 @@ export const getSusInfo = (node, parentNode, opts) => {
     if (_allowlisted && cat === "context") continue;
     evidence.push({ cat, level, reason: rule.reason, ruleId: rule.id, tid: rule.tid, beh: rule.beh });
   }
-  // 3. Custom rules — analyst-supplied regexes. We cap the matchable cmdline
-  // length as a backstop for ReDoS: even if a pattern slipped past the
-  // nested-quantifier guard in compileCustomRules, the worst-case backtrack is
-  // bounded by CUSTOM_RULE_CMD_CAP. 8KB is generous for legitimate cmdlines —
-  // real malware that exceeds it tends to be encoded payloads where matching
-  // the trailing bytes adds nothing the head 8KB doesn't already reveal.
+  // 3. Custom rules — multi-field (parent/process/path/cmd) + optional regex.
+  // Cmdline length capped as a ReDoS backstop even when the nested-quantifier
+  // guard in compileCustomRules is bypassed.
   if (opts?.customRules) {
     const _capCmd = cmd.length > 8192 ? cmd.slice(0, 8192) : cmd;
+    const _capCmdLower = _capCmd.toLowerCase();
+    const sevMap = { critical: 3, high: 2, medium: 1, med: 1, low: 0 };
     for (let ci = 0; ci < opts.customRules.length; ci++) {
       const cr = opts.customRules[ci];
-      if (cr._rx.test(_capCmd) || cr._rx.test(n)) {
-        const sevMap = { critical: 3, high: 2, medium: 1, med: 1, low: 0 };
-        const cTid = cr.technique ? [cr.technique] : [];
-        const cBeh = cr.behavior || null;
-        evidence.push({ cat: "standalone", level: sevMap[cr.severity] ?? 1,
-          reason: `${cr.category || "Custom"} \u2014 ${cr.name}`,
-          ruleId: `custom-${ci}`, tid: cTid, beh: cBeh });
-      }
+      if (cr.parentProcess && cr.parentProcess !== pnBase) continue;
+      if (cr.processName && cr.processName !== nBase) continue;
+      if (cr.imageContains && !il.includes(cr.imageContains)) continue;
+      if (cr.cmdContains && !_capCmdLower.includes(cr.cmdContains)) continue;
+      if (cr._rx && !(cr._rx.test(_capCmd) || cr._rx.test(n) || cr._rx.test(img))) continue;
+      // If only optional fields were empty and no regex, skip empty-match
+      if (!cr.parentProcess && !cr.processName && !cr.imageContains && !cr.cmdContains && !cr._rx) continue;
+      const cTid = cr.technique ? [cr.technique] : [];
+      const cBeh = cr.behavior || null;
+      evidence.push({
+        cat: "standalone",
+        level: sevMap[cr.severity] ?? 1,
+        reason: `${cr.category || "Custom"} \u2014 ${cr.name}`,
+        ruleId: `custom-${ci}`,
+        tid: cTid,
+        beh: cBeh,
+      });
     }
   }
   // 4. Context signals — path/arg analysis. Only stack onto a node that already has a PRIMARY

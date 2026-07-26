@@ -48,9 +48,9 @@ const _RX_NESTED_QUANT = /\([^)]*[+*?][^)]*\)\s*[+*?]/;
 // pattern source so re-compilation across renders doesn't lose the message.
 export const customRuleErrors = new Map();
 
-export const validateCustomRulePattern = (pattern) => {
+export const validateCustomRulePattern = (pattern, { optional = false } = {}) => {
   const source = String(pattern || "").trim();
-  if (!source) return "Regex pattern is required.";
+  if (!source) return optional ? "" : "Regex pattern is required.";
   if (_RX_NESTED_QUANT.test(source)) return "rejected: nested quantifier (potential ReDoS)";
   try {
     new RegExp(source, "i");
@@ -60,23 +60,50 @@ export const validateCustomRulePattern = (pattern) => {
   return "";
 };
 
+/** Multi-field custom rule: at least one match criterion required (pattern or field). */
+export const validateCustomRule = (cr = {}) => {
+  const name = String(cr.name || "").trim();
+  if (!name) return "Rule name is required.";
+  const pattern = String(cr.pattern || "").trim();
+  const parentProcess = String(cr.parentProcess || "").trim();
+  const processName = String(cr.processName || "").trim();
+  const imageContains = String(cr.imageContains || "").trim();
+  const cmdContains = String(cr.cmdContains || "").trim();
+  const hasField = !!(parentProcess || processName || imageContains || cmdContains || pattern);
+  if (!hasField) return "Add a process/parent/path/cmdline field or a regex pattern.";
+  const patternError = validateCustomRulePattern(pattern, { optional: true });
+  if (patternError) return patternError;
+  return "";
+};
+
 // Compile a custom-rule list once. Errors are recorded in customRuleErrors
 // so the modal can surface them; bad rules are dropped from the working set.
+// Supports multi-field rules: optional regex + parent/process/path/cmd substrings.
 export const compileCustomRules = (customRules) => {
   if (!customRules?.length) return null;
   const out = [];
   for (const cr of customRules) {
     const pattern = String(cr.pattern || "").trim();
-    const error = validateCustomRulePattern(pattern);
+    const key = pattern || cr.name || "custom";
+    const error = validateCustomRule(cr);
     if (error) {
-      if (pattern) customRuleErrors.set(pattern, error);
+      customRuleErrors.set(key, error);
       continue;
     }
     try {
-      out.push({ ...cr, pattern, _rx: new RegExp(pattern, "i") });
-      customRuleErrors.delete(pattern);
+      const compiled = {
+        ...cr,
+        pattern,
+        parentProcess: String(cr.parentProcess || "").trim().toLowerCase().replace(/\.exe$/i, ""),
+        processName: String(cr.processName || "").trim().toLowerCase().replace(/\.exe$/i, ""),
+        imageContains: String(cr.imageContains || "").trim().toLowerCase(),
+        cmdContains: String(cr.cmdContains || "").trim().toLowerCase(),
+        _rx: pattern ? new RegExp(pattern, "i") : null,
+      };
+      out.push(compiled);
+      customRuleErrors.delete(key);
     } catch (e) {
-      customRuleErrors.set(pattern, `compile error: ${e.message}`);
+      customRuleErrors.set(key, `compile error: ${e.message}`);
     }
   }
   return out.length ? out : null;
@@ -87,7 +114,9 @@ export const compileCustomRules = (customRules) => {
 export const makeDetMapRuleKey = (disabledRules, customRules, piAnalystProfile) => {
   const disKey = disabledRules?.size ? [...disabledRules].sort().join(",") : "";
   const custKey = customRules?.length
-    ? customRules.map((r) => `${r.pattern}|${r.severity}|${r.behavior || ""}`).join(";;")
+    ? customRules.map((r) =>
+      [r.pattern, r.parentProcess, r.processName, r.imageContains, r.cmdContains, r.severity, r.behavior || "", r.technique || ""].join("|")
+    ).join(";;")
     : "";
   const profileKey = JSON.stringify({
     suppressions: (piAnalystProfile?.suppressions || []).map((r) =>
@@ -467,6 +496,21 @@ const _applyPrevalence = (det, node, model) => {
   };
 };
 
+const _scoreOneProcess = (p, byK, susOpts, lifetimeMap, trustMap, prevalenceModel, disabledRules) => {
+  const parent = byK.get(p.parentKey) || null;
+  // Grandparent for multi-hop chain rules (winword→cmd→powershell). Use
+  // consistentParentKey so PID-reuse edges don't invent a false office→shell path.
+  let grandparent = null;
+  if (parent) {
+    const gpk = consistentParentKey(parent, byK);
+    if (gpk) grandparent = byK.get(gpk) || null;
+  }
+  const det = getSusInfo(p, parent, { ...susOpts, grandparentNode: grandparent });
+  const withLifetime = _applyLifetime(det, p, lifetimeMap.get(p.key), disabledRules);
+  const withTrust = _applyTrust(withLifetime, trustMap.get(p.key), disabledRules);
+  return _applyPrevalence(withTrust, p, prevalenceModel);
+};
+
 export const buildDetectionMap = (data, opts) => {
   const m = new Map();
   if (!data?.processes?.length) return m;
@@ -484,11 +528,69 @@ export const buildDetectionMap = (data, opts) => {
     analystProfile: opts?.analystProfile,
     datasetHasTermination,
   };
+  const disabledRules = opts?.disabledRules || null;
   for (const p of data.processes) {
-    const det = getSusInfo(p, byK.get(p.parentKey), susOpts);
-    const withLifetime = _applyLifetime(det, p, lifetimeMap.get(p.key), opts?.disabledRules);
-    const withTrust = _applyTrust(withLifetime, trustMap.get(p.key), opts?.disabledRules);
-    m.set(p.key, _applyPrevalence(withTrust, p, prevalenceModel));
+    m.set(p.key, _scoreOneProcess(p, byK, susOpts, lifetimeMap, trustMap, prevalenceModel, disabledRules));
+  }
+  return m;
+};
+
+/**
+ * Chunked async detection scoring for large process trees.
+ * Yields to the event loop between batches so the UI can paint progress.
+ *
+ * @param {object} data
+ * @param {object} opts - same as buildDetectionMap
+ * @param {{ batchSize?: number, onProgress?: Function, shouldCancel?: () => boolean }} chunkOpts
+ * @returns {Promise<Map>}
+ */
+export const buildDetectionMapChunked = async (data, opts = {}, chunkOpts = {}) => {
+  const processes = data?.processes || [];
+  const total = processes.length;
+  const batchSize = Math.max(200, Number(chunkOpts.batchSize) || 2500);
+  const onProgress = typeof chunkOpts.onProgress === "function" ? chunkOpts.onProgress : null;
+  const shouldCancel = typeof chunkOpts.shouldCancel === "function" ? chunkOpts.shouldCancel : () => false;
+
+  if (total === 0) {
+    onProgress?.({ done: 0, total: 0, percent: 100 });
+    return new Map();
+  }
+  if (total <= batchSize) {
+    const m = buildDetectionMap(data, opts);
+    onProgress?.({ done: total, total, percent: 100 });
+    return m;
+  }
+
+  const byK = buildByKeyMap(data);
+  const compiled = compileCustomRules(opts?.customRules);
+  const prevalenceModel = opts?.prevalenceModel || buildPrevalenceModel(data);
+  const lifetimeMap = opts?.lifetimeMap || buildLifetimeAnalysis(data);
+  const trustMap = opts?.trustMap || buildTrustAnalysis(data);
+  const datasetHasTermination = processes.some((p) => Number.isFinite(p.durationMs));
+  const susOpts = {
+    disabledRules: opts?.disabledRules || null,
+    customRules: compiled,
+    analystProfile: opts?.analystProfile,
+    datasetHasTermination,
+  };
+  const disabledRules = opts?.disabledRules || null;
+  const m = new Map();
+
+  for (let i = 0; i < total; i += batchSize) {
+    if (shouldCancel()) {
+      const err = new Error("Scoring cancelled");
+      err.cancelled = true;
+      throw err;
+    }
+    const end = Math.min(total, i + batchSize);
+    for (let j = i; j < end; j++) {
+      const p = processes[j];
+      m.set(p.key, _scoreOneProcess(p, byK, susOpts, lifetimeMap, trustMap, prevalenceModel, disabledRules));
+    }
+    const percent = Math.min(100, Math.round((end / total) * 100));
+    onProgress?.({ done: end, total, percent });
+    // Yield so React can paint and the main thread stays responsive.
+    await new Promise((r) => setTimeout(r, 0));
   }
   return m;
 };
@@ -560,6 +662,49 @@ export const SEQ_DEFS = [
       (det) => _hasBeh(det, "lolbin-exec", 1),
       (det) => _hasBehAny(det, ["lolbin-exec", "download", "evasion", "exfil"], 1),
     ], minStages: 3 },
+  // Cred dump \u2192 lateral is the classic post-compromise pivot.
+  { id: "seq-dump-lateral", name: "LSASS/Cred Dump \u2192 Lateral", tid: ["T1003", "T1021"],
+    stages: [
+      (det) => _hasBeh(det, "cred", 2),
+      (det) => _hasBehAny(det, ["lateral", "rmm"], 1),
+    ], minStages: 2 },
+  // Office macro / script drops a payload then installs RMM hands-on-keyboard access.
+  { id: "seq-office-download-rmm", name: "Office/Script \u2192 Download \u2192 RMM", tid: ["T1204.002", "T1105", "T1219"],
+    stages: [
+      (det) => _isOfficeOrScriptOrigin(det),
+      (det) => _hasBeh(det, "download", 1),
+      (det) => _hasBeh(det, "rmm", 1),
+    ], minStages: 2 },
+  // AMSI/ETW tamper followed by injection or reflective load is high-confidence.
+  { id: "seq-amsi-inject", name: "AMSI/ETW Patch \u2192 Inject", tid: ["T1562.001", "T1055"],
+    stages: [
+      (det) => _hasBeh(det, "evasion", 2),
+      (det) => _hasBehAny(det, ["inject", "script-exec"], 2),
+    ], minStages: 2 },
+  // Defender disable / exclusion then payload execution.
+  { id: "seq-defender-payload", name: "Disable Defender \u2192 Payload", tid: ["T1562.001", "T1059"],
+    stages: [
+      (det) => _hasBeh(det, "evasion", 2),
+      (det) => _hasBehAny(det, ["download", "lolbin-exec", "shell-exec", "script-exec"], 2),
+    ], minStages: 2 },
+  // certutil/bitsadmin stage then scheduled-task / service persistence.
+  { id: "seq-stage-persist", name: "Download/Stage \u2192 Persistence", tid: ["T1105", "T1053.005"],
+    stages: [
+      (det) => _hasBehAny(det, ["download", "lolbin-exec"], 1),
+      (det) => _hasBeh(det, "persist", 2),
+    ], minStages: 2 },
+  // Network/DNS beacon after suspicious execution (needs EID 3/22 enrichment rules).
+  { id: "seq-exec-network", name: "Suspicious Exec \u2192 Network/DNS", tid: ["T1071", "T1059"],
+    stages: [
+      (det) => _hasBehAny(det, ["shell-exec", "script-exec", "lolbin-exec", "download"], 1),
+      (det) => _hasBehAny(det, ["network", "dns"], 1),
+    ], minStages: 2 },
+  // Dropper: file create / image load then execute.
+  { id: "seq-drop-exec", name: "Drop File/Module \u2192 Execute", tid: ["T1105", "T1204"],
+    stages: [
+      (det) => _hasBehAny(det, ["file-drop", "image-load"], 1),
+      (det) => _hasBehAny(det, ["shell-exec", "script-exec", "lolbin-exec"], 1),
+    ], minStages: 2 },
 ];
 
 // Single source of truth for "is this parent edge trustworthy?". Returns node.parentKey

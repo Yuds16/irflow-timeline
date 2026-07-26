@@ -829,3 +829,95 @@ test("consistentParentKey: shared ancestry-walk guard (used by story root + all 
   // Null/undefined node → null (no throw).
   assert.equal(consistentParentKey(null, byKey), null);
 });
+
+// ── P1: grandparent multi-hop, multi-field custom, adjacent telemetry rules ──
+
+test("pi-60: winword → cmd → powershell fires grandparent multi-hop chain", () => {
+  const leaf = mkNode({
+    processName: "powershell.exe",
+    cmdLine: "powershell -nop -c whoami",
+    image: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+  });
+  const parent = mkNode({
+    processName: "cmd.exe",
+    image: "C:\\Windows\\System32\\cmd.exe",
+  });
+  const gp = mkNode({
+    processName: "WINWORD.EXE",
+    image: "C:\\Program Files\\Microsoft Office\\root\\Office16\\WINWORD.EXE",
+  });
+  const det = getSusInfo(leaf, parent, { grandparentNode: gp });
+  assert.ok(det.level >= 2, `expected multi-hop severity, got ${det.level} (${det.reason})`);
+  assert.ok(
+    (det.evidence || []).some((e) => e.ruleId === "pi-60"),
+    `expected pi-60 evidence, got ${JSON.stringify((det.evidence || []).map((e) => e.ruleId))}`,
+  );
+});
+
+test("multi-field custom rule matches parent + process without regex", () => {
+  const leaf = mkNode({
+    processName: "powershell.exe",
+    cmdLine: "powershell -enc AAAA",
+    image: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+  });
+  const parent = mkNode({
+    processName: "winword.exe",
+    image: "C:\\Program Files\\Microsoft Office\\WINWORD.EXE",
+  });
+  const customRules = [{
+    name: "My Office PS",
+    parentProcess: "winword",
+    processName: "powershell",
+    severity: "critical",
+    behavior: "script-exec",
+    technique: "T1059.001",
+    category: "Custom",
+    _rx: null,
+  }];
+  const det = getSusInfo(leaf, parent, { customRules });
+  assert.ok(
+    (det.evidence || []).some((e) => String(e.ruleId || "").startsWith("custom")),
+    `expected custom rule hit, got ${JSON.stringify(det.evidence)}`,
+  );
+  assert.ok((det.behaviors || []).includes("script-exec"));
+});
+
+test("pi-61: outbound network with rare destinations from process", () => {
+  const leaf = mkNode({
+    processName: "powershell.exe",
+    cmdLine: "powershell",
+    image: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+    networkActivity: {
+      eventCount: 5,
+      destCount: 3,
+      rareDestCount: 2,
+      destinations: ["1.2.3.4", "5.6.7.8"],
+      samples: [],
+    },
+  });
+  const det = getSusInfo(leaf, null, {});
+  assert.ok(
+    (det.evidence || []).some((e) => e.ruleId === "pi-61"),
+    `expected pi-61, got ${det.reason} ${JSON.stringify((det.evidence || []).map((e) => e.ruleId))}`,
+  );
+});
+
+test("pi-64: PE drop in writable path from EID 11 enrichment", () => {
+  const leaf = mkNode({
+    processName: "chrome.exe",
+    cmdLine: "chrome.exe",
+    image: "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+    fileCreates: {
+      eventCount: 2,
+      peCount: 1,
+      scriptCount: 0,
+      writablePathCount: 1,
+      samples: [{ path: "C:\\Users\\bob\\AppData\\Local\\Temp\\payload.exe" }],
+    },
+  });
+  const det = getSusInfo(leaf, null, {});
+  assert.ok(
+    (det.evidence || []).some((e) => e.ruleId === "pi-64"),
+    `expected pi-64, got ${JSON.stringify((det.evidence || []).map((e) => e.ruleId))}`,
+  );
+});
