@@ -310,7 +310,50 @@ function extractSqliteDatabase(dbPath, attribution) {
   return rows;
 }
 
-function detectEncryptedConversationBundles(appDir, maxDepth = 10) {
+function conversationBundleInfo(filePath) {
+  if (!filePath) return null;
+  const normalized = path.normalize(filePath);
+  const parts = normalized.split(path.sep);
+  let bundleDirIndex = -1;
+  let version = 0;
+  for (let i = 0; i < parts.length; i++) {
+    const match = /^conversations-v([23])(?:-|$)/i.exec(parts[i]);
+    if (!match) continue;
+    bundleDirIndex = i;
+    version = Number(match[1]);
+    break;
+  }
+  if (bundleDirIndex < 0) return null;
+
+  const base = path.basename(normalized);
+  if (version === 3 && path.extname(base).toLowerCase() !== ".data") return null;
+  const storeDir = parts[bundleDirIndex];
+  const projectId = [...parts.slice(0, bundleDirIndex)]
+    .reverse()
+    .find((part) => /^project-/i.test(part)) || "";
+  let sizeBytes = 0;
+  let mtimeMs = null;
+  try {
+    const st = fs.statSync(normalized);
+    if (!st.isFile()) return null;
+    sizeBytes = st.size;
+    mtimeMs = st.mtimeMs;
+  } catch {
+    return null;
+  }
+
+  return {
+    path: normalized,
+    version,
+    storeId: storeDir.replace(/^conversations-v[23]-?/i, ""),
+    projectId,
+    bundleId: path.basename(base, path.extname(base)),
+    sizeBytes,
+    mtimeMs,
+  };
+}
+
+function detectConversationBundles(appDir, maxDepth = 10) {
   const hits = [];
   if (!appDir || !fs.existsSync(appDir)) return hits;
   const stack = [{ d: appDir, depth: 0 }];
@@ -320,11 +363,39 @@ function detectEncryptedConversationBundles(appDir, maxDepth = 10) {
     try { entries = fs.readdirSync(d, { withFileTypes: true }); } catch { continue; }
     for (const e of entries) {
       const full = path.join(d, e.name);
-      if (e.isDirectory() && depth < maxDepth) stack.push({ d: full, depth: depth + 1 });
-      else if (e.isFile() && /^conversations-v2/i.test(e.name)) hits.push(full);
+      if (e.isDirectory() && depth < maxDepth && !e.isSymbolicLink()) {
+        stack.push({ d: full, depth: depth + 1 });
+      } else if (e.isFile()) {
+        const info = conversationBundleInfo(full);
+        if (info) hits.push(info);
+      }
     }
   }
   return hits;
+}
+
+function detectEncryptedConversationBundles(appDir, maxDepth = 10) {
+  return detectConversationBundles(appDir, maxDepth)
+    .filter((bundle) => bundle.version === 2)
+    .map((bundle) => bundle.path);
+}
+
+function normalizeConversationBundles(bundles) {
+  return (Array.isArray(bundles) ? bundles : []).map((bundle) => {
+    if (bundle && typeof bundle === "object" && bundle.path) return bundle;
+    if (typeof bundle === "string") {
+      return conversationBundleInfo(bundle) || {
+        path: bundle,
+        version: /^conversations-v3/i.test(path.basename(path.dirname(bundle))) ? 3 : 2,
+        storeId: "",
+        projectId: "",
+        bundleId: path.basename(bundle, path.extname(bundle)),
+        sizeBytes: 0,
+        mtimeMs: null,
+      };
+    }
+    return null;
+  }).filter(Boolean);
 }
 
 function buildChatgptExtractionStats(rows, appDir = null, precomputedBundles = null) {
@@ -335,25 +406,44 @@ function buildChatgptExtractionStats(rows, appDir = null, precomputedBundles = n
     else if (r.RecordType === "message") messageCount += 1;
   }
   const leveldbMetadataOnly = conversationCount > 0 && messageCount === 0;
-  const encryptedBundles = precomputedBundles
-    || (appDir ? detectEncryptedConversationBundles(appDir) : []);
+  const conversationBundles = normalizeConversationBundles(
+    precomputedBundles || (appDir ? detectConversationBundles(appDir) : []),
+  );
+  const v2BundleCount = conversationBundles.filter((bundle) => bundle.version === 2).length;
+  const v3BundleCount = conversationBundles.filter((bundle) => bundle.version === 3).length;
   return {
     conversationCount,
     messageCount,
     leveldbMetadataOnly,
-    encryptedBundleCount: encryptedBundles.length,
-    encryptedBundleSample: encryptedBundles.slice(0, 3),
+    // Retain the established field for warning/UI compatibility; v3 is opaque rather than
+    // asserting a specific encryption mechanism.
+    encryptedBundleCount: conversationBundles.length,
+    conversationBundleCount: conversationBundles.length,
+    v2BundleCount,
+    v3BundleCount,
+    encryptedBundleSample: conversationBundles.slice(0, 3).map((bundle) => bundle.path),
   };
 }
 
 function formatChatgptImportNotice(stats) {
   if (!stats) return "";
-  const { conversationCount, messageCount, leveldbMetadataOnly, encryptedBundleCount } = stats;
+  const {
+    conversationCount,
+    messageCount,
+    leveldbMetadataOnly,
+    encryptedBundleCount,
+    v2BundleCount = encryptedBundleCount || 0,
+    v3BundleCount = 0,
+  } = stats;
+  const bundleParts = [];
+  if (v2BundleCount > 0) bundleParts.push(`${v2BundleCount} encrypted conversations-v2 bundle(s)`);
+  if (v3BundleCount > 0) bundleParts.push(`${v3BundleCount} opaque conversations-v3 bundle(s)`);
+  const bundleText = bundleParts.join(" and ");
   if (encryptedBundleCount > 0 && messageCount === 0) {
-    return `ChatGPT: found ${encryptedBundleCount} encrypted conversations-v2 bundle(s) (Keychain-gated on macOS) — IRFlow cannot decrypt these; LevelDB/SQLite may only have titles.`;
+    return `ChatGPT: found ${bundleText || `${encryptedBundleCount} conversation bundle(s)`} — metadata was inventoried, but message bodies were not decrypted or decoded.`;
   }
   if (encryptedBundleCount > 0 && messageCount > 0) {
-    return `ChatGPT: ${messageCount} message(s) from SQLite; ${encryptedBundleCount} encrypted conversations-v2 bundle(s) on disk are not decrypted (Keychain-gated on macOS).`;
+    return `ChatGPT: ${messageCount} message(s) from SQLite; ${bundleText || `${encryptedBundleCount} conversation bundle(s)`} also inventoried, but their bodies were not decrypted or decoded.`;
   }
   if (leveldbMetadataOnly) {
     return `ChatGPT: ${conversationCount} conversation(s) from LevelDB metadata; no message bodies found in SQLite — open the app or check for a messages database.`;
@@ -394,12 +484,43 @@ function walkChatgptFiles(appDir, onFile) {
 }
 
 function isChatgptDataFile(filePath) {
+  const norm = String(filePath || "").replace(/\\/g, "/").toLowerCase();
+  // TipKit is application-help state, not ChatGPT conversation evidence. Generic SQLite probing
+  // previously treated this unrelated database as the only "data" in current v3 installations.
+  if (norm.includes("/.tipkit/")) return false;
   const ext = path.extname(filePath).toLowerCase();
   const base = path.basename(filePath);
   if ((ext === ".ldb" || ext === ".log") && isInLeveldbDir(filePath)) return true;
   if (ext === ".db" || ext === ".sqlite" || ext === ".sqlite3") return true;
   if (!ext && !base.endsWith("-wal") && !base.endsWith("-shm") && isSqliteFile(filePath)) return true;
   return false;
+}
+
+function conversationBundleRow(bundle, attribution = {}) {
+  const isV3 = bundle.version === 3;
+  const label = isV3 ? "Opaque ChatGPT conversations-v3 bundle" : "Encrypted ChatGPT conversations-v2 bundle";
+  return makeRow({
+    timestamp: formatTimestampUtc(bundle.mtimeMs),
+    role: "system",
+    recordType: isV3 ? "opaque_bundle" : "encrypted_bundle",
+    summary: `${label}: ${path.basename(bundle.path)} (${bundle.sizeBytes} bytes)`,
+    fullText: JSON.stringify({
+      version: bundle.version,
+      bundleId: bundle.bundleId,
+      storeId: bundle.storeId,
+      projectId: bundle.projectId,
+      sizeBytes: bundle.sizeBytes,
+      decoded: false,
+    }),
+    sessionId: bundle.bundleId || "",
+    messageId: bundle.bundleId || "",
+    parentId: "",
+    workspace: bundle.projectId || "",
+    toolName: "",
+    sourceFile: bundle.path,
+    user: attribution.user || "",
+    host: attribution.host || "",
+  }, TOOL_CHATGPT);
 }
 
 function listChatgptDataFiles(appDir) {
@@ -430,13 +551,13 @@ function extractChatgptDataFile(filePath, attribution) {
  */
 async function extractChatgptDir(appDir, attribution = {}, options = {}) {
   const rows = [];
-  // Single tree walk collects BOTH the data files and the encrypted conversations-v2 bundles — the
-  // prior code walked the same appDir tree twice (listChatgptDataFiles + detectEncryptedConversationBundles).
+  // Single tree walk collects parseable stores and opaque/encrypted conversation bundles.
   const dataFiles = [];
-  const encryptedBundles = [];
+  const conversationBundles = [];
   walkChatgptFiles(appDir, (filePath) => {
     if (isChatgptDataFile(filePath)) dataFiles.push(filePath);
-    if (/^conversations-v2/i.test(path.basename(filePath))) encryptedBundles.push(filePath);
+    const bundle = conversationBundleInfo(filePath);
+    if (bundle) conversationBundles.push(bundle);
   });
   const fileCount = dataFiles.length;
   const { onFileProgress, onExtractedRows } = options;
@@ -463,27 +584,7 @@ async function extractChatgptDir(appDir, attribution = {}, options = {}) {
     if ((i + 1) % 12 === 0) await new Promise((r) => setImmediate(r));
   }
 
-  // encryptedBundles already collected in the single walk above (no second tree scan).
-  const bundleRows = [];
-  for (const bundlePath of encryptedBundles) {
-    let mtime = "";
-    try { mtime = formatTimestampUtc(fs.statSync(bundlePath).mtimeMs); } catch { /* ignore */ }
-    bundleRows.push(makeRow({
-      timestamp: mtime,
-      role: "system",
-      recordType: "encrypted_bundle",
-      summary: `Encrypted ChatGPT bundle (not decrypted): ${path.basename(bundlePath)}`,
-      sessionId: "",
-      messageId: "",
-      parentId: "",
-      workspace: path.dirname(bundlePath),
-      toolName: "",
-      sourceFile: bundlePath,
-      user: attribution.user || "",
-      host: attribution.host || "",
-      description: "conversations-v2-* requires macOS Keychain; metadata-only row for counsel inventory",
-    }, TOOL_CHATGPT));
-  }
+  const bundleRows = conversationBundles.map((bundle) => conversationBundleRow(bundle, attribution));
   if (bundleRows.length) {
     if (onExtractedRows) onExtractedRows(bundleRows);
     else rows.push(...bundleRows);
@@ -495,14 +596,17 @@ async function extractChatgptDir(appDir, attribution = {}, options = {}) {
       conversationCount: streamConversationCount,
       messageCount: streamMessageCount,
       leveldbMetadataOnly: streamConversationCount > 0 && streamMessageCount === 0,
-      encryptedBundleCount: encryptedBundles.length,
-      encryptedBundleSample: encryptedBundles.slice(0, 3),
+      encryptedBundleCount: conversationBundles.length,
+      conversationBundleCount: conversationBundles.length,
+      v2BundleCount: conversationBundles.filter((bundle) => bundle.version === 2).length,
+      v3BundleCount: conversationBundles.filter((bundle) => bundle.version === 3).length,
+      encryptedBundleSample: conversationBundles.slice(0, 3).map((bundle) => bundle.path),
     };
     return out;
   }
 
   const sorted = finalizeAiHistoryRows(dedupeRows(rows), options);
-  sorted._chatgptStats = buildChatgptExtractionStats(sorted, appDir, encryptedBundles);
+  sorted._chatgptStats = buildChatgptExtractionStats(sorted, appDir, conversationBundles);
   return sorted;
 }
 
@@ -521,6 +625,21 @@ function isChatgptAppDirQuick(dirPath) {
   for (const h of hints) {
     if (fs.existsSync(h)) return true;
   }
+  let entries;
+  try { entries = fs.readdirSync(dirPath, { withFileTypes: true }); } catch { return false; }
+  for (const entry of entries) {
+    if (/^conversations-v[23](?:-|$)/i.test(entry.name)) return true;
+    if (!entry.isDirectory() || !/^project-/i.test(entry.name)) continue;
+    let projectEntries;
+    try {
+      projectEntries = fs.readdirSync(path.join(dirPath, entry.name), { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    if (projectEntries.some((child) => child.isDirectory() && /^conversations-v[23](?:-|$)/i.test(child.name))) {
+      return true;
+    }
+  }
   return false;
 }
 
@@ -530,6 +649,7 @@ function isChatgptAppDir(dirPath, { quick = false } = {}) {
     if (!fs.statSync(dirPath).isDirectory()) return false;
   } catch { return false; }
   if (quick) return isChatgptAppDirQuick(dirPath);
+  if (detectConversationBundles(dirPath).length > 0) return true;
 
   const name = path.basename(dirPath);
   const lower = dirPath.toLowerCase();
@@ -587,12 +707,15 @@ async function extractChatgptPath(target, attribution = {}, options = {}) {
   if (stat.isFile()) {
     const ext = path.extname(target).toLowerCase();
     const rows = [];
-    if ((ext === ".ldb" || ext === ".log") && isInLeveldbDir(target)) {
+    const bundle = conversationBundleInfo(target);
+    if (bundle) {
+      rows.push(conversationBundleRow(bundle, attribution));
+    } else if ((ext === ".ldb" || ext === ".log") && isInLeveldbDir(target)) {
       rows.push(...extractLeveldbFile(target, attribution));
     } else if (ext === ".db" || ext === ".sqlite" || ext === ".sqlite3" || isSqliteFile(target)) {
       rows.push(...extractSqliteDatabase(target, attribution));
     } else {
-      throw new Error("Expected a ChatGPT LevelDB (.ldb) or SQLite database file.");
+      throw new Error("Expected a ChatGPT conversation bundle, LevelDB (.ldb), or SQLite database file.");
     }
     return finalizeAiHistoryRows(dedupeRows(rows), options);
   }
@@ -615,5 +738,9 @@ module.exports = {
   isInLeveldbDir,
   buildChatgptExtractionStats,
   formatChatgptImportNotice,
+  conversationBundleInfo,
+  detectConversationBundles,
   detectEncryptedConversationBundles,
+  isChatgptDataFile,
+  listChatgptDataFiles,
 };

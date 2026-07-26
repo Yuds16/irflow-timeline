@@ -13,6 +13,7 @@ const {
   COPILOT_PROVIDER_RE,
   CODEX_PROVIDER_RE,
   extractChatFromVscdb,
+  supplementCodexFromVsCodeAgentSessions,
 } = require("../electron/parsers/ai-history/vscode-chat-db");
 const { buildCopilotEmptyExtractError, buildCopilotExtractionStats } = require("../electron/parsers/ai-history/import-meta");
 
@@ -86,6 +87,12 @@ test("buildCopilotEmptyExtractError mentions Codex agent sessions when present",
   const msg = buildCopilotEmptyExtractError(stats);
   assert.match(msg, /13 session file/);
   assert.match(msg, /50 VS Code Codex/);
+});
+
+test("Codex VS Code supplement never probes global live-host roots implicitly", async () => {
+  const result = await supplementCodexFromVsCodeAgentSessions({}, {});
+  assert.equal(result.rows.length, 0);
+  assert.equal(result.stats.databases, 0);
 });
 
 test("extractChatFromVscdb reads agentSessions.model.cache", (t) => {

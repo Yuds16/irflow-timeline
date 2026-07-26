@@ -64,6 +64,27 @@ test("parseAiHistoryImport streams into the db, dedupes per-source, and keeps Fu
   }
 });
 
+test("parseAiHistoryImport streams Grok Build commands and output into the unified schema", async () => {
+  const root = path.join(__dirname, "fixtures/ai-history/grok/.grok");
+  const db = makeFakeDb();
+  const res = await parseAiHistoryImport(root, "tab-grok", db, null, {
+    tool: "grok-build",
+    target: root,
+  });
+  assert.equal(res.sourceFormat, "ai-history-grok-build");
+  const commandIdx = AI_HISTORY_COLUMNS.indexOf("ToolCommand");
+  const invokedIdx = AI_HISTORY_COLUMNS.indexOf("InvokedTool");
+  const recordTypeIdx = AI_HISTORY_COLUMNS.indexOf("RecordType");
+  const fullTextIdx = AI_HISTORY_COLUMNS.indexOf("FullText");
+  const rows = db._inserted();
+  assert.ok(rows.some((row) =>
+    row[invokedIdx] === "run_terminal_command"
+    && row[commandIdx] === "printf '%s\\n' \"quoted value\""));
+  assert.ok(rows.some((row) =>
+    row[recordTypeIdx] === "tool_result"
+    && /Exit code: 0/.test(row[fullTextIdx])));
+});
+
 test("parseAiHistoryImport reads copilot session stats from the extractor return, not the prepared rows", async () => {
   // Regression guard: meta.copilot.sessionsScanned/jsonlFiles/kind1Lines come from the _copilotStats
   // sidecar attached to the extractor's RETURN value. Reading them off the re-prepared rows (which

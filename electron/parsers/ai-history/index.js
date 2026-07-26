@@ -9,6 +9,7 @@ const {
   TOOL_CHATGPT,
   TOOL_GEMINI_CLI,
   TOOL_CODEX,
+  TOOL_GROK_BUILD,
   TOOL_CURSOR,
   TOOL_COPILOT,
   AI_HISTORY_TOOLS,
@@ -18,6 +19,7 @@ const claudeCode = require("./claude-code");
 const chatgpt = require("./chatgpt");
 const geminiCli = require("./gemini-cli");
 const codex = require("./codex");
+const grokBuild = require("./grok-build");
 const cursor = require("./cursor");
 const copilot = require("./copilot");
 const windsurf = require("./windsurf");
@@ -28,6 +30,7 @@ const EXTRACTORS = {
   chatgpt: chatgpt.extractChatgptPath,
   "gemini-cli": geminiCli.extractGeminiCliPath,
   codex: codex.extractCodexPath,
+  "grok-build": grokBuild.extractGrokBuildPath,
   cursor: cursor.extractCursorPath,
   copilot: copilot.extractCopilotPath,
   windsurf: windsurf.extractWindsurfPath,
@@ -47,6 +50,7 @@ module.exports = {
   TOOL_CHATGPT,
   TOOL_GEMINI_CLI,
   TOOL_CODEX,
+  TOOL_GROK_BUILD,
   TOOL_CURSOR,
   TOOL_COPILOT,
   AI_HISTORY_TOOLS,
@@ -56,6 +60,7 @@ module.exports = {
   ...chatgpt,
   ...geminiCli,
   ...codex,
+  ...grokBuild,
   ...cursor,
   ...copilot,
   ...windsurf,

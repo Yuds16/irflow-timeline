@@ -5,6 +5,7 @@ import useTheme from "../../hooks/useTheme.js";
 import { toast } from "../../store/useToastStore.js";
 import { isIpcError, ipcErrorMessage } from "../../utils/ipc-result.js";
 import { formatNumber } from "../../utils/format.js";
+import { clearIpcSubscription, replaceIpcSubscription } from "../../utils/ipc-subscriptions.js";
 import { Modal } from "../primitives/index.js";
 import { updateModal } from "../../modals/modalRegistry.js";
 import {
@@ -46,8 +47,7 @@ export default function AiHistoryExtractModal() {
   useEffect(() => {
     if (!tle?.onAiHistoryProfileProgress || modal?.type !== "aiHistoryExtract") return;
     if (modal.phase !== "extracting") return;
-    tle.onAiHistoryProfileProgress(applyProgress);
-    return () => tle.removeAllListeners?.("ai-history-profile-progress");
+    return replaceIpcSubscription("ai-history-profile-progress", tle.onAiHistoryProfileProgress, applyProgress);
   }, [modal?.type, modal?.phase, tle, applyProgress]);
 
   useEffect(() => {
@@ -103,7 +103,7 @@ export default function AiHistoryExtractModal() {
     (async () => {
       try {
         const r = await tle.decodeAiHistory(target, tool, { includeSubagents });
-        tle.removeAllListeners?.("ai-history-profile-progress");
+        clearIpcSubscription("ai-history-profile-progress");
         if (isStaleRun()) return;
 
         if (r?.canceled) {
@@ -120,8 +120,8 @@ export default function AiHistoryExtractModal() {
         }
 
         await finishSuccess(r);
-      } catch (e) {
-        tle.removeAllListeners?.("ai-history-profile-progress");
+    } catch (e) {
+        clearIpcSubscription("ai-history-profile-progress");
         if (!isStaleRun()) {
           patch({ phase: "error", scanning: false, error: e?.message || String(e) });
         }

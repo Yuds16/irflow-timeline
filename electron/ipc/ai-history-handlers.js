@@ -8,8 +8,7 @@
  *   extract-ai-history-profile   — discover + extract + merge into one AI Query History tab
  *   cancel-ai-history-extract    — abort an in-flight extraction
  *
- * Extracted from the former execution-handlers.js; the program-execution / triage / external-artifact
- * handlers were dropped along with their (now-absent) parser modules.
+ * Kept separate from unrelated forensic handler groups so AI collection remains self-contained.
  */
 
 const fs = require("fs");
@@ -30,6 +29,7 @@ const {
   extractCopilotPath,
   resolveClaudeDir,
   resolveCodexHome,
+  resolveGrokHome,
   resolveChatgptDir,
   resolveGeminiCliRoot,
   resolveCursorRoot,
@@ -69,7 +69,13 @@ const { parseCSVLine } = require("../parsers/csv");
 
 const AI_HISTORY_IPC_QUERY_OPTS = {
   omitHeaders: ["FullText"],
-  truncateColumns: { Summary: 240, Description: 480, Transcript: 480 },
+  truncateColumns: {
+    Summary: 240,
+    ToolInput: 2048,
+    ToolDescription: 1000,
+    Description: 480,
+    Transcript: 480,
+  },
 };
 
 const AI_HISTORY_EMPTY_COL_OMIT = ["FullText", "Description", "Transcript"];
@@ -294,17 +300,22 @@ module.exports = function registerAiHistoryHandlers(safeHandle, safeSend, ctx) {
         chatgpt: {
           title: "Select ChatGPT Desktop data",
           message: "Choose the ChatGPT app data folder (com.openai.chat, Atlas, or Roaming\\ChatGPT)",
-          filters: [{ name: "SQLite / LevelDB", extensions: ["db", "sqlite", "sqlite3", "ldb"] }],
+          filters: [{ name: "ChatGPT bundle / SQLite / LevelDB", extensions: ["data", "db", "sqlite", "sqlite3", "ldb"] }],
         },
         "gemini-cli": {
           title: "Select Gemini CLI artifacts",
-          message: "Choose a .gemini folder or a session-*.json file under tmp/.../chats/",
-          filters: [{ name: "Gemini CLI session", extensions: ["json"] }],
+          message: "Choose a .gemini folder, session JSON/JSONL, or project shell_history",
+          filters: [{ name: "Gemini CLI history", extensions: ["json", "jsonl", "*"] }],
         },
         codex: {
           title: "Select OpenAI Codex artifacts",
           message: "Choose a .codex folder (CLI/Desktop sessions, history.jsonl, rollout-*.jsonl)",
           filters: [{ name: "Codex JSONL", extensions: ["jsonl"] }],
+        },
+        "grok-build": {
+          title: "Select Grok Build artifacts",
+          message: "Choose a .grok folder or a session summary/updates/chat_history/prompt_history JSONL file",
+          filters: [{ name: "Grok Build JSON / JSONL", extensions: ["json", "jsonl"] }],
         },
         "claude-code": {
           title: "Select Claude Code artifacts",
@@ -312,14 +323,14 @@ module.exports = function registerAiHistoryHandlers(safeHandle, safeSend, ctx) {
           filters: [{ name: "Claude Code JSONL", extensions: ["jsonl"] }],
         },
         cursor: {
-          title: "Select Cursor agent transcripts",
-          message: "Choose a .cursor folder, projects tree, or an agent-transcripts .jsonl file",
-          filters: [{ name: "Cursor transcript JSONL", extensions: ["jsonl"] }],
+          title: "Select Cursor artifacts",
+          message: "Choose a .cursor folder, Cursor User folder, agent transcript, or conversation-search.db",
+          filters: [{ name: "Cursor artifacts", extensions: ["jsonl", "txt", "db", "vscdb"] }],
         },
         copilot: {
-          title: "Select GitHub Copilot chat sessions",
-          message: "Choose workspaceStorage, a chatSessions folder, or a session .json/.jsonl file",
-          filters: [{ name: "Copilot chat session", extensions: ["json", "jsonl"] }],
+          title: "Select GitHub Copilot artifacts",
+          message: "Choose .copilot, workspaceStorage, chatSessions, events.jsonl, or session-store.db",
+          filters: [{ name: "Copilot VS Code / CLI artifacts", extensions: ["json", "jsonl", "yaml", "yml", "md", "db", "log"] }],
         },
         windsurf: {
           title: "Select Windsurf chat data",
@@ -361,20 +372,22 @@ module.exports = function registerAiHistoryHandlers(safeHandle, safeSend, ctx) {
         ? (resolveGeminiCliRoot(target) || target)
         : selectedTool === "codex"
           ? (resolveCodexHome(target) || target)
-          : selectedTool === "cursor"
-            ? (resolveCursorRoot(target) || target)
-            : selectedTool === "copilot"
-              ? (resolveCopilotRoot(target) || target)
-              : selectedTool === "windsurf"
-                ? (resolveWindsurfUserDir(target) || target)
-                : selectedTool === "continue"
-                  ? (continueHome(target) || target)
-                  : (resolveClaudeDir(target) || target);
+          : selectedTool === "grok-build"
+            ? (resolveGrokHome(target) || target)
+            : selectedTool === "cursor"
+              ? (resolveCursorRoot(target) || target)
+              : selectedTool === "copilot"
+                ? (resolveCopilotRoot(target) || target)
+                : selectedTool === "windsurf"
+                  ? (resolveWindsurfUserDir(target) || target)
+                  : selectedTool === "continue"
+                    ? (continueHome(target) || target)
+                    : (resolveClaudeDir(target) || target);
     const extractTarget = root || target;
     const user = deriveUser(extractTarget);
     const host = "";
 
-    const scopeTools = new Set(["claude-code", "codex", "cursor"]);
+    const scopeTools = new Set(["claude-code", "codex", "grok-build", "cursor"]);
     if (options?.promptScope && scopeTools.has(selectedTool) && options?.includeSubagents == null) {
       try {
         const st = fs.statSync(target);
@@ -490,7 +503,7 @@ module.exports = function registerAiHistoryHandlers(safeHandle, safeSend, ctx) {
       onProgress: sendProgress,
     });
     const hasScopeChoice = result.roots.some((r) =>
-      r.tool === "claude-code" || r.tool === "codex" || r.tool === "cursor",
+      r.tool === "claude-code" || r.tool === "codex" || r.tool === "grok-build" || r.tool === "cursor",
     );
     authorizeDiscoveredRoots(result.roots, mode === "folder" ? result.scanRoot : null);
     return { ...result, hasScopeChoice, scanReport: result.scanReport || null };
@@ -586,7 +599,7 @@ module.exports = function registerAiHistoryHandlers(safeHandle, safeSend, ctx) {
     }
 
     const hasScopeChoice = roots.some((r) =>
-      r.tool === "claude-code" || r.tool === "codex" || r.tool === "cursor",
+      r.tool === "claude-code" || r.tool === "codex" || r.tool === "grok-build" || r.tool === "cursor",
     );
     if (includeSubagents == null && hasScopeChoice) {
       return {
@@ -698,7 +711,7 @@ module.exports = function registerAiHistoryHandlers(safeHandle, safeSend, ctx) {
   safeHandle("cancel-ai-history-extract", async () => {
     requestAiHistoryExtractAbort();
     if (jobManager) {
-      jobManager.cancelWhere((job) => job.type === "ai-history-profile" || job.type === "ai-history-triage");
+      jobManager.cancelWhere((job) => job.type === "ai-history-profile");
     }
     return { ok: true };
   });

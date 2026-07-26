@@ -9,11 +9,20 @@ const { SUMMARY_MAX_LEN } = require("./schema");
 // multi-hundred-MB string would be materialized in full per row. 1MB is far above any real
 // prompt/response; truncation is marked so it is auditable rather than silent.
 const MAX_FULLTEXT_CHARS = 1024 * 1024;
+// Tool inputs may contain file bodies or other large arguments. Keep enough source evidence for
+// normal invocations while bounding a malicious/pathological single value. The marker makes the
+// exceptional truncation visible; ordinary shell commands remain byte-for-byte unchanged.
+const MAX_TOOL_EVIDENCE_CHARS = 1024 * 1024;
+
+function capEvidenceText(text, maxChars) {
+  const value = String(text ?? "");
+  if (value.length <= maxChars) return value;
+  const dropped = value.length - maxChars;
+  return `${value.slice(0, maxChars)}\n…[truncated ${dropped} chars over ${maxChars}-char cap]`;
+}
 
 function capFullText(text) {
-  if (text.length <= MAX_FULLTEXT_CHARS) return text;
-  const dropped = text.length - MAX_FULLTEXT_CHARS;
-  return `${text.slice(0, MAX_FULLTEXT_CHARS)}\n…[truncated ${dropped} chars over ${MAX_FULLTEXT_CHARS}-char cap]`;
+  return capEvidenceText(text, MAX_FULLTEXT_CHARS);
 }
 
 function formatTimestampUtc(ms) {
@@ -83,7 +92,12 @@ function makeRow(fields, defaultTool) {
   const fullText = capFullText(String(fields.fullText ?? fields.summary ?? "")
     .replace(/\r\n/g, "\n")
     .trim());
-  const summary = truncateSummary(fullText || fields.summary);
+  // Callers may provide an analyst-friendly event summary plus a much larger evidence body.
+  // Preserve that explicit summary; use FullText as the fallback only when no summary exists.
+  const summarySource = fields.summary != null && String(fields.summary).trim()
+    ? fields.summary
+    : fullText;
+  const summary = truncateSummary(summarySource);
   const tool = fields.tool || defaultTool || "";
   const row = {
     Timestamp: fields.timestamp || "",
@@ -92,6 +106,9 @@ function makeRow(fields, defaultTool) {
     Summary: summary,
     FullText: fullText,
     InvokedTool: fields.toolName || "",
+    ToolCommand: capEvidenceText(fields.toolCommand, MAX_TOOL_EVIDENCE_CHARS),
+    ToolInput: capEvidenceText(fields.toolInput, MAX_TOOL_EVIDENCE_CHARS),
+    ToolDescription: capEvidenceText(fields.toolDescription, MAX_TOOL_EVIDENCE_CHARS),
     SessionId: fields.sessionId || "",
     MessageId: fields.messageId || "",
     ParentId: fields.parentId || "",

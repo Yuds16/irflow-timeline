@@ -6,8 +6,14 @@ const path = require("node:path");
 const fs = require("fs");
 const os = require("os");
 
-const { extractCursorComposerStores } = require("../electron/parsers/ai-history/cursor-composer");
-const { buildCursorComposerFixture } = require("./helpers/vscdb-builder");
+const {
+  extractCursorComposerStores,
+  isCursorUserDataDir,
+} = require("../electron/parsers/ai-history/cursor-composer");
+const {
+  buildCursorComposerFixture,
+  buildCursorConversationSearchFixture,
+} = require("./helpers/vscdb-builder");
 
 const FIXTURE_CURSOR = path.join(__dirname, "fixtures/ai-history/cursor/.cursor");
 
@@ -47,4 +53,34 @@ test("extractCursorDir merges transcript and composer rows when vscdb present", 
   const { extractCursorDir } = require("../electron/parsers/ai-history/cursor");
   const rows = await extractCursorDir(FIXTURE_CURSOR, { user: "u" });
   assert.ok(rows.length >= 2);
+});
+
+test("Cursor User root parses conversation-search.db FTS bodies with source metadata", async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "irflow-cursor-search-"));
+  t.after(() => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ } });
+
+  const userDir = path.join(tmp, "Library", "Application Support", "Cursor", "User");
+  const searchDb = path.join(userDir, "globalStorage", "conversation-search.db");
+  if (!buildCursorConversationSearchFixture(searchDb)) {
+    t.skip("better-sqlite3 not available in this Node runtime");
+    return;
+  }
+
+  const { extractCursorPath, resolveCursorRoot } = require("../electron/parsers/ai-history/cursor");
+  const { detectAiHistoryImport } = require("../electron/parsers/ai-history-import");
+  assert.equal(isCursorUserDataDir(userDir), true);
+  assert.equal(resolveCursorRoot(searchDb), userDir);
+  assert.equal(detectAiHistoryImport(searchDb)?.target, userDir);
+
+  const rows = await extractCursorPath(userDir, { user: "analyst" });
+  const indexed = rows.find((row) => row.RecordType === "conversation_search");
+  assert.ok(indexed);
+  assert.equal(indexed.SessionId, "cursor-search-session-1");
+  assert.equal(indexed.Summary, "Investigate persistence");
+  assert.match(indexed.FullText, /suspicious PowerShell execution/);
+  assert.equal(indexed.Timestamp, "2024-01-01 00:00:00");
+  const metadataOnly = rows.find((row) => row.SessionId === "cursor-search-session-2");
+  assert.match(metadataOnly?.Summary || "", /archived/i);
+  assert.match(metadataOnly?.FullText || "", /"bodyPresent": false/);
+  assert.equal(rows._cursorComposerStats.searchRows, 2);
 });

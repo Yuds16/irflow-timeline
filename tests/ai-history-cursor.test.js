@@ -31,6 +31,12 @@ test("extractCursorDir reads agent transcript messages", async () => {
   assert.match(rows[0].Summary, /Explain this function/);
   assert.equal(rows[1].Role, "assistant");
   assert.match(rows[1].InvokedTool, /Read/);
+  assert.match(rows[1].InvokedTool, /Shell/);
+  assert.equal(rows[1].ToolCommand, "node --test tests/sort.test.js");
+  assert.equal(rows[1].ToolDescription, "Run the sort tests");
+  const calls = JSON.parse(rows[1].ToolInput);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[1].input.working_directory, "/tmp/demo-project");
   assert.equal(rows[0].SessionId, "a1111111-1111-4111-8111-111111111111");
   assert.equal(rows[0].User, "analyst");
 });

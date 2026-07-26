@@ -9,8 +9,9 @@ const { buildCodexStateSqliteNotice } = require("./codex-state-sqlite");
 const { buildWindsurfCascadeNotice } = require("./windsurf-cascade");
 
 function buildCopilotExtractionStats(rows, sessionStats = {}) {
-  const messageRows = rows.filter((r) => r.Role === "user" || r.Role === "assistant").length;
+  const rowMessageCount = rows.filter((r) => r.Role === "user" || r.Role === "assistant").length;
   const {
+    cli = false,
     sessionsScanned = 0,
     sessionsWithMessages = 0,
     emptySessions = 0,
@@ -22,10 +23,24 @@ function buildCopilotExtractionStats(rows, sessionStats = {}) {
     emptyAfterJsonlReplay = 0,
     vscdbSupplement = 0,
     alternateAgentSessions = 0,
+    eventFiles = 0,
+    eventRows = 0,
+    messageRows: streamedMessageRows = 0,
+    planRows = 0,
+    checkpointRows = 0,
+    trackedFileRows = 0,
+    commandHistoryRows = 0,
+    sessionStoreTables = 0,
+    sessionStoreRows = 0,
+    logInventoryRows = 0,
+    parseErrors = 0,
+    excludedSensitiveStores = [],
   } = sessionStats;
 
+  const messageRows = rowMessageCount || streamedMessageRows;
   const metadataOnly = sessionsScanned > 0 && messageRows === 0;
   return {
+    cli,
     messageRows,
     sessionsScanned,
     sessionsWithMessages,
@@ -38,6 +53,17 @@ function buildCopilotExtractionStats(rows, sessionStats = {}) {
     emptyAfterJsonlReplay,
     vscdbSupplement,
     alternateAgentSessions,
+    eventFiles,
+    eventRows,
+    planRows,
+    checkpointRows,
+    trackedFileRows,
+    commandHistoryRows,
+    sessionStoreTables,
+    sessionStoreRows,
+    logInventoryRows,
+    parseErrors,
+    excludedSensitiveStores,
     metadataOnly,
   };
 }
@@ -51,6 +77,21 @@ function formatCopilotImportNotice(stats) {
     emptySessions,
     metadataOnly,
   } = stats;
+
+  if (stats.cli) {
+    const parts = [
+      `GitHub Copilot CLI: ${messageRows} message row(s) from ${sessionsWithMessages}/${sessionsScanned} session(s)`,
+    ];
+    if (stats.eventRows) parts.push(`${stats.eventRows} event rows`);
+    if (stats.commandHistoryRows) parts.push(`${stats.commandHistoryRows} command-history rows`);
+    if (stats.planRows) parts.push(`${stats.planRows} plan`);
+    if (stats.checkpointRows) parts.push(`${stats.checkpointRows} checkpoint(s)`);
+    if (stats.trackedFileRows) parts.push(`${stats.trackedFileRows} tracked-file inventory row(s)`);
+    if (stats.sessionStoreRows) parts.push(`${stats.sessionStoreRows} session-store row(s)`);
+    if (stats.logInventoryRows) parts.push(`${stats.logInventoryRows} log inventory row(s)`);
+    parts.push("authentication and MCP secret stores excluded");
+    return `${parts.join("; ")}.`;
+  }
 
   if (metadataOnly) {
     let msg = `GitHub Copilot: scanned ${sessionsScanned} session file(s) but found no message bodies `

@@ -361,14 +361,16 @@ function buildVsCodeChatImportNotice(toolLabel, stats) {
  * Read VS Code agentSessions.model.cache rows for Codex (embedded in VS Code, not ~/.codex).
  */
 async function supplementCodexFromVsCodeAgentSessions(attribution = {}, options = {}) {
-  const { listCopilotUserDirs } = require("./artifact-paths");
   const { dedupeAiHistoryRows } = require("./row-utils");
   const { TOOL_CODEX } = require("./schema");
   const merged = [];
   let databases = 0;
   let agentSessionRows = 0;
+  const userDataDirs = Array.isArray(options.userDataDirs)
+    ? options.userDataDirs.filter((p) => typeof p === "string" && p.trim())
+    : [];
 
-  for (const userDir of listCopilotUserDirs()) {
+  for (const userDir of userDataDirs) {
     if (!fs.existsSync(userDir)) continue;
     const { rows, stats } = await extractVsCodeUserChatDir(userDir, TOOL_CODEX, attribution, {
       ...options,

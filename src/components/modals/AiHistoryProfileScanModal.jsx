@@ -5,6 +5,7 @@ import useTheme from "../../hooks/useTheme.js";
 import { toast } from "../../store/useToastStore.js";
 import { isIpcError, ipcErrorMessage } from "../../utils/ipc-result.js";
 import { formatNumber } from "../../utils/format.js";
+import { clearIpcSubscription, replaceIpcSubscription } from "../../utils/ipc-subscriptions.js";
 import { Modal } from "../primitives/index.js";
 import { updateModal } from "../../modals/modalRegistry.js";
 
@@ -101,8 +102,7 @@ export default function AiHistoryProfileScanModal() {
   useEffect(() => {
     if (!tle?.onAiHistoryProfileProgress || modal?.type !== "aiHistoryProfileScan") return;
     if (modal.phase !== "discovering" && modal.phase !== "scanning") return;
-    tle.onAiHistoryProfileProgress(applyProgress);
-    return () => tle.removeAllListeners?.("ai-history-profile-progress");
+    return replaceIpcSubscription("ai-history-profile-progress", tle.onAiHistoryProfileProgress, applyProgress);
   }, [modal?.type, modal?.phase, tle, applyProgress]);
 
   // Phase 1: discover roots (local Mac or forensic folder)
@@ -282,7 +282,7 @@ export default function AiHistoryProfileScanModal() {
   };
 
   const goBackToOptions = () => {
-    tle?.removeAllListeners?.("ai-history-profile-progress");
+    clearIpcSubscription("ai-history-profile-progress");
     discoverStartedRef.current = false;
     setModal((p) => (p?.type === "aiHistoryProfileScan"
       ? {
@@ -314,8 +314,7 @@ export default function AiHistoryProfileScanModal() {
 
   const startScan = async () => {
     if (!tle || !roots.length) return;
-    tle.removeAllListeners?.("ai-history-profile-progress");
-    tle.onAiHistoryProfileProgress?.(applyProgress);
+    replaceIpcSubscription("ai-history-profile-progress", tle.onAiHistoryProfileProgress, applyProgress);
 
     const initialStatus = { ...sourceStatus };
     for (const r of roots) initialStatus[sourceKey(r)] = "pending";
@@ -343,7 +342,7 @@ export default function AiHistoryProfileScanModal() {
         scanRoot: scanRoot || undefined,
         scanMode: scanMode || "local",
       });
-      tle.removeAllListeners?.("ai-history-profile-progress");
+      clearIpcSubscription("ai-history-profile-progress");
 
       if (r?.needsScopeChoice) {
         patch({
@@ -411,7 +410,7 @@ export default function AiHistoryProfileScanModal() {
       });
       setModal(null);
     } catch (e) {
-      tle.removeAllListeners?.("ai-history-profile-progress");
+      clearIpcSubscription("ai-history-profile-progress");
       patch({ phase: "error", scanning: false, error: e?.message || String(e) });
     }
   };
@@ -577,9 +576,9 @@ export default function AiHistoryProfileScanModal() {
             Paths searched inside your folder (all platforms)
           </div>
           <div style={{ fontSize: 10, color: th.textDim, fontFamily: "SF Mono, Menlo, monospace", lineHeight: 1.5, maxHeight: 100, overflow: "auto", border: `1px solid ${th.border}44`, borderRadius: 6, padding: "8px 10px" }}>
-            <div style={{ marginBottom: 6 }}><span style={{ color: th.textMuted }}>Windows: </span>Users\&lt;user&gt;\.claude, .codex, .cursor, .gemini, AppData\Roaming\Claude, OpenAI\ChatGPT, Code\User\workspaceStorage…</div>
-            <div style={{ marginBottom: 6 }}><span style={{ color: th.textMuted }}>Linux: </span>home/&lt;user&gt;/.claude, .codex, .config/com.openai.chat, .config/Code/User/workspaceStorage…</div>
-            <div><span style={{ color: th.textMuted }}>macOS: </span>Users/&lt;user&gt;/.claude, Library/Application Support/com.openai.chat, Code/User/workspaceStorage…</div>
+            <div style={{ marginBottom: 6 }}><span style={{ color: th.textMuted }}>Windows: </span>Users\&lt;user&gt;\.claude, .codex, .grok, .cursor, .copilot, .gemini, AppData\Roaming\Cursor\User, OpenAI\ChatGPT, Code\User\workspaceStorage…</div>
+            <div style={{ marginBottom: 6 }}><span style={{ color: th.textMuted }}>Linux: </span>home/&lt;user&gt;/.claude, .codex, .copilot, .config/Cursor/User, .config/com.openai.chat, .config/Code/User/workspaceStorage…</div>
+            <div><span style={{ color: th.textMuted }}>macOS: </span>Users/&lt;user&gt;/.claude, .copilot, Library/Application Support/Cursor/User, com.openai.chat, Code/User/workspaceStorage…</div>
           </div>
         </div>
       )}
@@ -703,7 +702,7 @@ export default function AiHistoryProfileScanModal() {
           {scanReport?.collectionIncomplete && (
             <p style={{ marginTop: 8, fontSize: 11, color: th.textMuted, lineHeight: 1.5 }}>
               User profiles were detected in this folder, but none of the standard AI assistant paths were collected.
-              Re-run KAPE with targets that include <code style={{ fontSize: 10 }}>.claude</code>, <code style={{ fontSize: 10 }}>.cursor</code>, ChatGPT app data, or VS Code <code style={{ fontSize: 10 }}>workspaceStorage</code>.
+              Re-run KAPE with targets that include <code style={{ fontSize: 10 }}>.claude</code>, <code style={{ fontSize: 10 }}>.cursor</code>, <code style={{ fontSize: 10 }}>.copilot</code>, Cursor <code style={{ fontSize: 10 }}>User/globalStorage</code>, ChatGPT app data, or VS Code <code style={{ fontSize: 10 }}>workspaceStorage</code>.
             </p>
           )}
           {Array.isArray(scanReport?.checklist) && scanReport.checklist.length > 0 && (

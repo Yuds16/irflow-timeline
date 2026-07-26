@@ -15,7 +15,17 @@ const {
 const { isChatgptAppDir } = require("./ai-history/chatgpt");
 const { isGeminiCliRoot, GEMINI_DIR_NAME } = require("./ai-history/gemini-cli");
 const { isCodexDir, countRolloutFiles, CODEX_DIR_NAME } = require("./ai-history/codex");
-const { isCursorHome, countCursorExtractFiles, CURSOR_DIR_NAME } = require("./ai-history/cursor");
+const {
+  isGrokBuildRoot,
+  countGrokDataFiles,
+  GROK_DIR_NAME,
+} = require("./ai-history/grok-build");
+const {
+  isCursorHome,
+  isCursorUserDataDir,
+  countCursorExtractFiles,
+  CURSOR_DIR_NAME,
+} = require("./ai-history/cursor");
 const { isContinueRoot, listContinueSessionFiles, CONTINUE_DIR } = require("./ai-history/continue");
 const { isWindsurfUserDir } = require("./ai-history/windsurf");
 const {
@@ -25,12 +35,18 @@ const {
   CHAT_SESSIONS_DIR,
   WORKSPACE_STORAGE,
 } = require("./ai-history/copilot");
+const {
+  COPILOT_CLI_DIR_NAME,
+  isCopilotCliRoot,
+  countCopilotCliExtractFiles,
+} = require("./ai-history/copilot-cli");
 
 const CLAUDE_DIR_NAME = ".claude";
 const CLAUDE_DESKTOP_SESSION_DIRS = ["claude-code-sessions", "local-agent-mode-sessions"];
 const KIND_LABELS = {
   aiClaude: "Claude Code (AI query history)",
   aiCodex: "OpenAI Codex (AI query history)",
+  aiGrokBuild: "Grok Build (AI query history)",
   aiChatgpt: "ChatGPT Desktop (AI query history)",
   aiGemini: "Gemini CLI (AI query history)",
   aiCursor: "Cursor (AI query history)",
@@ -127,6 +143,7 @@ function scanAiArtifacts(dir, opts = {}) {
   const scanRootResolved = path.resolve(dir);
   const claudeCode = [];
   const codex = [];
+  const grokBuild = [];
   const chatgpt = [];
   const geminiCli = [];
   const cursor = [];
@@ -135,6 +152,7 @@ function scanAiArtifacts(dir, opts = {}) {
   const continueCli = [];
   const seenClaude = new Set();
   const seenCodex = new Set();
+  const seenGrokBuild = new Set();
   const seenChatgpt = new Set();
   const seenGemini = new Set();
   const seenCursor = new Set();
@@ -180,6 +198,17 @@ function scanAiArtifacts(dir, opts = {}) {
         }
       }
 
+      if (e.name === GROK_DIR_NAME && isGrokBuildRoot(full, { quick: true })) {
+        if (!seenGrokBuild.has(full) && grokBuild.length < maxPerKind) {
+          seenGrokBuild.add(full);
+          grokBuild.push({
+            path: full,
+            username: extractUsername(full),
+            sessionCount: countGrokDataFiles(full),
+          });
+        }
+      }
+
       if (classifyChatgptDir(full)) {
         if (!seenChatgpt.has(full) && chatgpt.length < maxPerKind) {
           seenChatgpt.add(full);
@@ -206,6 +235,28 @@ function scanAiArtifacts(dir, opts = {}) {
             path: full,
             username: extractUsername(full),
             sessionCount: countCursorExtractFiles(full),
+          });
+        }
+      }
+
+      if (e.name === "User" && path.basename(d) === "Cursor" && isCursorUserDataDir(full)) {
+        if (!seenCursor.has(full) && cursor.length < maxPerKind) {
+          seenCursor.add(full);
+          cursor.push({
+            path: full,
+            username: extractUsername(full),
+            sessionCount: countCursorExtractFiles(full),
+          });
+        }
+      }
+
+      if (e.name === COPILOT_CLI_DIR_NAME && isCopilotCliRoot(full, { quick: true })) {
+        if (!seenCopilot.has(full) && copilot.length < maxPerKind) {
+          seenCopilot.add(full);
+          copilot.push({
+            path: full,
+            username: extractUsername(full),
+            sessionCount: countCopilotCliExtractFiles(full),
           });
         }
       }
@@ -285,6 +336,7 @@ function scanAiArtifacts(dir, opts = {}) {
   return {
     claudeCode,
     codex,
+    grokBuild,
     chatgpt,
     geminiCli,
     cursor,

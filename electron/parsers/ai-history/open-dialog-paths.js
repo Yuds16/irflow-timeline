@@ -10,6 +10,7 @@ const {
   listClaudeCodeCandidatePaths,
   listChatgptCandidatePaths,
   defaultCursorHome,
+  defaultCopilotCliHome,
   defaultCopilotWorkspaceStorage,
   listWindsurfUserDataDirs,
   defaultContinueHome,
@@ -20,8 +21,11 @@ const {
   isClaudeCodeArtifactRoot,
   isCopilotWorkspaceStorageRoot,
   isCursorHome,
+  isCursorUserDataDir,
+  isCopilotCliRoot,
 } = require("./artifact-paths");
 const { defaultCodexHome, isCodexDir } = require("./codex");
+const { defaultGrokHome, isGrokBuildRoot } = require("./grok-build");
 const { isChatgptAppDirQuick } = require("./chatgpt");
 const { hasGeminiSessionsQuick } = require("./gemini-cli");
 const { isWindsurfUserDir } = require("./windsurf");
@@ -42,10 +46,12 @@ function hasDecodedAiHistoryAtPath(tool, dirPath) {
   switch (tool) {
     case "claude-code": return isClaudeCodeArtifactRoot(dirPath);
     case "codex": return isCodexDir(dirPath);
+    case "grok-build": return isGrokBuildRoot(dirPath, { quick: true });
     case "chatgpt": return isChatgptAppDirQuick(dirPath);
     case "gemini-cli": return hasGeminiSessionsQuick(dirPath);
-    case "cursor": return isCursorHome(dirPath);
-    case "copilot": return isCopilotWorkspaceStorageRoot(dirPath, { quick: true });
+    case "cursor": return isCursorHome(dirPath) || isCursorUserDataDir(dirPath);
+    case "copilot": return isCopilotCliRoot(dirPath, { quick: true })
+      || isCopilotWorkspaceStorageRoot(dirPath, { quick: true });
     case "windsurf": return isWindsurfUserDir(dirPath);
     case "continue": return isContinueRoot(dirPath);
     default: return false;
@@ -77,9 +83,12 @@ function defaultDecodeAiHistoryDialogPath(tool) {
     "claude-code": listClaudeCodeCandidatePaths().find((c) => c.kind === "cli")?.path
       || path.join(home, ".claude"),
     codex: defaultCodexHome(),
+    "grok-build": defaultGrokHome(),
     "gemini-cli": path.join(home, GEMINI_DIR_NAME),
     cursor: defaultCursorHome(),
-    copilot: defaultCopilotWorkspaceStorage(),
+    copilot: fs.existsSync(defaultCopilotCliHome())
+      ? defaultCopilotCliHome()
+      : defaultCopilotWorkspaceStorage(),
     windsurf: listWindsurfUserDataDirs()[0] || defaultWindsurfUserDir(),
     continue: defaultContinueHome(),
   };
@@ -93,9 +102,11 @@ function defaultAiHistoryOpenPath() {
   const candidates = [
     ...listClaudeCodeCandidatePaths().map((c) => c.path),
     defaultCodexHome(),
+    defaultGrokHome(),
     defaultCursorHome(),
     ...listChatgptCandidatePaths(),
     path.join(home, GEMINI_DIR_NAME),
+    defaultCopilotCliHome(),
     defaultCopilotWorkspaceStorage(),
     listWindsurfUserDataDirs()[0],
     defaultContinueHome(),
@@ -115,10 +126,11 @@ function aiHistoryOpenDialogFilters() {
     { name: "NTFS ($MFT, $J)", extensions: ["mft", "bin"] },
     { name: "Claude Code (.claude / JSONL)", extensions: ["jsonl"] },
     { name: "OpenAI Codex (.codex / JSONL)", extensions: ["jsonl"] },
-    { name: "ChatGPT Desktop (LevelDB / SQLite)", extensions: ["ldb", "log", "db", "sqlite", "sqlite3"] },
-    { name: "Gemini CLI (.gemini / session JSON)", extensions: ["json"] },
-    { name: "Cursor (.cursor / transcripts)", extensions: ["jsonl", "txt"] },
-    { name: "GitHub Copilot (chatSessions / JSONL)", extensions: ["json", "jsonl"] },
+    { name: "Grok Build (.grok / JSONL)", extensions: ["json", "jsonl", "log"] },
+    { name: "ChatGPT Desktop (bundles / LevelDB / SQLite)", extensions: ["data", "ldb", "log", "db", "sqlite", "sqlite3"] },
+    { name: "Gemini CLI (.gemini / session JSONL)", extensions: ["json", "jsonl", "*"] },
+    { name: "Cursor (transcripts / local databases)", extensions: ["jsonl", "txt", "db", "vscdb"] },
+    { name: "GitHub Copilot (VS Code / CLI artifacts)", extensions: ["json", "jsonl", "yaml", "yml", "md", "db", "log"] },
     { name: "VS Code / Windsurf (state.vscdb)", extensions: ["vscdb", "db"] },
     { name: "Continue (.continue sessions)", extensions: ["json"] },
   ];

@@ -53,6 +53,24 @@ test("prepareChunkRowsForDb slims FullText by default but keeps it when asked", 
   assert.equal(kept[0].FullText, "the complete body", "single-import path keeps FullText");
 });
 
+test("prepareChunkRowsForDb retains exact tool evidence on streamed and single imports", () => {
+  const build = () => [makeRow({
+    role: "assistant",
+    summary: "[Tool: Shell]",
+    toolName: "Shell",
+    toolCommand: "ls -la \"/tmp/evidence folder\"",
+    toolInput: "{\"command\":\"ls -la \\\"/tmp/evidence folder\\\"\",\"description\":\"List evidence\"}",
+    toolDescription: "List evidence",
+  }, "Cursor")];
+  const streamed = prepareChunkRowsForDb(build(), 1, 10, 0);
+  const single = prepareChunkRowsForDb(build(), 1, 10, 0, { keepFullText: true });
+  for (const row of [streamed[0], single[0]]) {
+    assert.equal(row.ToolCommand, "ls -la \"/tmp/evidence folder\"");
+    assert.equal(row.ToolDescription, "List evidence");
+    assert.match(row.ToolInput, /evidence folder/);
+  }
+});
+
 test("makeSourceAccumulator bounds a source to the remaining row budget", () => {
   const acc = makeSourceAccumulator(5);
   acc.add([1, 2, 3], 0);

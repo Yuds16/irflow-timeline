@@ -22,6 +22,8 @@ test("aiHistoryQueryIpcOptions previews FullText instead of omitting it", () => 
   const opts = aiHistoryQueryIpcOptions();
   assert.ok(!opts.omitHeaders?.includes("FullText"));
   assert.equal(opts.truncateColumns.FullText, 240);
+  assert.equal(opts.truncateColumns.ToolInput, 2048);
+  assert.equal(opts.truncateColumns.ToolCommand, undefined, "exact commands are not shortened in the grid");
 });
 
 test("aiHistoryDetailPinnedFields surfaces RecordType tokens and sidechain", () => {
@@ -38,6 +40,22 @@ test("aiHistoryDetailPinnedFields surfaces RecordType tokens and sidechain", () 
   assert.ok(fields.includes("IsSidechain"));
   assert.equal(pinned.find((p) => p.field === "Tokens").value, "in 1200 · out 340");
   assert.equal(aiHistoryDetailPinnedFields({ IsSidechain: "false" }).length, 0);
+});
+
+test("aiHistoryDetailPinnedFields surfaces exact tool commands and descriptions", () => {
+  const pinned = aiHistoryDetailPinnedFields({
+    InvokedTool: "Shell",
+    ToolCommand: "ls -la \"/tmp/evidence\"",
+    ToolDescription: "List evidence",
+  });
+  assert.deepEqual(
+    pinned.map((item) => [item.label, item.value]),
+    [
+      ["Invoked tool", "Shell"],
+      ["Exact command", "ls -la \"/tmp/evidence\""],
+      ["Tool description", "List evidence"],
+    ],
+  );
 });
 
 test("aiHistoryDetailHeaderOrder puts pinned columns first", () => {

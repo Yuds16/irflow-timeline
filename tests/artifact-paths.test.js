@@ -16,10 +16,10 @@ const {
 } = require("../electron/parsers/ai-history/artifact-paths");
 const { discoverLocalAiHistoryRoots } = require("../electron/parsers/ai-history/profile-scan");
 
-test("getLocalAiHistoryCandidates includes all eight tools", () => {
+test("getLocalAiHistoryCandidates includes all nine tools", () => {
   const tools = new Set(getLocalAiHistoryCandidates().map((c) => c.tool));
   assert.deepEqual(tools, new Set([
-    "claude-code", "codex", "gemini-cli", "cursor", "chatgpt", "copilot",
+    "claude-code", "codex", "grok-build", "gemini-cli", "cursor", "chatgpt", "copilot",
     "windsurf", "continue",
   ]));
 });
@@ -44,9 +44,16 @@ test("Copilot products include VSCodium", () => {
 });
 
 test("ARTIFACT_PATH_REFERENCES documents each tool", () => {
-  for (const tool of ["claude-code", "codex", "chatgpt", "gemini-cli", "cursor", "copilot"]) {
+  for (const tool of ["claude-code", "codex", "grok-build", "chatgpt", "gemini-cli", "cursor", "copilot"]) {
     assert.ok(ARTIFACT_PATH_REFERENCES[tool]?.paths?.length >= 1);
   }
+  assert.ok(ARTIFACT_PATH_REFERENCES.cursor.paths.some((entry) => (
+    entry.path.includes("conversation-search.db")
+  )));
+  assert.ok(ARTIFACT_PATH_REFERENCES.copilot.paths.some((entry) => (
+    entry.path.includes(".copilot") && entry.path.includes("events.jsonl")
+  )));
+  assert.match(ARTIFACT_PATH_REFERENCES.copilot.notes, /secret stores are deliberately excluded/i);
 });
 
 test("isClaudeCodeArtifactRoot accepts CLI fixture", () => {

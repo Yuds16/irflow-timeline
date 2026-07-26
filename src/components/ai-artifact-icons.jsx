@@ -6,7 +6,7 @@
 
 const VIEW = "0 0 24 24";
 
-// Brand tints — recognizable colors + initials, not trademarked logos. Mirror TOOL_BRAND.
+// Brand tints used by the compact menu badges. Mirror TOOL_BRAND.
 const BRAND = {
   claude: "#D97757",   // Anthropic Claude coral (the app-icon orange)
   openai: "#10A37F",   // OpenAI green (ChatGPT)
@@ -69,6 +69,23 @@ export function OpenAiMenuIcon() {
       <circle cx="12" cy="12" r="10" fill={soft} />
       <path fill="none" stroke={a} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" d="M8.4 8l3.3 4-3.3 4" />
       <path fill="none" stroke={a} strokeWidth="2" strokeLinecap="round" d="M12.9 16.1h3.6" />
+    </MenuSvg>
+  );
+}
+
+/** Grok Build — compact black-and-white Grok mark. */
+export function GrokMenuIcon() {
+  return (
+    <MenuSvg>
+      <circle cx="12" cy="12" r="10" fill="#050505" />
+      <path
+        fill="#fff"
+        d="M17.55 5.72a8.18 8.18 0 0 0-10.7-.15 8.17 8.17 0 0 0-.94 11.56l1.66-1.55a5.92 5.92 0 0 1 .78-8.29 5.91 5.91 0 0 1 7.56-.12l1.64-1.45Z"
+      />
+      <path
+        fill="#fff"
+        d="m3.24 20.76 11.64-9.98c.46-.39 1.15-.24 1.4.31a5.92 5.92 0 0 1-8.75 7.35l-1.66 1.55a8.18 8.18 0 0 0 12.21-10.7L21.2 2.8 10.68 14.6l-7.44 6.16Z"
+      />
     </MenuSvg>
   );
 }

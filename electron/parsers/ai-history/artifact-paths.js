@@ -5,10 +5,11 @@
  * - Claude Code CLI: ~/.claude/ (history.jsonl, projects/.../*.jsonl) — claudecodehq.com, DFIR lab notes
  * - Claude Desktop "Code" tab: ~/Library/Application Support/Claude/claude-code-sessions/ (separate from CLI) — tielec.blog
  * - OpenAI Codex: ~/.codex/ (CODEX_HOME), sessions/YYYY/MM/DD/rollout-*.jsonl — openai/codex recorder.rs
+ * - xAI Grok Build: ~/.grok/ (GROK_HOME), sessions/<encoded-cwd>/<session-id> — xai-org/grok-build
  * - ChatGPT Desktop: com.openai.chat, Atlas, MS Store Packages — as-aix, pvieito.com, garr3ttmjo writeup
- * - Gemini CLI: ~/.gemini/tmp/<hash>/chats/session-*.json — google-gemini/gemini-cli session-management.md
- * - Cursor: ~/.cursor/projects/.../agent-transcripts/*.jsonl — vibe-replay.com, entireio/cli PR #527
- * - GitHub Copilot: Code/Code Insiders workspaceStorage chatSessions — VS Code wiki (remember-mcp-vscode)
+ * - Gemini CLI: ~/.gemini/tmp/<hash>/chats/*.jsonl + shell_history — google-gemini/gemini-cli
+ * - Cursor: ~/.cursor agent transcripts plus Cursor/User conversation-search.db and state.vscdb
+ * - GitHub Copilot: VS Code chatSessions plus $COPILOT_HOME/~/.copilot CLI session-state — GitHub Docs
  */
 
 const fs = require("fs");
@@ -16,7 +17,13 @@ const os = require("os");
 const path = require("path");
 
 const { defaultCodexHome, isCodexDir } = require("./codex");
+const { defaultGrokHome, isGrokBuildRoot } = require("./grok-build");
 const { isChatgptAppDir } = require("./chatgpt");
+const { isCursorUserDataDir } = require("./cursor-composer");
+const {
+  defaultCopilotCliHome,
+  isCopilotCliRoot,
+} = require("./copilot-cli");
 
 function dirHasJsonlFiles(rootDir, maxDepth = 12) {
   if (!rootDir || !fs.existsSync(rootDir)) return false;
@@ -124,7 +131,7 @@ function listCursorUserDataDirs() {
 /** Desktop session metadata dirs (2026+ and pre-migration legacy name). */
 const CLAUDE_DESKTOP_SESSION_DIR_NAMES = [
   "claude-code-sessions",
-  "local-agent-mode-sessions", // renamed early 2026 — anthropic/claude-code#29373
+  "local-agent-mode-sessions", // Cowork isolated sessions; older builds also used it as metadata-only
 ];
 
 function listClaudeDesktopSessionRoots() {
@@ -222,8 +229,12 @@ function getLocalAiHistoryCandidates() {
     out.push({ tool: "claude-code", path: p });
   }
   out.push({ tool: "codex", path: defaultCodexHome() });
+  out.push({ tool: "grok-build", path: defaultGrokHome() });
   out.push({ tool: "gemini-cli", path: path.join(home, GEMINI_DIR_NAME) });
   out.push({ tool: "cursor", path: defaultCursorHome() });
+  for (const p of listCursorUserDataDirs()) {
+    out.push({ tool: "cursor", path: p });
+  }
   out.push({ tool: "continue", path: defaultContinueHome() });
   out.push({ tool: "windsurf", path: defaultWindsurfUserDir() });
 
@@ -231,6 +242,7 @@ function getLocalAiHistoryCandidates() {
     out.push({ tool: "chatgpt", path: p });
   }
 
+  out.push({ tool: "copilot", path: defaultCopilotCliHome() });
   for (const p of listCopilotWorkspaceStorageCandidates()) {
     out.push({ tool: "copilot", path: p });
   }
@@ -336,33 +348,44 @@ const FORENSIC_AI_PATH_HINTS = {
   windows: [
     "Users\\<user>\\.claude\\",
     "Users\\<user>\\.codex\\",
+    "Users\\<user>\\.grok\\",
     "Users\\<user>\\.cursor\\",
+    "Users\\<user>\\.copilot\\",
     "Users\\<user>\\.gemini\\",
     "Users\\<user>\\AppData\\Roaming\\Claude\\claude-code-sessions\\",
+    "Users\\<user>\\AppData\\Roaming\\Claude\\local-agent-mode-sessions\\",
     "Users\\<user>\\AppData\\Roaming\\OpenAI\\ChatGPT\\",
     "Users\\<user>\\AppData\\Local\\Packages\\OpenAI.ChatGPT-*\\LocalCache\\Roaming\\ChatGPT\\",
     "Users\\<user>\\AppData\\Roaming\\Code\\User\\workspaceStorage\\",
     "Users\\<user>\\AppData\\Roaming\\Code - Insiders\\User\\workspaceStorage\\",
     "Users\\<user>\\AppData\\Roaming\\VSCodium\\User\\workspaceStorage\\",
+    "Users\\<user>\\AppData\\Roaming\\Cursor\\User\\globalStorage\\conversation-search.db",
   ],
   linux: [
     "home/<user>/.claude/",
     "home/<user>/.codex/",
+    "home/<user>/.grok/",
     "home/<user>/.cursor/",
+    "home/<user>/.copilot/",
     "home/<user>/.gemini/",
     "home/<user>/.config/com.openai.chat/",
     "home/<user>/.config/Code/User/workspaceStorage/",
     "home/<user>/.config/VSCodium/User/workspaceStorage/",
+    "home/<user>/.config/Cursor/User/globalStorage/conversation-search.db",
   ],
   macos: [
     "Users/<user>/.continue/sessions/",
     "Users/<user>/.claude/",
     "Users/<user>/.codex/",
+    "Users/<user>/.grok/",
     "Users/<user>/.cursor/",
+    "Users/<user>/.copilot/",
     "Users/<user>/.gemini/",
     "Users/<user>/Library/Application Support/Claude/claude-code-sessions/",
+    "Users/<user>/Library/Application Support/Claude/local-agent-mode-sessions/",
     "Users/<user>/Library/Application Support/com.openai.chat/",
     "Users/<user>/Library/Application Support/Code/User/workspaceStorage/",
+    "Users/<user>/Library/Application Support/Cursor/User/globalStorage/conversation-search.db",
     "Users/<user>/Library/Application Support/Windsurf/User/workspaceStorage/",
   ],
 };
@@ -375,14 +398,21 @@ const ARTIFACT_PATH_REFERENCES = {
       { platform: "macOS/Linux/WSL", path: "~/.claude/ (history.jsonl + projects/**/*.jsonl)" },
       { platform: "macOS", path: "~/Library/Application Support/Claude/claude-code-sessions/ (Desktop metadata local_*.json)" },
       { platform: "Windows", path: "%APPDATA%\\Claude\\claude-code-sessions\\" },
-      { platform: "all", path: ".../Claude/local-agent-mode-sessions/ (legacy Desktop name, pre-2026 migration)" },
+      { platform: "all", path: ".../Claude/local-agent-mode-sessions/ (Cowork metadata, isolated .claude/projects transcripts, audit*.jsonl)" },
     ],
   },
   codex: {
     label: "OpenAI Codex",
     paths: [
-      { platform: "all", path: "$CODEX_HOME or ~/.codex/ (history.jsonl, sessions/**/rollout-*.jsonl, archived_sessions/)" },
+      { platform: "all", path: "$CODEX_HOME or ~/.codex/ (history.jsonl, sessions/**/rollout-*.jsonl, archived_sessions/, state*.sqlite + WAL/SHM)" },
     ],
+  },
+  "grok-build": {
+    label: "Grok Build",
+    paths: [
+      { platform: "all", path: "$GROK_HOME or ~/.grok/ (sessions/**/prompt_history.jsonl + <session-id>/{summary,updates,chat_history,hunk_records}.json*)" },
+    ],
+    notes: "auth.json and mcp_credentials.json are sensitive configuration artifacts and are deliberately not parsed into timeline rows.",
   },
   chatgpt: {
     label: "ChatGPT Desktop",
@@ -392,12 +422,15 @@ const ARTIFACT_PATH_REFERENCES = {
       { platform: "Windows", path: "%APPDATA%\\OpenAI\\ChatGPT\\ and MS Store LocalCache\\...\\ChatGPT" },
       { platform: "Linux", path: "~/.config/com.openai.chat/ (and variants)" },
     ],
-    notes: "Newer macOS builds may encrypt conversations-v2-* (Keychain); LevelDB/SQLite metadata still extractable when present.",
+    notes: "conversations-v2-* and opaque conversations-v3-*/*.data bundles are inventoried even when message bodies cannot be decoded; LevelDB/SQLite content is extracted when present.",
   },
   "gemini-cli": {
     label: "Gemini CLI",
     paths: [
-      { platform: "all", path: "~/.gemini/tmp/<project_hash>/chats/session-*.json" },
+      { platform: "all", path: "~/.gemini/tmp/<project_hash>/chats/session-*.jsonl (current append-only sessions)" },
+      { platform: "all", path: "~/.gemini/tmp/<project_hash>/chats/<parent-session>/<subagent>.jsonl" },
+      { platform: "all", path: "~/.gemini/tmp/<project_hash>/shell_history" },
+      { platform: "all", path: "~/.gemini/tmp/<project_hash>/chats/session-*.json (legacy)" },
       { platform: "all", path: "~/.gemini/tmp/<project_hash>/logs.json (legacy CLI log)" },
       { platform: "all", path: "~/.gemini/tmp/<project_hash>/checkpoint-*.json (/chat save)" },
     ],
@@ -406,16 +439,22 @@ const ARTIFACT_PATH_REFERENCES = {
     label: "Cursor",
     paths: [
       { platform: "all", path: "$CURSOR_AGENT_HOME or ~/.cursor/projects/<slug>/agent-transcripts/**/*.jsonl" },
+      { platform: "macOS", path: "~/Library/Application Support/Cursor/User/globalStorage/conversation-search.db" },
+      { platform: "Windows", path: "%APPDATA%\\Cursor\\User\\globalStorage\\conversation-search.db" },
+      { platform: "Linux", path: "~/.config/Cursor/User/globalStorage/conversation-search.db" },
     ],
-    notes: "Composer chat DBs under ~/.cursor/chats/ (store.db) and global/workspace state.vscdb are parsed when collected.",
+    notes: "Composer chat DBs under ~/.cursor/chats/ (store.db), global/workspace state.vscdb, and conversation-search.db FTS bodies are parsed when collected.",
   },
   copilot: {
     label: "GitHub Copilot",
     paths: [
       { platform: "all", path: "<VS Code User>/workspaceStorage/<hash>/chatSessions/*.json|.jsonl" },
       { platform: "all", path: "<VS Code User>/globalStorage/emptyWindowChatSessions/" },
+      { platform: "all", path: "$COPILOT_HOME or ~/.copilot/session-state/<session-id>/events.jsonl" },
+      { platform: "all", path: "~/.copilot/session-state/<session-id>/{workspace.yaml,plan.md,checkpoints/,files/}" },
+      { platform: "all", path: "~/.copilot/{command-history-state/,session-store.db,logs/}" },
     ],
-    notes: "Products: Code, Code - Insiders, VSCodium (+ Insiders).",
+    notes: "VS Code products: Code, Code - Insiders, VSCodium (+ Insiders). Copilot CLI authentication/config.json and MCP OAuth/secret stores are deliberately excluded.",
   },
 };
 
@@ -429,11 +468,13 @@ module.exports = {
   appSupportDir,
   localAppDataDir,
   defaultCursorHome,
+  defaultGrokHome,
   listCursorUserDataDirs,
   listWindsurfUserDataDirs,
   defaultWindsurfUserDir,
   defaultContinueHome,
   defaultCopilotWorkspaceStorage,
+  defaultCopilotCliHome,
   listClaudeCodeCandidatePaths,
   listClaudeDesktopSessionRoots,
   listChatgptCandidatePaths,
@@ -444,8 +485,11 @@ module.exports = {
   isClaudeDir,
   isClaudeDesktopSessionsRoot,
   isClaudeCodeArtifactRoot,
+  isGrokBuildRoot,
   isChatgptAppDir,
   isCursorHome,
+  isCursorUserDataDir,
   isGeminiCliRoot,
   isCopilotWorkspaceStorageRoot,
+  isCopilotCliRoot,
 };

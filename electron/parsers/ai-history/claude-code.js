@@ -12,6 +12,7 @@ const { readJsonlBounded } = require("./jsonl-reader");
 
 const { dbg } = require("../../logger");
 const { TOOL_CLAUDE_CODE } = require("./schema");
+const { buildToolEvidence } = require("./tool-evidence");
 const { shouldSkipSubagentPath, filterSidechainRows, tickFileProgress } = require("./extract-plan");
 const { processFilesConcurrently } = require("./file-batch");
 const {
@@ -28,18 +29,60 @@ function claudeRow(fields) {
 }
 
 function parseRecordTimestamp(obj) {
-  if (obj.timestamp == null) return null;
-  if (typeof obj.timestamp === "number" && Number.isFinite(obj.timestamp)) {
+  const raw = obj.timestamp ?? obj._audit_timestamp ?? obj.createdAt ?? obj.updatedAt ?? obj.lastActivityAt;
+  if (raw == null) return null;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
     // Heuristic shared with the other parsers: >1e12 is already epoch-ms,
     // a smaller value is epoch-seconds and must be scaled to ms.
-    return obj.timestamp > 1e12 ? obj.timestamp : obj.timestamp * 1000;
+    return raw > 1e12 ? raw : raw * 1000;
   }
-  return parseIsoTimestamp(obj.timestamp);
+  return parseIsoTimestamp(raw);
 }
 
-/** Extract text, tool names, and thinking flag from message.content. */
+function serializeContentValue(value) {
+  if (value == null) return "";
+  if (typeof value === "string") return value.trim();
+  if (Array.isArray(value)) {
+    return value.map((item) => {
+      if (typeof item === "string") return item.trim();
+      if (!item || typeof item !== "object") return "";
+      if (["text", "input_text", "output_text"].includes(item.type) && item.text != null) {
+        return String(item.text).trim();
+      }
+      if (item.type === "image") {
+        const media = item.source?.media_type || item.media_type || "";
+        return media ? `[Image: ${media}]` : "[Image]";
+      }
+      try { return JSON.stringify(item); } catch { return String(item); }
+    }).filter(Boolean).join("\n");
+  }
+  try { return JSON.stringify(value); } catch { return String(value); }
+}
+
+function attachmentSummary(attachment) {
+  if (!attachment || typeof attachment !== "object") return "[Attachment]";
+  const kind = attachment.type ? String(attachment.type) : "attachment";
+  const names = [
+    attachment.fileName,
+    attachment.filename,
+    attachment.name,
+    ...(Array.isArray(attachment.addedNames) ? attachment.addedNames : []),
+    ...(Array.isArray(attachment.removedNames) ? attachment.removedNames : []),
+  ].filter((v) => v != null && String(v).trim()).map(String);
+  return names.length
+    ? `[Attachment: ${kind}] ${[...new Set(names)].join(", ")}`
+    : `[Attachment: ${kind}]`;
+}
+
+/** Extract text, tool calls, and thinking/result flags from message.content. */
 function extractContentParts(content) {
-  const result = { textParts: [], toolNames: [], hasThinking: false, hasToolResult: false };
+  const result = {
+    textParts: [],
+    toolNames: [],
+    toolCalls: [],
+    hasThinking: false,
+    hasToolResult: false,
+  };
   if (content == null) return result;
   if (typeof content === "string") {
     const s = content.trim();
@@ -54,14 +97,27 @@ function extractContentParts(content) {
     if (type === "text" && item.text) {
       const t = String(item.text).trim();
       if (t) result.textParts.push(t);
-    } else if (type === "tool_use" && item.name) {
-      result.toolNames.push(String(item.name));
-      result.textParts.push(`[Tool: ${item.name}]`);
+    } else if ((type === "tool_use" || type === "function_call") && (item.name || item.function?.name)) {
+      const name = String(item.name || item.function.name);
+      const input = item.input ?? item.arguments ?? item.function?.arguments;
+      result.toolNames.push(name);
+      result.toolCalls.push({ name, input });
+      result.textParts.push(`[Tool: ${name}]`);
     } else if (type === "tool_result") {
       result.hasToolResult = true;
-      result.textParts.push("[Tool Result]");
+      const output = serializeContentValue(item.content ?? item.output ?? item.result);
+      result.textParts.push(output ? `[Tool Result]\n${output}` : "[Tool Result]");
     } else if (type === "thinking") {
       result.hasThinking = true;
+    } else if (type === "image" || type === "input_image") {
+      const media = item.source?.media_type || item.media_type || "";
+      result.textParts.push(media ? `[Image: ${media}]` : "[Image]");
+    } else if (type === "document") {
+      const title = item.title || item.name || item.source?.name || "";
+      result.textParts.push(title ? `[Document: ${title}]` : "[Document]");
+    } else if (type === "fallback") {
+      const fallback = serializeContentValue(item.content ?? item.text);
+      if (fallback) result.textParts.push(fallback);
     }
   }
   return result;
@@ -76,9 +132,8 @@ function extractContentText(content) {
   return text.trim();
 }
 
-function extractToolNameField(content) {
-  const parts = extractContentParts(content);
-  return [...new Set(parts.toolNames)].join(", ");
+function extractToolEvidence(content) {
+  return buildToolEvidence(extractContentParts(content).toolCalls);
 }
 
 /** Pull prompt text from a history.jsonl record (schema varies by Claude Code version). */
@@ -113,14 +168,32 @@ function buildGenericSummary(obj, recordType) {
   switch (recordType) {
     case "file-history-snapshot":
       return "[File history snapshot]";
+    case "file-history-delta":
+      return obj.trackingPath
+        ? `[File history delta] ${obj.trackingPath}`
+        : "[File history delta]";
     case "system":
       return obj.subtype ? `[System: ${obj.subtype}]` : "[System event]";
     case "attachment":
-      return obj.title || obj.aiTitle || "[Attachment]";
+      return obj.title || obj.aiTitle || attachmentSummary(obj.attachment);
     case "ai-title":
       return obj.aiTitle || obj.title || "[AI title]";
     case "last-prompt":
       return obj.lastPrompt || obj.prompt || "[Last prompt]";
+    case "mode":
+      return obj.mode ? `[Mode: ${obj.mode}]` : "[Mode]";
+    case "permission-mode":
+      return obj.permissionMode ? `[Permission mode: ${obj.permissionMode}]` : "[Permission mode]";
+    case "agent-name":
+      return obj.agentName ? `[Agent: ${obj.agentName}]` : "[Agent name]";
+    case "bridge-session":
+      return obj.bridgeSessionId ? `[Bridge session: ${obj.bridgeSessionId}]` : "[Bridge session]";
+    case "started":
+      return obj.agentId ? `[Agent started: ${obj.agentId}]` : "[Agent started]";
+    case "result": {
+      const result = serializeContentValue(obj.result);
+      return result ? `[Result] ${result}` : "[Result]";
+    }
     case "queue-operation":
       return obj.operation ? `[Queue: ${obj.operation}]` : "[Queue operation]";
     case "progress":
@@ -137,6 +210,22 @@ function buildGenericSummary(obj, recordType) {
     return truncateSummary(obj.content);
   }
   return `[${recordType}]`;
+}
+
+function genericFullText(obj, recordType, summary) {
+  if (recordType === "attachment") return serializeContentValue(obj.attachment) || summary;
+  if (recordType === "result") return serializeContentValue(obj.result) || summary;
+  if (recordType === "last-prompt") return serializeContentValue(obj.lastPrompt ?? obj.prompt) || summary;
+  if (recordType === "file-history-delta") {
+    return serializeContentValue({
+      trackingPath: obj.trackingPath,
+      backup: obj.backup,
+      messageId: obj.messageId,
+      snapshotMessageId: obj.snapshotMessageId,
+    }) || summary;
+  }
+  const message = obj.message && typeof obj.message === "object" ? obj.message : null;
+  return message?.content ? extractContentText(message.content) : summary;
 }
 
 function inferRole(obj, recordType) {
@@ -177,33 +266,36 @@ function parseHistoryLine(obj, sourceFile, attribution = {}) {
 }
 
 /** Parse one session / project JSONL line (all record types). */
-function parseSessionLine(obj, sourceFile, attribution = {}) {
+function parseSessionLine(obj, sourceFile, attribution = {}, parseOptions = {}) {
   const recordType = obj.type != null ? String(obj.type) : "unknown";
+  const outputRecordType = `${parseOptions.recordTypePrefix || ""}${recordType}`;
   const tsMs = parseRecordTimestamp(obj);
-  if (tsMs == null) return null;
+  const timestamp = tsMs == null ? "" : formatTimestampUtc(tsMs);
 
   const message = obj.message && typeof obj.message === "object" ? obj.message : null;
-  const isSidechain = obj.isSidechain === true;
+  const isSidechain = obj.isSidechain === true || obj.parent_tool_use_id != null;
   const gitBranch = obj.gitBranch != null ? String(obj.gitBranch) : "";
 
   if (recordType === "user" || recordType === "assistant") {
     const role = message?.role != null ? String(message.role) : recordType;
     const contentText = extractContentText(message?.content);
     if (!contentText) return null;
+    const toolEvidence = extractToolEvidence(message?.content);
 
     const usage = message?.usage && typeof message.usage === "object" ? message.usage : {};
     const inputTokens = Number(usage.input_tokens) || 0;
     const outputTokens = Number(usage.output_tokens) || 0;
 
     return claudeRow({
-      timestamp: formatTimestampUtc(tsMs),
+      timestamp,
       role,
-      recordType,
+      recordType: outputRecordType,
       summary: contentText,
-      toolName: extractToolNameField(message?.content),
-      sessionId: obj.sessionId != null ? String(obj.sessionId) : "",
+      fullText: contentText,
+      ...toolEvidence,
+      sessionId: obj.sessionId != null ? String(obj.sessionId) : (obj.session_id != null ? String(obj.session_id) : ""),
       messageId: obj.uuid != null ? String(obj.uuid) : "",
-      parentId: obj.parentUuid != null ? String(obj.parentUuid) : "",
+      parentId: obj.parentUuid != null ? String(obj.parentUuid) : (obj.parent_tool_use_id != null ? String(obj.parent_tool_use_id) : ""),
       workspace: obj.cwd != null ? String(obj.cwd) : "",
       isSidechain,
       gitBranch,
@@ -218,16 +310,18 @@ function parseSessionLine(obj, sourceFile, attribution = {}) {
 
   const summary = buildGenericSummary(obj, recordType);
   if (!summary) return null;
+  const toolEvidence = message?.content ? extractToolEvidence(message.content) : {};
 
   return claudeRow({
-    timestamp: formatTimestampUtc(tsMs),
+    timestamp,
     role: inferRole(obj, recordType),
-    recordType,
+    recordType: outputRecordType,
     summary,
-    toolName: message?.content ? extractToolNameField(message.content) : "",
-    sessionId: obj.sessionId != null ? String(obj.sessionId) : "",
+    fullText: genericFullText(obj, recordType, summary),
+    ...toolEvidence,
+    sessionId: obj.sessionId != null ? String(obj.sessionId) : (obj.session_id != null ? String(obj.session_id) : ""),
     messageId: obj.uuid != null ? String(obj.uuid) : "",
-    parentId: obj.parentUuid != null ? String(obj.parentUuid) : "",
+    parentId: obj.parentUuid != null ? String(obj.parentUuid) : (obj.parent_tool_use_id != null ? String(obj.parent_tool_use_id) : ""),
     workspace: obj.cwd != null ? String(obj.cwd) : "",
     isSidechain,
     gitBranch,
@@ -289,9 +383,12 @@ function listSessionJsonlFiles(projectsDir, options = {}) {
 }
 
 function countClaudeExtractFiles(claudeDir, options = {}) {
-  const { isClaudeDesktopSessionsRoot, listDesktopMetadataFiles } = require("./claude-desktop");
+  const {
+    isClaudeDesktopSessionsRoot,
+    countClaudeDesktopExtractFiles,
+  } = require("./claude-desktop");
   if (isClaudeDesktopSessionsRoot(claudeDir) && path.basename(claudeDir) !== ".claude") {
-    return listDesktopMetadataFiles(claudeDir).length;
+    return countClaudeDesktopExtractFiles(claudeDir, options);
   }
   let n = 0;
   if (path.basename(claudeDir) === ".claude") {
@@ -439,6 +536,7 @@ function resolveClaudeDir(target) {
 module.exports = {
   extractContentText,
   extractContentParts,
+  extractToolEvidence,
   historyLineText,
   parseHistoryLine,
   parseSessionLine,

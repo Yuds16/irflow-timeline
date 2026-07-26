@@ -14,7 +14,7 @@ const { dbg } = require("../../logger");
 const { TOOL_CURSOR } = require("./schema");
 const { shouldSkipSubagentPath, filterSidechainRows, tickFileProgress } = require("./extract-plan");
 const { processFilesConcurrently } = require("./file-batch");
-const { extractContentText, extractContentParts } = require("./claude-code");
+const { extractContentText, extractToolEvidence } = require("./claude-code");
 const {
   formatWorkspaceDisplay,
   workspaceFromCursorTranscriptPath,
@@ -27,11 +27,10 @@ const {
   finalizeAiHistoryRows,
   assignLineNumber,
 } = require("./row-utils");
-
-function toolNamesFromContent(content) {
-  const parts = extractContentParts(content);
-  return [...new Set(parts.toolNames)].join(", ");
-}
+const {
+  isCursorUserDataDir,
+  listCursorComposerDbs,
+} = require("./cursor-composer");
 
 const CURSOR_DIR_NAME = ".cursor";
 const AGENT_TRANSCRIPTS = "agent-transcripts";
@@ -123,6 +122,7 @@ function parseTranscriptLine(obj, filePath, attribution, lineNumber, fallbackTsM
   const message = obj.message && typeof obj.message === "object" ? obj.message : {};
   const summary = extractContentText(message.content);
   if (!summary) return null;
+  const toolEvidence = extractToolEvidence(message.content);
 
   const tsMs = transcriptTimestampMs(obj, fallbackTsMs);
 
@@ -131,7 +131,7 @@ function parseTranscriptLine(obj, filePath, attribution, lineNumber, fallbackTsM
     role,
     recordType: role,
     summary,
-    toolName: toolNamesFromContent(message.content),
+    ...toolEvidence,
     sessionId: sessionIdFromTranscriptPath(filePath),
     messageId: obj.id != null ? String(obj.id) : "",
     workspace,
@@ -232,6 +232,10 @@ function isCursorHome(dirPath) {
   return fs.existsSync(path.join(dirPath, "projects"));
 }
 
+function isCursorDataRoot(dirPath) {
+  return isCursorHome(dirPath) || isCursorUserDataDir(dirPath);
+}
+
 function resolveCursorRoot(target) {
   if (!target) return null;
   let p = target;
@@ -240,17 +244,19 @@ function resolveCursorRoot(target) {
   } catch { return null; }
   for (let i = 0; i < 16; i++) {
     if (path.basename(p) === CURSOR_DIR_NAME && isCursorHome(p)) return p;
+    if (isCursorUserDataDir(p)) return p;
     const parent = path.dirname(p);
     if (parent === p) break;
     p = parent;
   }
-  if (isCursorHome(target)) return target;
+  if (isCursorDataRoot(target)) return target;
   return null;
 }
 
 function countCursorExtractFiles(cursorRoot, options = {}) {
   const projects = path.join(cursorRoot, "projects");
-  return listTranscriptJsonlFiles(projects, options).length;
+  return listTranscriptJsonlFiles(projects, options).length
+    + listCursorComposerDbs(cursorRoot, options.userDataDirs || []).length;
 }
 
 async function extractCursorDir(cursorRoot, attribution = {}, options = {}) {
@@ -327,7 +333,7 @@ async function extractCursorPath(target, attribution = {}, options = {}) {
 
   if (stat.isDirectory()) {
     const base = path.basename(target);
-    if (base === CURSOR_DIR_NAME && isCursorHome(target)) {
+    if (isCursorDataRoot(target)) {
       return extractCursorDir(target, attribution, options);
     }
     if (base === AGENT_TRANSCRIPTS || target.includes(`${path.sep}${AGENT_TRANSCRIPTS}${path.sep}`)) {
@@ -345,15 +351,19 @@ async function extractCursorPath(target, attribution = {}, options = {}) {
       return sorted;
     }
     if (base === "projects") {
-      return extractCursorDir(path.join(path.dirname(target), CURSOR_DIR_NAME), attribution, options);
+      return extractCursorDir(path.dirname(target), attribution, options);
     }
     const root = resolveCursorRoot(target);
     if (root) return extractCursorDir(root, attribution, options);
-    throw new Error("Not a Cursor .cursor directory (expected projects/ with agent-transcripts).");
+    throw new Error("Not a Cursor .cursor agent root or Cursor User data directory.");
   }
 
+  if (path.basename(target) === "conversation-search.db") {
+    const root = resolveCursorRoot(target);
+    if (root) return extractCursorDir(root, attribution, options);
+  }
   if (!isCursorTranscriptFile(target)) {
-    throw new Error("Expected a Cursor agent-transcripts .jsonl file or a .cursor directory.");
+    throw new Error("Expected a Cursor transcript, conversation-search.db, .cursor root, or Cursor User directory.");
   }
 
   const cursorHome = resolveCursorRoot(target);
@@ -369,6 +379,8 @@ module.exports = {
   CURSOR_DIR_NAME,
   AGENT_TRANSCRIPTS,
   isCursorHome,
+  isCursorUserDataDir,
+  isCursorDataRoot,
   isCursorTranscriptFile,
   resolveCursorRoot,
   listTranscriptJsonlFiles,

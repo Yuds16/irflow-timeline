@@ -2,6 +2,8 @@
 
 const { test } = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const os = require("node:os");
 const path = require("node:path");
 
 const {
@@ -39,6 +41,9 @@ test("parseCodexHistoryLine uses session_id and RecordType history", () => {
 
 test("isCodexForkedSession detects parent_session_id", () => {
   assert.equal(isCodexForkedSession({ id: "child", parent_session_id: "parent-1" }), true);
+  assert.equal(isCodexForkedSession({ id: "child", parent_thread_id: "parent-2" }), true);
+  assert.equal(isCodexForkedSession({ id: "child", forked_from_id: "parent-3" }), true);
+  assert.equal(isCodexForkedSession({ id: "child", thread_source: "subagent" }), true);
   assert.equal(isCodexForkedSession({ id: "main" }), false);
 });
 
@@ -61,7 +66,7 @@ test("parseRolloutEnvelope marks forked sessions as sidechain", () => {
   assert.equal(mainOnly.length, 0);
 });
 
-test("parseRolloutEnvelope handles messages and function_call", () => {
+test("parseRolloutEnvelope handles messages and preserves exact function-call evidence", () => {
   const ctx = { sessionId: "", workspace: "", model: "", threadIndex: new Map(), isSidechainSession: false };
   const meta = parseRolloutEnvelope({
     type: "session_meta",
@@ -82,17 +87,125 @@ test("parseRolloutEnvelope handles messages and function_call", () => {
   const tool = parseRolloutEnvelope({
     type: "response_item",
     timestamp: "2026-01-01T12:00:02.000Z",
-    payload: { type: "function_call", name: "shell", arguments: "{}", call_id: "c1" },
+    payload: {
+      type: "function_call",
+      name: "shell",
+      arguments: "{\"command\":[\"bash\",\"-lc\",\"printf '%s\\\\n' \\\"quoted value\\\"\"],\"description\":\"Run quoted command\"}",
+      call_id: "c1",
+    },
   }, "rollout.jsonl", ctx, {});
   assert.equal(tool.RecordType, "function_call");
   assert.equal(tool.InvokedTool, "shell");
+  assert.equal(tool.ToolCommand, "[\"bash\",\"-lc\",\"printf '%s\\\\n' \\\"quoted value\\\"\"]");
+  assert.equal(tool.ToolDescription, "Run quoted command");
+  assert.equal(
+    tool.ToolInput,
+    "{\"command\":[\"bash\",\"-lc\",\"printf '%s\\\\n' \\\"quoted value\\\"\"],\"description\":\"Run quoted command\"}",
+  );
+});
+
+test("parseRolloutEnvelope handles current custom tools, patches, context, and bounded outputs", () => {
+  const ctx = {
+    sessionId: "",
+    parentId: "",
+    workspace: "",
+    model: "",
+    gitBranch: "",
+    threadIndex: new Map(),
+    isSidechainSession: false,
+  };
+  const meta = parseRolloutEnvelope({
+    type: "session_meta",
+    timestamp: "2026-07-26T12:00:00.000Z",
+    payload: {
+      id: "child-thread",
+      parent_thread_id: "parent-thread",
+      thread_source: "subagent",
+      cwd: "/repo",
+      model_provider: "openai",
+      git: { branch: "feature/current-schema" },
+    },
+  }, "rollout.jsonl", ctx, {});
+  assert.equal(meta.ParentId, "parent-thread");
+  assert.equal(meta.IsSidechain, "true");
+  assert.equal(meta.GitBranch, "feature/current-schema");
+
+  const customCall = parseRolloutEnvelope({
+    type: "response_item",
+    timestamp: "2026-07-26T12:00:01.000Z",
+    payload: {
+      type: "custom_tool_call",
+      name: "apply_patch",
+      input: "*** Begin Patch\n*** End Patch",
+      call_id: "custom-1",
+    },
+  }, "rollout.jsonl", ctx, {});
+  assert.equal(customCall.RecordType, "custom_tool_call");
+  assert.equal(customCall.InvokedTool, "apply_patch");
+  assert.equal(customCall.ToolInput, "*** Begin Patch\n*** End Patch");
+
+  const output = "z".repeat((1024 * 1024) + 100);
+  const customOutput = parseRolloutEnvelope({
+    type: "response_item",
+    timestamp: "2026-07-26T12:00:02.000Z",
+    payload: { type: "custom_tool_call_output", call_id: "custom-1", output },
+  }, "rollout.jsonl", ctx, {});
+  assert.equal(customOutput.RecordType, "custom_tool_call_output");
+  assert.equal(customOutput.InvokedTool, "apply_patch");
+  assert.match(customOutput.FullText, /truncated 100 chars over 1048576-char cap/);
+
+  const patch = parseRolloutEnvelope({
+    type: "event_msg",
+    timestamp: "2026-07-26T12:00:03.000Z",
+    payload: {
+      type: "patch_apply_end",
+      call_id: "patch-1",
+      success: true,
+      status: "completed",
+      stdout: "Done!",
+      stderr: "",
+      changes: { "/repo/app.js": { type: "update" } },
+    },
+  }, "rollout.jsonl", ctx, {});
+  assert.equal(patch.InvokedTool, "apply_patch");
+  assert.match(patch.FullText, /app\.js/);
+
+  const turn = parseRolloutEnvelope({
+    type: "turn_context",
+    timestamp: "2026-07-26T12:00:04.000Z",
+    payload: {
+      turn_id: "turn-1",
+      cwd: "/repo/new",
+      model: "gpt-current",
+      effort: "high",
+      approval_policy: "never",
+    },
+  }, "rollout.jsonl", ctx, {});
+  assert.equal(turn.Workspace, "/repo/new");
+  assert.equal(turn.Model, "gpt-current");
+  assert.match(turn.Summary, /effort=high/);
+
+  const web = parseRolloutEnvelope({
+    type: "response_item",
+    timestamp: "2026-07-26T12:00:05.000Z",
+    payload: {
+      type: "web_search_call",
+      status: "completed",
+      action: { type: "search", query: "current Codex artifact schema" },
+    },
+  }, "rollout.jsonl", ctx, {});
+  assert.equal(web.InvokedTool, "web_search");
+  assert.match(web.Summary, /current Codex artifact schema/);
 });
 
 test("extractCodexDir reads fixture history and rollout", async () => {
   assert.ok(isCodexDir(FIXTURE_CODEX));
   const rows = await extractCodexDir(FIXTURE_CODEX, { user: "analyst", host: "HOST1" });
   assert.ok(rows.length >= 4, `expected several rows, got ${rows.length}`);
-  assert.ok(rows.some((r) => r.RecordType === "function_call"));
+  const functionCall = rows.find((r) => r.RecordType === "function_call");
+  assert.ok(functionCall);
+  assert.equal(functionCall.ToolCommand, "[\"bash\",\"-lc\",\"file sample.bin\"]");
+  assert.equal(functionCall.ToolInput, "{\"command\":[\"bash\",\"-lc\",\"file sample.bin\"]}");
   assert.ok(rows.some((r) => r.Summary.includes("static analysis")));
   const deduped = rows.filter((r) => r.RecordType === "history");
   assert.equal(deduped.length, 0, "history row deduped when session has same prompt");
@@ -105,4 +218,60 @@ test("detectAiHistoryImport and planImportPaths recognize .codex", () => {
   const planned = planImportPaths([rollout, path.join(FIXTURE_CODEX, "history.jsonl")]);
   assert.equal(planned.length, 1);
   assert.equal(planned[0].opts.aiHistoryTool, "codex");
+});
+
+test("streamed Codex VS Code supplement uses only explicitly supplied evidence roots", async (t) => {
+  let Database;
+  try {
+    Database = require("better-sqlite3");
+    const probe = path.join(os.tmpdir(), `irflow-codex-scope-probe-${process.pid}.db`);
+    const db = new Database(probe);
+    db.close();
+    fs.unlinkSync(probe);
+  } catch (e) {
+    if (e.code === "ERR_DLOPEN_FAILED") {
+      t.skip("better-sqlite3 not available for plain Node");
+      return;
+    }
+    throw e;
+  }
+
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "irflow-codex-scope-"));
+  const codexRoot = path.join(tmp, ".codex");
+  const userDir = path.join(tmp, "Code/User");
+  const dbPath = path.join(userDir, "globalStorage/state.vscdb");
+  fs.mkdirSync(codexRoot, { recursive: true });
+  fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+  fs.writeFileSync(path.join(codexRoot, "history.jsonl"), `${JSON.stringify({
+    session_id: "scope-session",
+    ts: 1704067200,
+    text: "Scoped Codex prompt",
+  })}\n`);
+
+  const db = new Database(dbPath);
+  db.exec("CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value BLOB)");
+  db.prepare("INSERT INTO ItemTable (key, value) VALUES (?, ?)").run(
+    "agentSessions.model.cache",
+    JSON.stringify([{
+      providerType: "openai-codex",
+      providerLabel: "Codex",
+      resource: "openai-codex://route/local/scoped-agent",
+      label: "Scoped VS Code Codex prompt",
+      timing: { created: 1704067201000 },
+    }]),
+  );
+  db.close();
+
+  try {
+    const streamed = [];
+    const result = await extractCodexDir(codexRoot, {}, {
+      codexVsCodeUserDirs: [userDir],
+      onExtractedRows: (batch) => streamed.push(...batch),
+    });
+    assert.equal(result.length, 0);
+    assert.ok(streamed.some((row) => row.Summary === "Scoped Codex prompt"));
+    assert.ok(streamed.some((row) => row.Summary === "Scoped VS Code Codex prompt"));
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
 });

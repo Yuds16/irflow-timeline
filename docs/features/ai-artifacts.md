@@ -11,14 +11,14 @@ The feature creates an **AI Query History** timeline tab from local desktop, CLI
 ## Opening AI Artifacts
 
 - **Menu:** **Tools → Analysis → AI Artifacts → Collect AI Artifacts**
-- **Per-app import:** **Tools → Analysis → AI Artifacts → AI Apps → …** (Claude Code, Codex, ChatGPT Desktop, Gemini CLI, Cursor, Copilot, Windsurf, Continue)
+- **Per-app import:** **Tools → Analysis → AI Artifacts → AI Apps → …** (Claude Code, Codex, Grok Build, ChatGPT Desktop, Gemini CLI, Cursor, Copilot, Windsurf, Continue)
 - **Home launcher:** **Collect AI Artifacts** tile on the capability launcher
 - **Single artifact:** **File → Open…** on a supported AI app folder or file
 - **Output:** one **AI Query History** timeline tab
 
 ![Tools → Analysis → AI Artifacts with Collect AI Artifacts and the AI Apps submenu](/dfir-tips/Tools-Menu-AI-Artifacts.png)
 
-Use **Collect AI Artifacts** for live Mac triage, KAPE collections, mounted disks, copied profile folders, or external triage packages. Use **AI Apps** or **File → Open…** when you already know the specific AI artifact root, such as `.claude`, `.codex`, `.cursor`, `.gemini`, or a supported app data directory.
+Use **Collect AI Artifacts** for live Mac triage, KAPE collections, mounted disks, copied profile folders, or external triage packages. Use **AI Apps** or **File → Open…** when you already know the specific AI artifact root, such as `.claude`, `.codex`, `.grok`, `.cursor`, `.gemini`, or a supported app data directory.
 
 ![Home capability launcher with Collect AI Artifacts shortcut](/dfir-tips/Home-Capability-Launcher-v107.png)
 
@@ -42,12 +42,13 @@ IRFlow scans local artifacts from these AI apps:
 | App | Local evidence handled |
 |-----|------------------------|
 | **Claude Code** | CLI history and project JSONL transcripts under `.claude`. |
-| **Claude Desktop** | `claude-code-sessions` metadata linked to Claude Code transcripts when collected. |
-| **OpenAI Codex** | `history.jsonl`, rollout JSONL sessions, archived sessions, and session indexes under `.codex`. |
-| **ChatGPT Desktop / Atlas** | Local LevelDB and SQLite stores when conversation data exists locally. |
-| **Gemini CLI** | Project-scoped chat sessions, checkpoints, and legacy logs under `.gemini`. |
-| **Cursor** | Agent transcripts and composer/workspace SQLite chat stores. |
-| **GitHub Copilot** | VS Code-family chat sessions and empty-window chat sessions. |
+| **Claude Desktop** | `claude-code-sessions` metadata plus recursive Cowork `local-agent-mode-sessions` transcripts and audit trails. |
+| **OpenAI Codex** | `history.jsonl`, current/archived rollout JSONL, session indexes, and versioned `state*.sqlite` thread/subagent/tool metadata. |
+| **Grok Build** | Timestamped prompts, responses, exact tool inputs, shell completions, session metadata, and file-hunk records under `.grok`. |
+| **ChatGPT Desktop / Atlas** | Local LevelDB and SQLite stores plus v2/v3 conversation-bundle metadata inventory. |
+| **Gemini CLI** | Current JSONL chats, nested subagent sessions, exact shell history/tool commands, and legacy session data under `.gemini`. |
+| **Cursor** | Agent transcripts, composer/workspace SQLite chat stores, and `conversation-search.db` indexed bodies. |
+| **GitHub Copilot** | Copilot CLI sessions, exact command history, plans/checkpoints, safe session-store metadata, and VS Code-family chat sessions. |
 | **Windsurf** | VS Code-family workspace/global chat stores and Cascade inventory. |
 | **Continue** | Local session JSON files under `.continue`. |
 
@@ -90,8 +91,11 @@ Results are **redacted by default** (cleartext is never written to disk). Analys
 | Column | Meaning |
 |--------|---------|
 | **Timestamp** | Best available event time for the prompt, response, tool call, or metadata row. |
-| **Tool** | The AI app family, such as Claude Code, OpenAI Codex, Cursor, or ChatGPT. |
+| **Tool** | The AI app family, such as Claude Code, OpenAI Codex, Grok Build, Cursor, or ChatGPT. |
 | **InvokedTool** | A tool/action called inside the AI app, such as a shell command or editor operation. Older saved tabs may still show the legacy `ToolName` header. |
+| **ToolCommand** | Exact command value recorded for a shell/function call. Array-valued commands remain JSON so argument boundaries are preserved. |
+| **ToolInput** | Original structured arguments for the tool call. Rows containing multiple calls retain a JSON array with each tool name and input. |
+| **ToolDescription** | Description or purpose stored with the tool invocation, when present. |
 | **Role** | User, assistant, tool, system, or metadata role. |
 | **Summary** | Grid-friendly preview for scanning large timelines. |
 | **FullText** | Complete message body for row detail, search, secret scan, and export. |
@@ -107,12 +111,15 @@ Results are **redacted by default** (cleartext is never written to disk). Analys
 - Merged AI timelines cap at 3,000,000 rows and report truncation.
 - Malformed JSONL lines are skipped and counted in the import notice.
 - Subagent or sidechain content can be included for broader hunts, but main-session-only scans are faster for first-pass triage.
+- Tool inputs can contain paths, prompts, or secrets. Treat `ToolCommand` and `ToolInput` as evidence and apply the same access controls used for full message text.
 - **Tools → Export → Export AI History Package…** includes the filtered timeline CSV plus a manifest of source files and hashes for the first 250 sources.
 
 ## Limitations
 
 - Browser-only AI usage may require browser profile collection; local desktop/CLI history is not the same as cloud account history.
-- Newer ChatGPT Desktop encrypted `conversations-v2-*` bundles are inventoried, not decrypted.
+- Consumer Grok web/mobile history is not decoded as a native app store. Browser history/cache may still show `grok.com` or X/Grok usage and should be collected separately.
+- Grok Build credential/configuration files such as `auth.json` and `mcp_credentials.json` are deliberately excluded from timeline parsing; preserve them under appropriate evidence controls when authorization material is in scope.
+- ChatGPT Desktop `conversations-v2-*` and `conversations-v3-*` bundles are inventoried, not decoded.
 - Gemini macOS desktop app history is not parsed; Gemini CLI local sessions are supported.
 - Proprietary Windsurf Cascade protobuf bundles are preserved as inventory unless decoders are available.
 - Secret detection is intentionally conservative and should be reviewed by an analyst before reporting.

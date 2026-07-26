@@ -9,6 +9,9 @@ const AI_HISTORY_COLUMNS = [
   "Summary",
   "FullText",
   "InvokedTool",
+  "ToolCommand",
+  "ToolInput",
+  "ToolDescription",
   "SessionId",
   "MessageId",
   "ParentId",
@@ -29,12 +32,13 @@ const AI_HISTORY_COLUMNS = [
 ];
 
 const SUMMARY_MAX_LEN = 500;
-/** FullText is not stored in SQLite for streamed AI history imports (Summary holds the preview). */
+/** Allows DB sinks to omit FullText when explicitly requested; AI history imports retain it. */
 const AI_HISTORY_DB_OMIT_FULLTEXT = true;
 const TOOL_CLAUDE_CODE = "Claude Code";
 const TOOL_CHATGPT = "ChatGPT";
 const TOOL_GEMINI_CLI = "Gemini CLI";
 const TOOL_CODEX = "OpenAI Codex";
+const TOOL_GROK_BUILD = "Grok Build";
 const TOOL_CURSOR = "Cursor";
 const TOOL_COPILOT = "GitHub Copilot";
 const TOOL_WINDSURF = "Windsurf";
@@ -45,6 +49,7 @@ const AI_HISTORY_TOOLS = {
   chatgpt: { label: TOOL_CHATGPT, tabPrefix: "ChatGPT AI History" },
   "gemini-cli": { label: TOOL_GEMINI_CLI, tabPrefix: "Gemini CLI AI History" },
   codex: { label: TOOL_CODEX, tabPrefix: "OpenAI Codex AI History" },
+  "grok-build": { label: TOOL_GROK_BUILD, tabPrefix: "Grok Build AI History" },
   cursor: { label: TOOL_CURSOR, tabPrefix: "Cursor AI History" },
   copilot: { label: TOOL_COPILOT, tabPrefix: "GitHub Copilot AI History" },
   windsurf: { label: TOOL_WINDSURF, tabPrefix: "Windsurf AI History" },
@@ -59,6 +64,7 @@ module.exports = {
   TOOL_CHATGPT,
   TOOL_GEMINI_CLI,
   TOOL_CODEX,
+  TOOL_GROK_BUILD,
   TOOL_CURSOR,
   TOOL_COPILOT,
   TOOL_WINDSURF,

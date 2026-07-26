@@ -54,14 +54,14 @@ Interpretation: `Summary` and `FullText` often match because many messages are s
 
 ### Claude Code and Claude Desktop
 
-Status: parsed. Live dataset validated with 40,800 rows and no missing timestamp, summary, or FullText values.
+Status: parsed. Current Claude Code and Cowork schemas are supported, including untimed state records. Live Cowork validation produced 52,164 streamed rows; one malformed source JSON record was reported and skipped.
 
 | Artifact | Parse status | What IRFlow extracts | Description | IR relevance |
 | --- | --- | --- | --- | --- |
 | `~/.claude/history.jsonl` | Parsed | User prompt history, timestamps, session IDs, project hints. | Lightweight prompt log maintained by Claude Code. | Quickly establishes user intent, suspicious questions, data exfiltration prompts, credential pasting, and session pivots. |
-| `~/.claude/projects/**/*.jsonl` | Parsed | Full user, assistant, system, attachment, queue-operation, file-history-snapshot, and tool-use records. | Main Claude Code transcript store. | Highest-value Claude evidence: prompts, answers, tool names, workspace/project paths, model usage, sidechain indicators, token counts, and possible pasted secrets. |
+| `~/.claude/projects/**/*.jsonl` | Parsed | User/assistant messages, bounded tool inputs/results, media/document descriptors, state/permission/title records, attachments, queue operations, and file-history records. | Main Claude Code transcript store. | Highest-value Claude evidence: prompts, answers, tool names and results, workspace/project paths, model usage, sidechain indicators, token counts, and possible pasted secrets. |
 | Claude Desktop `claude-code-sessions/**/local_*.json` | Parsed as metadata and linked to CLI JSONL where available. | Desktop session titles, local IDs, models, cwd/project metadata, and linked transcript rows from `.claude/projects`. | Claude Desktop "Code" session index; transcripts still live under `.claude/projects`. | Proves Desktop usage and helps recover context even when a CLI transcript is missing. Also tells collectors to acquire `.claude/projects`. |
-| Claude Desktop legacy `local-agent-mode-sessions/` | Parsed with same logic as `claude-code-sessions/`. | Same as above. | Pre-rename local Desktop session metadata path. | Preserves coverage for older 2026-era collections and mixed endpoint versions. |
+| Claude Desktop/Cowork `local-agent-mode-sessions/` | Recursively parsed. | `local_*.json` metadata, isolated `.claude/projects/**/*.jsonl` transcripts, `audit*.jsonl` audit events, and `.audit-key` presence. | Modern Cowork sessions are self-contained; audit and transcript timestamps may differ and provide independent chronology. | Recovers prompts/tool activity that never appears in host `~/.claude/projects` and preserves audit provenance for future integrity validation. |
 
 Notes:
 
@@ -75,10 +75,10 @@ Status: parsed. Live dataset validated with 97,465 rows and no missing timestamp
 | Artifact | Parse status | What IRFlow extracts | Description | IR relevance |
 | --- | --- | --- | --- | --- |
 | `$CODEX_HOME/history.jsonl` or `~/.codex/history.jsonl` | Parsed | Prompt log with session ID, timestamp, and user text. | Lightweight Codex prompt history. | Fast triage of user requests and starting points for session review. |
-| `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | Parsed | Full thread envelopes: messages, reasoning records, function/tool calls, command output, web search calls, image/view events, compacted context, token counts, errors, and thread metadata. | Primary Codex transcript format. | High-value evidence for AI-assisted actions, shell command intent, file edits, tool use, workspace paths, and possible data disclosure to the model. |
+| `~/.codex/sessions/YYYY/MM/DD/rollout-*.jsonl` | Parsed | Messages, reasoning summaries, function/custom-tool calls and bounded outputs, patches, web/MCP/tool-search events, image descriptors, subagent activity, compacted context, token counts, errors, and thread/turn metadata. | Primary Codex transcript format. | High-value evidence for AI-assisted actions, shell command intent, file edits, tool use, workspace paths, and possible data disclosure to the model. |
 | `~/.codex/archived_sessions/**/rollout-*.jsonl` | Parsed | Same as rollout sessions. | Archived Codex threads. | Extends timeline coverage beyond active sessions. |
 | `~/.codex/session_index.jsonl` | Parsed as enrichment metadata. | Thread titles and session index context. | Session title/index file. | Helps analysts identify relevant threads quickly and improves session labeling. |
-| `~/.codex/state.sqlite` | Parsed as metadata only. | Thread index rows when tables expose thread/session/title fields. | Supplemental local Codex SQLite state. | Useful when rollout JSONL is sparse or absent, but not a substitute for full transcripts. |
+| `~/.codex/state*.sqlite` plus `-wal`/`-shm` | Snapshot and parsed as enrichment metadata. | Thread index rows, workspace/model/git context, parent-child spawn edges, and per-thread dynamic tools. | Version-aware supplemental Codex state; IRFlow selects the highest schema suffix and snapshots SQLite companions before reading. | Recovers current thread/subagent topology and registered tools, including records that may still reside only in WAL. |
 | VS Code-family `state.vscdb` agent session cache for Codex provider | Parsed as supplemental fallback when `.codex` has very few rows. | Codex-labeled VS Code agent session rows from `agentSessions.model.cache`. | Codex provider usage inside VS Code-family storage. | Captures embedded Codex usage that may not appear in `~/.codex`. |
 
 Notes:

@@ -25,6 +25,51 @@ test("extractContentText handles text, tools, and thinking", () => {
   assert.match(extractContentText(content), /Hello/);
   assert.match(extractContentText(content), /\[Tool: Bash\]/);
   assert.match(extractContentText(content), /\[Reasoning present\]/);
+  assert.match(extractContentText(content), /out/);
+});
+
+test("parseSessionLine preserves bounded tool-result output and untimed state records", () => {
+  const output = "x".repeat((1024 * 1024) + 200);
+  const toolResult = parseSessionLine({
+    type: "user",
+    timestamp: "2026-07-26T12:00:00.000Z",
+    sessionId: "sess-output",
+    uuid: "tool-result-1",
+    message: {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: "call-1", content: output }],
+    },
+  }, "/sess.jsonl");
+  assert.ok(toolResult);
+  assert.match(toolResult.FullText, /^\[Tool Result\]/);
+  assert.match(toolResult.FullText, /truncated 214 chars over 1048576-char cap/);
+
+  const title = parseSessionLine({
+    type: "ai-title",
+    sessionId: "sess-output",
+    aiTitle: "Untimed recovered title",
+  }, "/sess.jsonl");
+  assert.ok(title);
+  assert.equal(title.Timestamp, "");
+  assert.equal(title.Summary, "Untimed recovered title");
+});
+
+test("parseSessionLine records image and document blocks without embedding image bytes", () => {
+  const row = parseSessionLine({
+    type: "user",
+    timestamp: "2026-07-26T12:00:00.000Z",
+    sessionId: "sess-media",
+    message: {
+      role: "user",
+      content: [
+        { type: "image", source: { media_type: "image/png", data: "A".repeat(1000) } },
+        { type: "document", title: "evidence.pdf" },
+      ],
+    },
+  }, "/sess.jsonl");
+  assert.match(row.FullText, /\[Image: image\/png\]/);
+  assert.match(row.FullText, /\[Document: evidence\.pdf\]/);
+  assert.doesNotMatch(row.FullText, /A{100}/);
 });
 
 test("parseHistoryLine sets RecordType history", () => {
@@ -40,7 +85,7 @@ test("parseHistoryLine sets RecordType history", () => {
   assert.match(row.Description, /Bug Fix Request/);
 });
 
-test("parseSessionLine extracts assistant tokens, model, and invoked tool", () => {
+test("parseSessionLine extracts assistant tokens, model, and exact tool evidence", () => {
   const row = parseSessionLine({
     type: "assistant",
     timestamp: "2024-06-15T10:30:00.000Z",
@@ -53,7 +98,17 @@ test("parseSessionLine extracts assistant tokens, model, and invoked tool", () =
     message: {
       role: "assistant",
       model: "claude-sonnet-4",
-      content: [{ type: "text", text: "Done." }, { type: "tool_use", name: "Bash" }],
+      content: [
+        { type: "text", text: "Done." },
+        {
+          type: "tool_use",
+          name: "Bash",
+          input: {
+            command: "printf '%s\\n' \"quoted value\"",
+            description: "Print a quoted test value",
+          },
+        },
+      ],
       usage: { input_tokens: 10, output_tokens: 5 },
     },
   }, "/sess.jsonl");
@@ -63,6 +118,12 @@ test("parseSessionLine extracts assistant tokens, model, and invoked tool", () =
   assert.equal(row.OutputTokens, "5");
   assert.equal(row.Model, "claude-sonnet-4");
   assert.equal(row.InvokedTool, "Bash");
+  assert.equal(row.ToolCommand, "printf '%s\\n' \"quoted value\"");
+  assert.equal(row.ToolDescription, "Print a quoted test value");
+  assert.deepEqual(JSON.parse(row.ToolInput), {
+    command: "printf '%s\\n' \"quoted value\"",
+    description: "Print a quoted test value",
+  });
   assert.equal(row.GitBranch, "main");
   assert.equal(row.IsSidechain, "false");
 });
@@ -179,6 +240,7 @@ test("extractClaudeDir reads history and session JSONL from fixture tree", async
   const sessionRow = rows.find((r) => r.MessageId === "msg-asst-1");
   assert.ok(sessionRow);
   assert.match(sessionRow.Summary, /Tool: Bash/);
+  assert.equal(sessionRow.ToolInput, "{}");
   assert.equal(sessionRow.Host, "HOST01");
   assert.ok(rows.every((r) => r.RecordId), "record ids assigned");
 });

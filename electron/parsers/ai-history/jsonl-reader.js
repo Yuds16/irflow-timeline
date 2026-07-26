@@ -10,8 +10,10 @@
 
 const fs = require("fs");
 
-// 16MB is far above any legitimate single AI session record (a turn, a pasted file, a tool result).
-const DEFAULT_MAX_LINE_BYTES = 16 * 1024 * 1024;
+// Current Claude Cowork transcripts can contain legitimate detached/tool-result records above
+// 16MB (18.8MB observed in the live 2026 schema). Keep ingestion bounded while allowing those
+// records to reach makeRow(), which independently caps retained FullText/tool evidence to 1MB.
+const DEFAULT_MAX_LINE_BYTES = 32 * 1024 * 1024;
 const READ_CHUNK_BYTES = 1 << 20; // 1MB
 
 /**

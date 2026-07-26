@@ -9,6 +9,7 @@ const { dbg } = require("../../logger");
 const { AI_HISTORY_TOOLS, AI_HISTORY_COLUMNS, AI_HISTORY_DB_OMIT_FULLTEXT } = require("./schema");
 const { extractClaudeDir } = require("./claude-code");
 const { extractCodexDir } = require("./codex");
+const { extractGrokBuildDir } = require("./grok-build");
 const { extractChatgptDir } = require("./chatgpt");
 const { extractGeminiCliDir } = require("./gemini-cli");
 const { extractCursorDir } = require("./cursor");
@@ -30,10 +31,13 @@ const {
   getLocalAiHistoryCandidates,
   expandChatgptMsStorePackages,
   isClaudeCodeArtifactRoot,
+  isGrokBuildRoot,
   isChatgptAppDir,
   isGeminiCliRoot,
   isCursorHome,
+  isCursorUserDataDir,
   isCopilotWorkspaceStorageRoot,
+  isCopilotCliRoot,
 } = artifactPaths;
 const { defaultCodexHome, isCodexDir } = require("./codex");
 const { isContinueRoot } = require("./continue");
@@ -47,6 +51,7 @@ const path = require("path");
 const FOLDER_SCAN_TOOL_MAP = [
   ["claudeCode", "claude-code"],
   ["codex", "codex"],
+  ["grokBuild", "grok-build"],
   ["chatgpt", "chatgpt"],
   ["geminiCli", "gemini-cli"],
   ["cursor", "cursor"],
@@ -69,10 +74,11 @@ function validateAiHistoryRoot(tool, rootPath, { quick = false } = {}) {
   switch (tool) {
     case "claude-code": return isClaudeCodeArtifactRoot(rootPath);
     case "codex": return isCodexDir(rootPath);
+    case "grok-build": return isGrokBuildRoot(rootPath, q);
     case "chatgpt": return isChatgptAppDir(rootPath, q);
     case "gemini-cli": return isGeminiCliRoot(rootPath, q);
-    case "cursor": return isCursorHome(rootPath);
-    case "copilot": return isCopilotWorkspaceStorageRoot(rootPath, q);
+    case "cursor": return isCursorHome(rootPath) || isCursorUserDataDir(rootPath);
+    case "copilot": return isCopilotWorkspaceStorageRoot(rootPath, q) || isCopilotCliRoot(rootPath, q);
     case "windsurf": return isWindsurfUserDir(rootPath);
     case "continue": return isContinueRoot(rootPath);
     default: return false;
@@ -272,6 +278,7 @@ async function extractRoot(tool, rootPath, attribution, options) {
   switch (tool) {
     case "claude-code": return extractClaudeDir(rootPath, attribution, options);
     case "codex": return extractCodexDir(rootPath, attribution, options);
+    case "grok-build": return extractGrokBuildDir(rootPath, attribution, options);
     case "chatgpt": return extractChatgptDir(rootPath, attribution, options);
     case "gemini-cli": return extractGeminiCliDir(rootPath, attribution, options);
     case "cursor": return extractCursorDir(rootPath, attribution, options);

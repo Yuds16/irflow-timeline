@@ -87,6 +87,43 @@ test("scanAiArtifacts finds VS Code Copilot workspaceStorage on Windows layout",
   assert.equal(scan.copilot[0].username, "analyst");
 });
 
+test("scanAiArtifacts finds GitHub Copilot CLI .copilot roots", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "irflow-ai-copilot-cli-scan-"));
+  after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const copilotDir = path.join(root, "home", "analyst", ".copilot");
+  const sessionDir = path.join(copilotDir, "session-state", "session-1");
+  fs.mkdirSync(sessionDir, { recursive: true });
+  fs.writeFileSync(
+    path.join(sessionDir, "events.jsonl"),
+    '{"type":"user.message","data":{"content":"triage host"},"timestamp":"2026-07-26T10:00:00Z"}\n',
+  );
+
+  const scan = scanAiArtifacts(root);
+  assert.equal(scan.copilot.length, 1);
+  assert.equal(scan.copilot[0].path, copilotDir);
+  assert.equal(scan.copilot[0].username, "analyst");
+  assert.ok(scan.copilot[0].sessionCount >= 1);
+});
+
+test("scanAiArtifacts finds standalone Cursor User conversation index", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "irflow-ai-cursor-user-scan-"));
+  after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const userDir = path.join(
+    root, "Users", "analyst", "AppData", "Roaming", "Cursor", "User",
+  );
+  const globalStorage = path.join(userDir, "globalStorage");
+  fs.mkdirSync(globalStorage, { recursive: true });
+  fs.writeFileSync(path.join(globalStorage, "conversation-search.db"), "SQLite format 3\u0000");
+
+  const scan = scanAiArtifacts(root);
+  assert.equal(scan.cursor.length, 1);
+  assert.equal(scan.cursor[0].path, userDir);
+  assert.equal(scan.cursor[0].username, "analyst");
+  assert.ok(scan.cursor[0].sessionCount >= 1);
+});
+
 test("scanAiArtifacts collects browser hints in the same walk", () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "irflow-browser-hint-"));
   after(() => fs.rmSync(root, { recursive: true, force: true }));
@@ -119,4 +156,23 @@ test("scanAiArtifacts finds OpenAI Codex .codex directories", () => {
   assert.equal(scan.codex.length, 1);
   assert.equal(scan.codex[0].username, "bob");
   assert.ok(scan.codex[0].sessionCount >= 1);
+});
+
+test("scanAiArtifacts finds Grok Build .grok directories", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "irflow-ai-grok-scan-"));
+  after(() => fs.rmSync(root, { recursive: true, force: true }));
+
+  const grokDir = path.join(root, "Users", "bob", ".grok");
+  const workspace = path.join(grokDir, "sessions", "%2Ftmp%2Fcase");
+  const session = path.join(workspace, "grok-session-1");
+  fs.mkdirSync(session, { recursive: true });
+  fs.writeFileSync(path.join(grokDir, "version.json"), '{"version":"0.2.112"}');
+  fs.writeFileSync(path.join(workspace, "prompt_history.jsonl"), '{"timestamp":"2026-07-26T10:00:00Z","session_id":"grok-session-1","prompt":"triage","is_bash":false}\n');
+  fs.writeFileSync(path.join(session, "summary.json"), '{"info":{"id":"grok-session-1","cwd":"/tmp/case"},"created_at":"2026-07-26T10:00:00Z"}');
+  fs.writeFileSync(path.join(session, "updates.jsonl"), "");
+
+  const scan = scanAiArtifacts(root);
+  assert.equal(scan.grokBuild.length, 1);
+  assert.equal(scan.grokBuild[0].username, "bob");
+  assert.ok(scan.grokBuild[0].sessionCount >= 2);
 });

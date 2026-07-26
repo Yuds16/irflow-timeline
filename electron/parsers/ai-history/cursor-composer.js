@@ -24,8 +24,10 @@ const {
   safeCloseDb,
 } = require("./vscdb-kv");
 const { formatWorkspaceDisplay } = require("./workspace-utils");
+const { copySqliteFamilyToTemp } = require("./codex-state-sqlite");
 
 const CURSOR_DIR_NAME = ".cursor";
+const CONVERSATION_SEARCH_DB = "conversation-search.db";
 const COMPOSER_YIELD_EVERY = 8;
 
 // Cursor IDE User-data layouts, relative to a user home (macOS / Linux / Windows).
@@ -65,6 +67,24 @@ function cursorUserDataDirsForRoot(cursorRoot) {
     try { if (fs.statSync(p).isDirectory()) out.push(p); } catch { /* not in this collection */ }
   }
   return out;
+}
+
+function isCursorUserDataDir(dirPath) {
+  if (!dirPath || path.basename(dirPath) !== "User") return false;
+  try { if (!fs.statSync(dirPath).isDirectory()) return false; } catch { return false; }
+  const globalStorage = path.join(dirPath, "globalStorage");
+  const workspaceStorage = path.join(dirPath, "workspaceStorage");
+  // conversation-search.db is Cursor-specific and survives relocation into an evidence
+  // folder. Generic state.vscdb/workspaceStorage markers also exist in VS Code products,
+  // so require a Cursor-branded parent path before accepting those weaker markers.
+  if (fs.existsSync(path.join(globalStorage, CONVERSATION_SEARCH_DB))) return true;
+  const cursorBrandedPath = path.resolve(dirPath)
+    .split(/[\\/]+/)
+    .some((part) => part.toLowerCase() === "cursor");
+  return cursorBrandedPath && (
+    fs.existsSync(path.join(globalStorage, "state.vscdb"))
+    || fs.existsSync(workspaceStorage)
+  );
 }
 
 function cursorComposerRow(fields) {
@@ -221,6 +241,73 @@ function workspaceLabelForDb(dbPath, cursorHome) {
   return "Cursor composer";
 }
 
+function extractConversationSearchRows(db, dbPath, attribution, options = {}) {
+  const rows = [];
+  const tables = new Set(db.prepare(
+    "SELECT name FROM sqlite_master WHERE type IN ('table','view')",
+  ).all().map((row) => row.name));
+  if (!tables.has("conversations") || !tables.has("conversation_fts")) return rows;
+
+  const maxRows = Math.max(1, Math.min(Number(options.maxConversationSearchRows) || 5000, 20000));
+  const records = db.prepare(`
+    SELECT
+      c.fts_rowid,
+      c.source,
+      c.scope,
+      c.id,
+      c.title,
+      c.updated_at,
+      c.is_archived,
+      f.body
+    FROM conversations c
+    JOIN conversation_fts f ON f.rowid = c.fts_rowid
+    ORDER BY c.updated_at ASC, c.fts_rowid ASC
+    LIMIT ?
+  `).all(maxRows);
+
+  for (const record of records) {
+    const rawTs = Number(record.updated_at);
+    const timestampMs = Number.isFinite(rawTs)
+      ? (rawTs > 1e12 ? rawTs : rawTs > 1e9 ? rawTs * 1000 : null)
+      : null;
+    const title = String(record.title || "").trim();
+    const body = String(record.body || "").trim();
+    const scope = String(record.scope || "").trim();
+    const source = String(record.source || "local").trim();
+    const archived = Number(record.is_archived) === 1;
+    const identifier = record.id != null && String(record.id).trim()
+      ? String(record.id)
+      : String(record.fts_rowid ?? "");
+    const summary = title
+      ? `${title}${archived ? " [archived]" : ""}`
+      : `Cursor indexed conversation ${identifier || "(unknown)"}${archived ? " [archived]" : ""}`;
+    const fullText = body || JSON.stringify({
+      conversationId: identifier,
+      title,
+      source,
+      scope,
+      archived,
+      bodyPresent: false,
+    }, null, 2);
+    rows.push(cursorComposerRow({
+      timestamp: formatTimestampUtc(timestampMs),
+      role: "conversation",
+      recordType: "conversation_search",
+      summary,
+      fullText,
+      sessionId: identifier,
+      messageId: record.fts_rowid != null ? String(record.fts_rowid) : "",
+      workspace: scope
+        ? `Cursor conversation search — ${source}/${scope}`
+        : `Cursor conversation search — ${source}`,
+      sourceFile: dbPath,
+      user: attribution.user || "",
+      host: attribution.host || "",
+    }));
+  }
+  return rows;
+}
+
 function listCursorComposerDbs(cursorRoot, extraUserDirs = []) {
   // Stay inside the supplied root: never fall back to the live ~/.cursor (defaultCursorHome).
   const agentHome = cursorRoot;
@@ -230,6 +317,8 @@ function listCursorComposerDbs(cursorRoot, extraUserDirs = []) {
   for (const userDir of userDirs) {
     const globalVscdb = path.join(userDir, "globalStorage", "state.vscdb");
     if (fs.existsSync(globalVscdb)) dbs.add(globalVscdb);
+    const conversationSearch = path.join(userDir, "globalStorage", CONVERSATION_SEARCH_DB);
+    if (fs.existsSync(conversationSearch)) dbs.add(conversationSearch);
     for (const p of findVscdbFilesUnder(userDir, { maxDepth: 6, maxFiles: 20 })) {
       dbs.add(p);
     }
@@ -250,7 +339,13 @@ function listCursorComposerDbs(cursorRoot, extraUserDirs = []) {
  */
 async function extractCursorComposerStores(cursorRoot, attribution = {}, options = {}) {
   const rows = [];
-  const stats = { databases: 0, messageRows: 0, failed: 0 };
+  const stats = {
+    databases: 0,
+    messageRows: 0,
+    searchDatabases: 0,
+    searchRows: 0,
+    failed: 0,
+  };
   // Derive everything from the supplied (possibly forensic) root — do not touch the live host.
   const dbPaths = listCursorComposerDbs(cursorRoot, options.userDataDirs || []);
   let fileIndex = 0;
@@ -261,10 +356,23 @@ async function extractCursorComposerStores(cursorRoot, attribution = {}, options
     tickFileProgress(onFileProgress, fileIndex, dbPaths.length, dbPath);
     if (typeof checkAbort === "function") checkAbort();
 
+    let snapshot;
     let db;
     try {
-      db = openVscdbReadOnly(dbPath);
+      snapshot = copySqliteFamilyToTemp(dbPath);
+      db = openVscdbReadOnly(snapshot.dbPath);
       stats.databases += 1;
+      if (path.basename(dbPath) === CONVERSATION_SEARCH_DB) {
+        const chunk = extractConversationSearchRows(db, dbPath, attribution, options);
+        stats.searchDatabases += 1;
+        stats.searchRows += chunk.length;
+        stats.messageRows += chunk.length;
+        if (chunk.length) {
+          if (onExtractedRows) onExtractedRows(chunk);
+          else rows.push(...chunk);
+        }
+        continue;
+      }
       const ws = workspaceLabelForDb(dbPath, cursorUserDataDirsForRoot(cursorRoot)[0] || cursorRoot);
       const chunk = await extractBubblesFromDb(db, dbPath, attribution, ws, {
         checkAbort,
@@ -286,6 +394,7 @@ async function extractCursorComposerStores(cursorRoot, attribution = {}, options
       dbg("AIHIST", "cursor composer db failed", { dbPath, err: e.message });
     } finally {
       safeCloseDb(db);
+      if (snapshot) snapshot.cleanup();
     }
     if (fileIndex % 2 === 0) await new Promise((r) => setImmediate(r));
   }
@@ -302,16 +411,22 @@ async function extractCursorComposerStores(cursorRoot, attribution = {}, options
 function buildCursorComposerImportNotice(stats) {
   if (!stats || !stats.databases) return "";
   if (stats.messageRows > 0) {
-    return `Cursor composer DB: ${stats.messageRows} message(s) from ${stats.databases} SQLite store(s).`;
+    const search = stats.searchRows > 0
+      ? `; ${stats.searchRows} conversation-search row(s) from ${stats.searchDatabases} index`
+      : "";
+    return `Cursor local DBs: ${stats.messageRows} row(s) from ${stats.databases} SQLite store(s)${search}.`;
   }
-  return `Cursor composer DB: opened ${stats.databases} store(s) but no bubble messages found.`;
+  return `Cursor local DBs: opened ${stats.databases} store(s) but found no composer or conversation-search rows.`;
 }
 
 module.exports = {
+  CONVERSATION_SEARCH_DB,
   extractCursorComposerStores,
   extractBubblesFromDb,
+  extractConversationSearchRows,
   listCursorComposerDbs,
   deriveUserHomeFromCursorRoot,
   cursorUserDataDirsForRoot,
+  isCursorUserDataDir,
   buildCursorComposerImportNotice,
 };

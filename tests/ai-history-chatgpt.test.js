@@ -12,9 +12,12 @@ const {
   extractChatgptDir,
   extractChatgptPath,
   isChatgptAppDir,
+  isChatgptAppDirQuick,
   buildChatgptExtractionStats,
+  detectConversationBundles,
   detectEncryptedConversationBundles,
   formatChatgptImportNotice,
+  isChatgptDataFile,
 } = require("../electron/parsers/ai-history/chatgpt");
 
 const FIXTURE_ROOT = path.join(__dirname, "fixtures/ai-history/chatgpt/com.openai.chat");
@@ -112,6 +115,45 @@ test("detectEncryptedConversationBundles finds conversations-v2 files", () => {
   } finally {
     fs.rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test("ChatGPT conversations-v3 bundles are discovered and inventoried as opaque evidence", async () => {
+  const os = require("node:os");
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "irflow-cgpt-v3-"));
+  const projectId = "project-g-p-test";
+  const bundleDir = path.join(tmp, projectId, "conversations-v3-account-test");
+  const bundlePath = path.join(bundleDir, "11111111-2222-4333-8444-555555555555.data");
+  fs.mkdirSync(bundleDir, { recursive: true });
+  fs.writeFileSync(bundlePath, Buffer.from([0x23, 0x98, 0x1f, 0x73]));
+
+  try {
+    assert.equal(isChatgptAppDirQuick(tmp), true);
+    assert.equal(isChatgptAppDir(tmp), true);
+    const bundles = detectConversationBundles(tmp);
+    assert.equal(bundles.length, 1);
+    assert.equal(bundles[0].version, 3);
+    assert.equal(bundles[0].projectId, projectId);
+    assert.equal(detectEncryptedConversationBundles(tmp).length, 0);
+
+    const rows = await extractChatgptDir(tmp, { user: "analyst" });
+    assert.equal(rows.length, 1);
+    assert.equal(rows[0].RecordType, "opaque_bundle");
+    assert.equal(rows[0].SessionId, "11111111-2222-4333-8444-555555555555");
+    assert.equal(rows[0].Workspace, projectId);
+    assert.equal(rows[0].User, "analyst");
+    assert.equal(rows._chatgptStats.v3BundleCount, 1);
+    assert.match(formatChatgptImportNotice(rows._chatgptStats), /opaque conversations-v3/i);
+
+    const direct = await extractChatgptPath(bundlePath);
+    assert.equal(direct.length, 1);
+    assert.equal(direct[0].SourceFile, bundlePath);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("ChatGPT discovery excludes unrelated TipKit SQLite state", () => {
+  assert.equal(isChatgptDataFile("/tmp/com.openai.chat/.tipkit/tips-store.db"), false);
 });
 
 test("buildChatgptExtractionStats distinguishes metadata-only imports", () => {

@@ -5,6 +5,7 @@ const TOOL_CLAUDE_CODE = "Claude Code";
 const TOOL_CHATGPT = "ChatGPT";
 const TOOL_GEMINI_CLI = "Gemini CLI";
 const TOOL_CODEX = "OpenAI Codex";
+const TOOL_GROK_BUILD = "Grok Build";
 const TOOL_CURSOR = "Cursor";
 const TOOL_COPILOT = "GitHub Copilot";
 
@@ -16,7 +17,14 @@ export function isAiHistorySourceFormat(sourceFormat) {
 /** Keep IPC/query payloads small while still showing that FullText exists in the grid. */
 export function aiHistoryQueryIpcOptions() {
   return {
-    truncateColumns: { Summary: 240, FullText: 240, Description: 480, Transcript: 480 },
+    truncateColumns: {
+      Summary: 240,
+      FullText: 240,
+      ToolInput: 2048,
+      ToolDescription: 1000,
+      Description: 480,
+      Transcript: 480,
+    },
   };
 }
 
@@ -59,8 +67,9 @@ export function buildAiHistoryColorRules(isDark) {
     { column: "Tool", condition: "equals", value: TOOL_CHATGPT, ...pick(10) },
     { column: "Tool", condition: "equals", value: TOOL_GEMINI_CLI, ...pick(11) },
     { column: "Tool", condition: "equals", value: TOOL_CODEX, ...pick(12) },
-    { column: "Tool", condition: "equals", value: TOOL_CURSOR, ...pick(13) },
-    { column: "Tool", condition: "equals", value: TOOL_COPILOT, ...pick(14) },
+    { column: "Tool", condition: "equals", value: TOOL_GROK_BUILD, ...pick(13) },
+    { column: "Tool", condition: "equals", value: TOOL_CURSOR, ...pick(14) },
+    { column: "Tool", condition: "equals", value: TOOL_COPILOT, ...pick(15) },
   ];
   return [...roleRules, ...toolRules];
 }
@@ -190,6 +199,8 @@ const AI_DETAIL_PINNED_FIELDS = [
   "AlsoInTools",
   "InvokedTool",
   "ToolName",
+  "ToolCommand",
+  "ToolDescription",
   "Model",
   "IsSidechain",
   "InputTokens",
@@ -200,6 +211,8 @@ const AI_DETAIL_FIELD_LABELS = {
   AlsoInTools: "Also in tools",
   InvokedTool: "Invoked tool",
   ToolName: "Invoked tool",
+  ToolCommand: "Exact command",
+  ToolDescription: "Tool description",
 };
 
 function fieldHasValue(row, field) {

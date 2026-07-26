@@ -13,6 +13,7 @@ const { tickFileProgress } = require("./extract-plan");
 const { formatTimestampUtc, makeRow, finalizeAiHistoryRows, aiHistoryDedupeKey, dedupeAiHistoryRows } = require("./row-utils");
 const { decodeWorkspaceUri, formatWorkspaceDisplay } = require("./workspace-utils");
 const { buildCopilotExtractionStats } = require("./import-meta");
+const copilotCli = require("./copilot-cli");
 
 const CHAT_SESSIONS_DIR = "chatSessions";
 const WORKSPACE_STORAGE = "workspaceStorage";
@@ -342,6 +343,8 @@ function isCopilotWorkspaceStorageDir(dirPath) {
 
 function resolveCopilotRoot(target) {
   if (!target) return null;
+  const cliRoot = copilotCli.resolveCopilotCliRoot(target);
+  if (cliRoot) return cliRoot;
   let p = target;
   try {
     if (fs.statSync(p).isFile()) p = path.dirname(p);
@@ -369,6 +372,8 @@ function resolveCopilotRoot(target) {
 
 function countCopilotExtractFiles(root, options = {}) {
   void options;
+  const cliRoot = copilotCli.resolveCopilotCliRoot(root);
+  if (cliRoot) return copilotCli.countCopilotCliExtractFiles(cliRoot);
   return collectCopilotSessionFiles(root).length;
 }
 
@@ -615,6 +620,9 @@ async function extractCopilotPath(target, attribution = {}, options = {}) {
     throw new Error(`Path does not exist: ${target}`);
   }
 
+  const cliRoot = copilotCli.resolveCopilotCliRoot(target);
+  if (cliRoot) return copilotCli.extractCopilotCliPath(cliRoot, attribution, options);
+
   let stat;
   try { stat = fs.statSync(target); } catch (e) {
     throw new Error(`Cannot read path: ${e.message}`);
@@ -705,4 +713,5 @@ module.exports = {
   extractResponseText,
   getCopilotExtractionStats,
   buildCopilotExtractionStats,
+  ...copilotCli,
 };
