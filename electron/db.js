@@ -180,6 +180,8 @@ class TimelineDB {
       headers,
       safeCols,
       tsColumns,
+      numericColumns: new Set(),
+      indexedCols: new Set(),
       rowCount: 0,
       ftsReady: false,
       isLargeFile,

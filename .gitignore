@@ -23,5 +23,8 @@ tools/jumplist-parser/
 tools/shellbag-parser/
 tools/artemis/
 .claude/
+# Claude fixture directories intentionally model the real artifact path.
+!tests/fixtures/**/.claude/
+!tests/fixtures/**/.claude/**
 *.bak
 *.code-workspace

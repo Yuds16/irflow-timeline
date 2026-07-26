@@ -15,8 +15,9 @@ const TimelineDB = require("../electron/db");
 
 test("getColumnUniqueValues samples unindexed columns on large tabs",
   { skip: HAVE_SQLITE ? false : "better-sqlite3 native module not built for this runtime" },
-  () => {
+  (t) => {
     const db = new TimelineDB();
+    t.after(() => db.closeAll());
     const tabId = "large-sample-tab";
     const headers = ["TimeCreated", "Channel"];
     db.createTab(tabId, headers);
@@ -29,18 +30,17 @@ test("getColumnUniqueValues samples unindexed columns on large tabs",
     for (let i = 0; i < 2000; i++) {
       ins.run(`2024-01-01 00:00:${String(i % 60).padStart(2, "0")}`, i % 3 === 0 ? "Security" : "Sysmon");
     }
-    meta.rowCount = 2000;
+    // Preserve the large-file population metadata while keeping the fixture small.
+    meta.rowCount = 1_000_000;
 
     const full = db.getColumnUniqueValues(tabId, "Channel", { limit: 100 });
     assert.ok(full.sampled, "unindexed column on large tab should be sampled");
-    assert.ok(full.some((r) => r.val === "Security"));
-    assert.ok(full.some((r) => r.val === "Sysmon"));
+    assert.ok(full.values.some((r) => r.val === "Security"));
+    assert.ok(full.values.some((r) => r.val === "Sysmon"));
 
     const indexed = db.getColumnUniqueValues(tabId, "TimeCreated", { limit: 100 });
     assert.equal(indexed.sampled, undefined, "indexed timestamp column uses full GROUP BY");
-
-    db.closeTab(tabId);
-    db.closeAll();
+    assert.ok(Array.isArray(indexed.values));
   });
 
 test("query-store exports sample tuning constants", () => {
@@ -50,8 +50,9 @@ test("query-store exports sample tuning constants", () => {
 
 test("getColumnUniqueValues accepts checkboxFilters as Set (AI history default Role filter)",
   { skip: HAVE_SQLITE ? false : "better-sqlite3 native module not built for this runtime" },
-  () => {
+  (t) => {
     const db = new TimelineDB();
+    t.after(() => db.closeAll());
     const tabId = "checkbox-set-tab";
     const headers = ["Role", "Tool"];
     db.createTab(tabId, headers);
@@ -62,15 +63,13 @@ test("getColumnUniqueValues accepts checkboxFilters as Set (AI history default R
     ins.run("user", "Claude Code");
     meta.rowCount = 3;
 
-    const vals = db.getColumnUniqueValues(tabId, "Tool", {
+    const result = db.getColumnUniqueValues(tabId, "Tool", {
       checkboxFilters: { Role: new Set(["user"]) },
       limit: 100,
     });
+    const vals = result.values;
     assert.ok(Array.isArray(vals));
     assert.equal(vals.length, 2);
     const tools = vals.map((r) => r.val).sort();
     assert.deepEqual(tools, ["Claude Code", "OpenAI Codex"]);
-
-    db.closeTab(tabId);
-    db.closeAll();
   });

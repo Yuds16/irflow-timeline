@@ -1170,7 +1170,11 @@ class QueryStoreMethods {
     let sql;
     if (distinct && isTsCol) {
       // Same instant can appear as ISO T/Z, space-separated, fractional seconds, etc.
-      const tsKey = `sort_datetime(${safeCol})`;
+      const rawTsKey = `sort_datetime(${safeCol})`;
+      // Normalize representation-only trailing fractional zeroes without changing
+      // sort_datetime() itself, whose fixed-width UTC output is part of the query API.
+      const tsKey = `CASE WHEN INSTR(${rawTsKey}, '.') > 0 `
+        + `THEN RTRIM(RTRIM(${rawTsKey}, '0'), '.') ELSE ${rawTsKey} END`;
       sql = `SELECT MIN(${valExpr}) AS val FROM ${fromExpr} ${whereClause} GROUP BY ${tsKey} ORDER BY MIN(${tsKey}) ${sortDirSql} LIMIT ?`;
     } else if (distinct && sortKey) {
       // Text: trim + case-insensitive group; order follows the grid sort column.

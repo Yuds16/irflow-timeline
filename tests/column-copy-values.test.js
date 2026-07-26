@@ -12,8 +12,9 @@ const TimelineDB = require("../electron/db");
 
 test("getColumnValues follows grid sortCol/sortDir, not import rowid order",
   { skip: HAVE_SQLITE ? false : "better-sqlite3 native module not built for this runtime" },
-  () => {
+  (t) => {
     const db = new TimelineDB();
+    t.after(() => db.closeAll());
     const tabId = "sort-copy-tab";
     const headers = ["TimeCreated", "Channel"];
     db.createTab(tabId, headers);
@@ -47,15 +48,13 @@ test("getColumnValues follows grid sortCol/sortDir, not import rowid order",
       "2026-04-29 10:00:00",
       "2026-04-29 08:00:00",
     ]);
-
-    db.closeTab(tabId);
-    db.closeAll();
   });
 
 test("getColumnValues distinct collapses timestamp format variants to one value",
   { skip: HAVE_SQLITE ? false : "better-sqlite3 native module not built for this runtime" },
-  () => {
+  (t) => {
     const db = new TimelineDB();
+    t.after(() => db.closeAll());
     const tabId = "distinct-ts-tab";
     db.createTab(tabId, ["TimeCreated"]);
     const meta = db.databases.get(tabId);
@@ -74,7 +73,4 @@ test("getColumnValues distinct collapses timestamp format variants to one value"
       sortDir: "asc",
     });
     assert.equal(unique.values.length, 1);
-
-    db.closeTab(tabId);
-    db.closeAll();
   });
