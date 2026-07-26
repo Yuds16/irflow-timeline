@@ -12,8 +12,9 @@ const TimelineDB = require("../electron/db");
 
 test("date range filter matches timestamp format variants via sort_datetime",
   { skip: HAVE_SQLITE ? false : "better-sqlite3 native module not built for this runtime" },
-  () => {
+  (t) => {
     const db = new TimelineDB();
+    t.after(() => db.closeAll());
     const tabId = "date-range-tab";
     db.createTab(tabId, ["TimeCreated"]);
     const meta = db.databases.get(tabId);
@@ -40,7 +41,4 @@ test("date range filter matches timestamp format variants via sort_datetime",
       inRange.rows.map((r) => r.TimeCreated),
       ["2026-04-29 10:00:00", "2026-04-29T12:00:00Z"],
     );
-
-    db.closeTab(tabId);
-    db.closeAll();
   });
