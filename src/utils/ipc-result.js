@@ -19,3 +19,8 @@ export function ipcErrorMessage(result, fallback = "Analysis failed") {
   const msg = result.message || result.error;
   return msg ? String(msg) : fallback;
 }
+
+export function isIpcCancelled(result) {
+  if (!isIpcError(result)) return false;
+  return /cancelled|canceled/i.test(ipcErrorMessage(result, ""));
+}

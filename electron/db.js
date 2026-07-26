@@ -1051,7 +1051,10 @@ class TimelineDB {
       let trackedEvents = 0;
       if (cols.eventId && meta.colMap[cols.eventId]) {
         const eidSafe = meta.colMap[cols.eventId];
-        const uiEids = ["4624","4625","4648","4672","4769","1149","21","22","25","4698","5140","5145","7045","4697","4688","1"];
+        // Derived from the detector registry so the pre-flight count can never advertise
+        // events the analysis will not request (or miss ones it will).
+        const { PREVIEW_EVENT_IDS } = require("./analyzers/lateral-movement/detector-registry");
+        const uiEids = PREVIEW_EVENT_IDS;
         const eidWhere = wc ? `${wc} AND` : "WHERE";
         const eidRows = db.prepare(`SELECT ${eidSafe} as eid, COUNT(*) as cnt FROM data ${eidWhere} ${eidSafe} IN (${uiEids.map(() => "?").join(",")}) GROUP BY ${eidSafe}`).all(...params, ...uiEids);
         for (const r of eidRows) { if (r.eid != null) { const k = String(r.eid).trim(); eventCounts[k] = r.cnt; trackedEvents += r.cnt; } }
@@ -1186,6 +1189,79 @@ class TimelineDB {
       applyStandardFilters: (...args) => this._applyStandardFilters(...args),
     };
     return _analyze(meta, options, ctx);
+  }
+
+  /**
+   * Multi-source persistence — merges EVTX + registry evidence from several tabs so a
+   * finding in one file can be corroborated by events in another (a 7045 in System.evtx
+   * against 4688 in Security.evtx and 4104 in PowerShell%4Operational.evtx).
+   */
+  getMultiSourcePersistence(tabIds, options = {}) {
+    const { getMultiSourcePersistence: _fn } = require("./analyzers/persistence/multi-source");
+    const metas = this._persistenceMetas(tabIds, options);
+    if (metas.length === 0) return { items: [], incidents: [], warnings: [], stats: {}, error: "No valid tabs" };
+    const ctx = {
+      applyStandardFilters: (...args) => this._applyStandardFilters(...args),
+      ensureIndex: (...args) => this._ensureIndex(...args),
+    };
+    return _fn(metas, options, ctx);
+  }
+
+  /**
+   * Preview for multi-source persistence — what each selected tab contributes.
+   */
+  previewMultiSourcePersistence(tabIds, options = {}) {
+    const { previewMultiSourcePersistence: _fn } = require("./analyzers/persistence/multi-source");
+    const metas = this._persistenceMetas(tabIds, options);
+    if (metas.length === 0) return { tabs: [], totalEvents: 0, error: "No valid tabs" };
+    const ctx = {
+      applyStandardFilters: (...args) => this._applyStandardFilters(...args),
+    };
+    return _fn(metas, options, ctx);
+  }
+
+  /**
+   * Persistence ⇄ lateral movement join. Runs both analyses over the same tabs and returns
+   * lateral movement's graph with each node annotated by what persistence found there, plus
+   * the pivot edges persistence can prove (a logon that LEFT something behind).
+   */
+  getPersistencePivotJoin(tabIds, options = {}) {
+    const { joinPersistenceToLateralMovement } = require("./analyzers/persistence/lm-handoff");
+    const ids = Array.isArray(tabIds) ? tabIds : [tabIds].filter(Boolean);
+    if (ids.length === 0) return { nodes: [], pivotEdges: [], byHost: {}, stats: {}, error: "No tabs selected" };
+
+    const persistence = ids.length > 1
+      ? this.getMultiSourcePersistence(ids, options)
+      : this.getPersistenceAnalysis(ids[0], options);
+    if (persistence?.error) return { nodes: [], pivotEdges: [], byHost: {}, stats: {}, error: persistence.error };
+
+    let lateral = null;
+    try {
+      lateral = ids.length > 1
+        ? this.getMultiSourceLateralMovement(ids, options)
+        : this.getLateralMovement(ids[0], options);
+    } catch (err) {
+      lateral = { nodes: [], edges: [], error: err.message };
+    }
+
+    const joined = joinPersistenceToLateralMovement(lateral || {}, persistence);
+    return {
+      ...joined,
+      // A lateral-movement failure must not hide the persistence half: the per-host rollup
+      // and pivot edges are derived from persistence alone and stay valid without a graph.
+      lateralMovementError: lateral?.error || null,
+      persistenceStats: persistence.stats || {},
+      error: null,
+    };
+  }
+
+  _persistenceMetas(tabIds, options = {}) {
+    const tabLabels = options._tabLabels || {};
+    return (tabIds || []).map((id) => {
+      const meta = this.databases.get(id);
+      if (!meta) return null;
+      return { meta, tabId: id, label: tabLabels[id] || id };
+    }).filter(Boolean);
   }
 
   /**

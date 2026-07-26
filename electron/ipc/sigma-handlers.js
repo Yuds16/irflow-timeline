@@ -12,7 +12,8 @@ const registerSigmaHistoryHandlers = require("./sigma/history-handlers");
 const registerSigmaResultActionHandlers = require("./sigma/result-action-handlers");
 const registerSigmaRuleSettingsHandlers = require("./sigma/rule-settings-handlers");
 
-module.exports = function registerSigmaHandlers(safeHandle, safeSend, { db, nextTabId, _activeWindow, scheduleIndexBuild, jobManager }) {
+module.exports = function registerSigmaHandlers(safeHandle, safeSend, ctx) {
+  const { db, nextTabId, _activeWindow, scheduleIndexBuild, jobManager } = ctx;
   const { scanSigmaRules } = require("../analyzers/sigma");
   const { SigmaResultStore, createTempResultPath } = require("../analyzers/sigma/result-store");
   const scanHistory = require("../analyzers/sigma/scan-history");
@@ -23,7 +24,9 @@ module.exports = function registerSigmaHandlers(safeHandle, safeSend, { db, next
   const { getHayabusaRulesDir, snapshotRuleDirectory } = require("../analyzers/sigma/rule-diff");
   const { validateEvtxScanRequest } = require("../analyzers/sigma/scan-preflight");
   const { scanEvtxDirectory, findEvtxFiles, getHayabusaStatus, downloadHayabusa, updateHayabusaRules, getHayabusaRulesUpdateMeta, updateHayabusa, runLogonSummary, runComputerMetrics, runEidMetrics, runLogMetrics, runSearch, runPivotKeywords, runExtractBase64, runLevelTuning, getLevelTuningPath, getRulesConfigDir, getAvailableProfiles, getGeoIpStatus, downloadGeoIp, getGeoIpDir, cancelScan } = require("../analyzers/sigma/evtx-scanner");
-  const pathAuthorizer = new PathAuthorizer();
+  // Shared with the other IPC modules (see main.js) so a path validated in one scope
+  // can be granted in another; scope names keep them isolated otherwise.
+  const pathAuthorizer = ctx.pathAuthorizer || new PathAuthorizer();
 
   // ── Job-based scan state ──────────────────────────────────────────
   // Each scan (tab or directory) gets a unique jobId. Result rows live

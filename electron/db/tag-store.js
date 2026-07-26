@@ -323,7 +323,7 @@ class TagStoreMethods {
       // (e.g. a typo'd `{ filters: [...] }`) that _applyStandardFilters drops. An empty options
       // object ({}) remains a valid intentional tag-all (e.g. Sigma result tagging).
       if (whereConditions.length === 0) {
-        const RECOGNIZED = new Set(["columnFilters", "checkboxFilters", "bookmarkedOnly", "tagFilter", "dateRangeFilters", "advancedFilters", "searchTerm", "searchMode", "searchCondition", "rowIdFilter"]);
+        const RECOGNIZED = new Set(["columnFilters", "checkboxFilters", "bookmarkedOnly", "tagFilter", "dateRangeFilters", "advancedFilters", "searchTerm", "searchMode", "searchCondition", "rowIdFilter", "excludedRowIds"]);
         const unknown = Object.keys(options || {}).filter((k) => !RECOGNIZED.has(k));
         if (unknown.length > 0) {
           return { tagged: 0, error: `Refused to tag: unrecognized filter option(s) [${unknown.join(", ")}] matched no rows (would have tagged the entire tab).` };

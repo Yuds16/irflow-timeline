@@ -29,15 +29,29 @@ function callAnalyzer(db, method, payload = {}) {
     case "detectKapeCollectionHost":
       return db.detectKapeCollectionHost(tabId);
     case "getLateralMovement":
-      return db.getLateralMovement(tabId, options);
+      return db.getLateralMovement(tabId, {
+        ...options,
+        progressCb: (p) => progress({ phase: "lateral-movement", method: "getLateralMovement", tabId, ...p }),
+      });
     case "getMultiSourceLateralMovement":
-      return db.getMultiSourceLateralMovement(tabIds, options);
+      return db.getMultiSourceLateralMovement(tabIds, {
+        ...options,
+        progressCb: (p) => progress({ phase: "lateral-movement", method: "getMultiSourceLateralMovement", tabIds, ...p }),
+      });
     case "previewMultiSourceLateralMovement":
       return db.previewMultiSourceLateralMovement(tabIds, options);
     case "previewPersistenceAnalysis":
       return db.previewPersistenceAnalysis(tabId, options);
     case "getPersistenceAnalysis":
       return db.getPersistenceAnalysis(tabId, options);
+    case "previewMultiSourcePersistence":
+      return db.previewMultiSourcePersistence(tabIds, options);
+    case "getMultiSourcePersistence":
+      return db.getMultiSourcePersistence(tabIds, options);
+    case "getPersistencePivotJoin":
+      return db.getPersistencePivotJoin(tabIds, options);
+    case "analyzeKapeCollection":
+      return require("../analyzers/persistence/collection-analysis").analyzeCollection(payload.dir, options, {});
     case "scanRansomwareExtensions":
       return db.scanRansomwareExtensions(tabId, (p) => progress({ phase: "ransomware-scan", tabId, ...p }));
     case "analyzeRansomware":

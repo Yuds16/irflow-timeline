@@ -50,3 +50,104 @@ test("JobManager starts workers with resourceLimits instead of invalid execArgv 
   const { promise } = manager.startWorkerJob({ type: "heap-smoke", worker: workerPath });
   assert.deepEqual(await promise, { ok: true });
 });
+
+test("JobManager delivers transient results without retaining the completed payload", async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "irflow-worker-transient-"));
+  t.after(() => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ } });
+  const workerPath = path.join(tmp, "result-worker.js");
+  fs.writeFileSync(
+    workerPath,
+    [
+      '"use strict";',
+      'const { parentPort } = require("worker_threads");',
+      'parentPort.postMessage({ type: "result", result: { rows: ["large-query-payload"] } });',
+      "",
+    ].join("\n"),
+  );
+
+  const manager = new JobManager({ safeSend: () => {}, dbg: () => {} });
+  const { jobId, promise } = manager.startWorkerJob({
+    type: "query",
+    worker: workerPath,
+    retainResult: false,
+  });
+
+  assert.deepEqual(await promise, { rows: ["large-query-payload"] });
+  assert.equal(manager.jobs.has(jobId), false);
+  assert.equal(manager.list().some((job) => job.id === jobId), false);
+});
+
+test("JobManager queues workers when a concurrency limit is reached", async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "irflow-worker-queue-"));
+  t.after(() => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ } });
+  const workerPath = path.join(tmp, "delay-worker.js");
+  fs.writeFileSync(
+    workerPath,
+    [
+      '"use strict";',
+      'const { parentPort, workerData } = require("worker_threads");',
+      'setTimeout(() => parentPort.postMessage({ type: "result", result: { id: workerData.id } }), 40);',
+      "",
+    ].join("\n"),
+  );
+
+  const manager = new JobManager({ safeSend: () => {}, dbg: () => {} });
+  const first = manager.startWorkerJob({
+    type: "query",
+    worker: workerPath,
+    workerData: { id: "first" },
+    concurrencyKey: "query",
+    maxConcurrent: 1,
+  });
+  const second = manager.startWorkerJob({
+    type: "query",
+    worker: workerPath,
+    workerData: { id: "second" },
+    concurrencyKey: "query",
+    maxConcurrent: 1,
+  });
+
+  const statuses = new Map(manager.list().map((job) => [job.id, job.status]));
+  assert.equal(statuses.get(first.jobId), "running");
+  assert.equal(statuses.get(second.jobId), "queued");
+
+  assert.deepEqual(await first.promise, { id: "first" });
+  assert.deepEqual(await second.promise, { id: "second" });
+  assert.equal(manager.list().find((job) => job.id === second.jobId)?.status, "completed");
+});
+
+test("JobManager can cancel a queued worker before it starts", async (t) => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "irflow-worker-queue-cancel-"));
+  t.after(() => { try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ } });
+  const workerPath = path.join(tmp, "delay-worker.js");
+  fs.writeFileSync(
+    workerPath,
+    [
+      '"use strict";',
+      'const { parentPort, workerData } = require("worker_threads");',
+      'setTimeout(() => parentPort.postMessage({ type: "result", result: { id: workerData.id } }), 40);',
+      "",
+    ].join("\n"),
+  );
+
+  const manager = new JobManager({ safeSend: () => {}, dbg: () => {} });
+  const first = manager.startWorkerJob({
+    type: "query",
+    worker: workerPath,
+    workerData: { id: "first" },
+    concurrencyKey: "query",
+    maxConcurrent: 1,
+  });
+  const second = manager.startWorkerJob({
+    type: "query",
+    worker: workerPath,
+    workerData: { id: "second" },
+    concurrencyKey: "query",
+    maxConcurrent: 1,
+  });
+
+  assert.deepEqual(manager.cancel(second.jobId), { ok: true });
+  await assert.rejects(second.promise, /Job cancelled/);
+  assert.deepEqual(await first.promise, { id: "first" });
+  assert.equal(manager.list().find((job) => job.id === second.jobId)?.status, "cancelled");
+});

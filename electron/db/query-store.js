@@ -178,6 +178,167 @@ class QueryStoreMethods {
   }
 
   /**
+   * Return stable SQLite row IDs for an absolute range in the current filtered
+   * and sorted view. This is used by Shift+Click and row navigation so neither
+   * workflow is limited to the renderer's 10,000-row cache.
+   */
+  getRowIdsInRange(tabId, options = {}) {
+    const meta = this.databases.get(tabId);
+    if (!meta) return { rowIds: [] };
+
+    const offset = Math.max(0, Number.isSafeInteger(options.offset) ? options.offset : 0);
+    const requestedLimit = Number.isSafeInteger(options.limit) ? options.limit : 1;
+    const limit = Math.max(0, requestedLimit);
+    if (limit === 0) return { rowIds: [] };
+
+    const params = [];
+    const whereConditions = [];
+    this._applyStandardFilters(options, meta, whereConditions, params);
+    const whereClause = whereConditions.length > 0
+      ? `WHERE ${whereConditions.join(" AND ")}`
+      : "";
+    const orderExpression = this._buildOrderExpression(
+      meta,
+      tabId,
+      options.sortCol || null,
+      options.sortDir || "asc",
+    );
+    const rows = meta.db.prepare(
+      `SELECT data.rowid AS _rowid FROM data ${whereClause} ORDER BY ${orderExpression} LIMIT ? OFFSET ?`
+    ).all(...params, limit, offset);
+    return { rowIds: rows.map((row) => Number(row._rowid)).filter(Number.isSafeInteger) };
+  }
+
+  /**
+   * Count how many explicit selected row IDs are still visible under the
+   * current filters. The renderer uses this to disclose hidden selections.
+   */
+  countRowsByIdsMatching(tabId, rowIds, options = {}) {
+    const meta = this.databases.get(tabId);
+    if (!meta) return { matching: 0 };
+
+    const params = [];
+    const whereConditions = [];
+    this._applyStandardFilters(options, meta, whereConditions, params);
+    this._applyRowIdFilter(rowIds, whereConditions);
+    const whereClause = whereConditions.length > 0
+      ? `WHERE ${whereConditions.join(" AND ")}`
+      : "";
+    const matching = meta.db.prepare(
+      `SELECT COUNT(*) AS cnt FROM data ${whereClause}`
+    ).get(...params)?.cnt || 0;
+    return { matching };
+  }
+
+  /**
+   * Find the next/previous global-search match in a highlighted (unfiltered)
+   * view. SQLite ranks the full filtered result set, so F3 can cross renderer
+   * cache boundaries and returns both the absolute row index and match count.
+   */
+  findSearchMatch(tabId, options = {}) {
+    const meta = this.databases.get(tabId);
+    if (!meta) return { index: -1, rowId: null, position: -1, totalMatches: 0 };
+
+    const matchSearchTerm = String(options.matchSearchTerm || "").trim();
+    if (!matchSearchTerm) {
+      return { index: -1, rowId: null, position: -1, totalMatches: 0 };
+    }
+
+    const baseOptions = { ...options, searchTerm: "" };
+    const baseParams = [];
+    const baseConditions = [];
+    this._applyStandardFilters(baseOptions, meta, baseConditions, baseParams);
+    const baseWhere = baseConditions.length > 0
+      ? `WHERE ${baseConditions.join(" AND ")}`
+      : "";
+
+    const matchParams = [];
+    const matchConditions = [];
+    this._applySearch(
+      matchSearchTerm,
+      options.matchSearchMode || options.searchMode || "mixed",
+      meta,
+      matchConditions,
+      matchParams,
+      options.matchSearchCondition || options.searchCondition || "contains",
+    );
+    if (matchConditions.length === 0) {
+      return { index: -1, rowId: null, position: -1, totalMatches: 0 };
+    }
+
+    const orderExpression = this._buildOrderExpression(
+      meta,
+      tabId,
+      options.sortCol || null,
+      options.sortDir || "asc",
+    );
+    const currentIndex = Number.isSafeInteger(options.currentIndex)
+      ? options.currentIndex
+      : -1;
+    const backwards = Number(options.direction) < 0;
+    const comparator = backwards ? "<" : ">";
+    const resultOrder = backwards ? "DESC" : "ASC";
+    const rankedSql = `
+      WITH ranked AS (
+        SELECT data.rowid AS _rowid,
+               ROW_NUMBER() OVER (ORDER BY ${orderExpression}) - 1 AS _index
+        FROM data
+        ${baseWhere}
+      ),
+      matches AS (
+        SELECT ranked._rowid,
+               ranked._index,
+               ROW_NUMBER() OVER (ORDER BY ranked._index) - 1 AS _position,
+               COUNT(*) OVER () AS _total
+        FROM ranked
+        JOIN data ON data.rowid = ranked._rowid
+        WHERE ${matchConditions.join(" AND ")}
+      )
+      SELECT _rowid, _index, _position, _total
+      FROM matches
+      WHERE _index ${comparator} ?
+      ORDER BY _index ${resultOrder}
+      LIMIT 1`;
+    const args = [...baseParams, ...matchParams, currentIndex];
+    let row = meta.db.prepare(rankedSql).get(...args);
+
+    // Wrap at either end, matching common F3 navigation behavior.
+    if (!row) {
+      const wrapSql = rankedSql.replace(
+        `WHERE _index ${comparator} ?`,
+        "WHERE ? IS NOT NULL",
+      );
+      row = meta.db.prepare(wrapSql).get(...baseParams, ...matchParams, currentIndex);
+    }
+    if (!row) return { index: -1, rowId: null, position: -1, totalMatches: 0 };
+    return {
+      index: Number(row._index),
+      rowId: Number(row._rowid),
+      position: Number(row._position),
+      totalMatches: Number(row._total),
+    };
+  }
+
+  _buildOrderExpression(meta, tabId, sortCol = null, sortDir = "asc") {
+    const dir = sortDir === "desc" ? "DESC" : "ASC";
+    if (sortCol === "__vt__") {
+      return `COALESCE((SELECT MIN(CASE tag WHEN 'VT: Malicious' THEN 1 WHEN 'VT: Suspicious' THEN 2 WHEN 'VT: Clean' THEN 3 ELSE 4 END) FROM tags WHERE tags.rowid = data.rowid AND tag LIKE 'VT:%'), 5) ${dir}, data.rowid ASC`;
+    }
+
+    const safeCol = sortCol ? meta.colMap[sortCol] : null;
+    if (!safeCol) return "data.rowid ASC";
+
+    this._ensureIndex(tabId, sortCol);
+    if (meta.tsColumns.has(sortCol)) {
+      return `sort_datetime(${safeCol}) ${dir}, data.rowid ASC`;
+    }
+    if (meta.numericColumns.has(sortCol)) {
+      return `CAST(${safeCol} AS REAL) ${dir}, data.rowid ASC`;
+    }
+    return `${safeCol} COLLATE NOCASE ${dir}, data.rowid ASC`;
+  }
+
+  /**
    * Apply global search conditions to a WHERE clause.
    * Handles FTS, regex, and column-specific search uniformly.
    */
@@ -416,23 +577,21 @@ class QueryStoreMethods {
   }
 
   _applyDateRangeFilters(dateRangeFilters, meta, whereConditions, params) {
-    const tsSet = meta.tsColumns || new Set();
     for (const [cn, range] of Object.entries(dateRangeFilters)) {
       const sc = meta.colMap[cn];
       if (!sc) continue;
-      if (tsSet.has(cn)) {
-        const sortExpr = `sort_datetime(${sc})`;
-        if (range.from) {
-          whereConditions.push(`${sortExpr} >= ?`);
-          params.push(this._dateRangeBoundKey(range.from));
-        }
-        if (range.to) {
-          whereConditions.push(`${sortExpr} <= ?`);
-          params.push(this._dateRangeBoundKey(range.to));
-        }
-      } else {
-        if (range.from) { whereConditions.push(`${sc} >= ?`); params.push(range.from); }
-        if (range.to) { whereConditions.push(`${sc} <= ?`); params.push(range.to); }
+      // datetime-local inputs use "T" while most forensic imports use a space.
+      // Raw TEXT comparison therefore excludes valid rows at the lower bound.
+      // Use the same canonical UDF as timestamp sorting so ranges also honor
+      // explicit offsets and mixed input formats.
+      const comparable = meta.tsColumns?.has(cn) ? `sort_datetime(${sc})` : sc;
+      if (range.from) {
+        whereConditions.push(`${comparable} >= sort_datetime(?)`);
+        params.push(range.from);
+      }
+      if (range.to) {
+        whereConditions.push(`${comparable} <= sort_datetime(?)`);
+        params.push(range.to);
       }
     }
   }
@@ -487,6 +646,18 @@ class QueryStoreMethods {
     whereConditions.push(chunks.length === 1 ? chunks[0] : `(${chunks.join(" OR ")})`);
   }
 
+  _applyExcludedRowIds(excludedRowIds, whereConditions) {
+    const ids = this._normalizeRowIdFilter(excludedRowIds);
+    if (!ids || ids.length === 0) return;
+
+    const chunks = [];
+    const CHUNK_SIZE = 5000;
+    for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+      chunks.push(`data.rowid NOT IN (${ids.slice(i, i + CHUNK_SIZE).join(",")})`);
+    }
+    whereConditions.push(chunks.length === 1 ? chunks[0] : `(${chunks.join(" AND ")})`);
+  }
+
   /**
    * SQL sort key for a column (no ORDER BY / direction). Returns null if unknown.
    */
@@ -504,15 +675,7 @@ class QueryStoreMethods {
    * ORDER BY clause matching the grid's current sort (shared by queryRows, export, column copy).
    */
   _buildOrderClause(meta, tabId, sortCol, sortDir) {
-    if (!sortCol) return "ORDER BY data.rowid";
-    if (sortCol === "__vt__") {
-      const dir = sortDir === "desc" ? "DESC" : "ASC";
-      return `ORDER BY COALESCE((SELECT MIN(CASE tag WHEN 'VT: Malicious' THEN 1 WHEN 'VT: Suspicious' THEN 2 WHEN 'VT: Clean' THEN 3 ELSE 4 END) FROM tags WHERE tags.rowid = data.rowid AND tag LIKE 'VT:%'), 5) ${dir}, data.rowid ASC`;
-    }
-    const sortKey = this._sortKeyExpression(meta, tabId, sortCol);
-    if (!sortKey) return "ORDER BY data.rowid";
-    const dir = sortDir === "desc" ? "DESC" : "ASC";
-    return `ORDER BY ${sortKey} ${dir}`;
+    return `ORDER BY ${this._buildOrderExpression(meta, tabId, sortCol, sortDir)}`;
   }
 
   /**
@@ -527,8 +690,10 @@ class QueryStoreMethods {
       dateRangeFilters = {}, advancedFilters = [],
       searchTerm = "", searchMode = "mixed", searchCondition = "contains",
       rowIdFilter = null,
+      excludedRowIds = null,
     } = options;
     this._applyRowIdFilter(rowIdFilter, whereConditions);
+    this._applyExcludedRowIds(excludedRowIds, whereConditions);
     this._applyColumnFilters(columnFilters, meta, whereConditions, params);
     this._applyCheckboxFilters(checkboxFilters, meta, whereConditions, params);
     this._applyDateRangeFilters(dateRangeFilters, meta, whereConditions, params);
@@ -897,10 +1062,10 @@ class QueryStoreMethods {
    */
   getColumnUniqueValues(tabId, colName, options = {}) {
     const meta = this.databases.get(tabId);
-    if (!meta) return [];
+    if (!meta) return { values: [], totalDistinct: 0, truncated: false };
 
     const safeCol = meta.colMap[colName];
-    if (!safeCol) return [];
+    if (!safeCol) return { values: [], totalDistinct: 0, truncated: false };
 
     const {
       filterText = "",
@@ -944,13 +1109,31 @@ class QueryStoreMethods {
         SELECT ${valExpr} as val FROM data ${whereClause} ORDER BY rowid LIMIT ${LARGE_FILE_UNIQUE_SAMPLE_ROWS}
       ) GROUP BY val ORDER BY cnt DESC LIMIT ?`;
     } else {
-      sql = `SELECT ${valExpr} as val, COUNT(*) as cnt FROM data ${whereClause} GROUP BY ${valExpr} ORDER BY cnt DESC LIMIT ?`;
+      // Return the size of the complete value set as metadata instead of making
+      // the UI imply that the bounded result is exhaustive.
+      sql = `
+        SELECT val, cnt, COUNT(*) OVER() AS total_distinct
+        FROM (
+          SELECT ${valExpr} AS val, COUNT(*) AS cnt
+          FROM data ${whereClause}
+          GROUP BY ${valExpr}
+        )
+        ORDER BY cnt DESC
+        LIMIT ?
+      `;
     }
     params.push(limit);
 
     const rows = db.prepare(sql).all(...params);
-    if (useSample) rows.sampled = true;
-    return rows;
+    const totalDistinct = useSample
+      ? rows.length
+      : Number(rows[0]?.total_distinct || 0);
+    return {
+      values: rows.map(({ val, cnt }) => ({ val, cnt })),
+      totalDistinct,
+      truncated: useSample || totalDistinct > rows.length,
+      ...(useSample ? { sampled: true } : {}),
+    };
   }
 
   /**

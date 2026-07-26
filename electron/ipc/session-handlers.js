@@ -74,6 +74,35 @@ async function openAuthorizedAiSource({ filePath, lineNumber } = {}, openPath = 
 function registerSessionHandlers(safeHandle, safeSend, ctx) {
   const { db, _activeWindow, enqueueImport, _loadRecentFiles, _saveRecentFiles, _rebuildMenu, _tabMeta, _pendingIndexTabs, nextTabId, updateController, jobManager, scheduleIndexBuild } = ctx;
 
+  // A dropped/opened directory passes existsSync, so without this guard it reaches parseFile(),
+  // matches no extension rule, and dies in parseCSVStream with a raw "EISDIR: illegal operation
+  // on a directory". Directory ingest is not supported yet; say so instead of leaking errno.
+  function isDirectorySafe(p) {
+    try { return fs.statSync(p).isDirectory(); } catch { return false; }
+  }
+
+  function partitionUnsupportedDirectories(planned) {
+    const supported = [];
+    const skippedDirs = [];
+    for (const item of planned || []) {
+      if (isDirectorySafe(item?.path) && !item?.opts?.aiHistoryTool) {
+        skippedDirs.push(item.path);
+      } else {
+        supported.push(item);
+      }
+    }
+    return { supported, skippedDirs };
+  }
+
+  function notifySkippedDirectories(skippedDirs) {
+    if (!skippedDirs.length) return;
+    const names = skippedDirs.map((p) => path.basename(p));
+    const label = names.length === 1 ? `"${names[0]}" is a folder` : `${names.length} folders were skipped`;
+    safeSend("import-error", {
+      error: `${label}. Folder import is not supported yet — open the individual files inside it (e.g. the .evtx files under Windows/System32/winevt/logs).`,
+    });
+  }
+
   // Open file dialog
   safeHandle("open-file-dialog", async () => {
     const result = await dialog.showOpenDialog(_activeWindow(), openDialogOptions({
@@ -85,10 +114,9 @@ function registerSessionHandlers(safeHandle, safeSend, ctx) {
     for (const picked of result.filePaths || []) {
       if (picked) authorizeAiArtifactPick(picked);
     }
-    const { enqueued, scopePending } = enqueuePlannedImports(
-      planImportPaths(result.filePaths),
-      enqueueImport,
-    );
+    const { supported, skippedDirs } = partitionUnsupportedDirectories(planImportPaths(result.filePaths));
+    notifySkippedDirectories(skippedDirs);
+    const { enqueued, scopePending } = enqueuePlannedImports(supported, enqueueImport);
     if (scopePending.length) return { scopePending };
     return enqueued > 0 ? true : null;
   });
@@ -106,7 +134,11 @@ function registerSessionHandlers(safeHandle, safeSend, ctx) {
   safeHandle("open-recent-file", (event, { filePath }) => {
     if (fs.existsSync(filePath)) {
       authorizeAiArtifactPick(filePath);
-      const { scopePending } = enqueuePlannedImports(planImportPaths([filePath]), enqueueImport);
+      const { supported, skippedDirs } = partitionUnsupportedDirectories(planImportPaths([filePath]));
+      if (skippedDirs.length) {
+        return { error: `"${path.basename(filePath)}" is a folder. Folder import is not supported yet — open the individual files inside it.` };
+      }
+      const { scopePending } = enqueuePlannedImports(supported, enqueueImport);
       if (scopePending.length) return { scopePending };
       return true;
     }
@@ -362,9 +394,10 @@ function registerSessionHandlers(safeHandle, safeSend, ctx) {
   // Import files by path (used for drag-and-drop)
   safeHandle("import-files", async (event, { filePaths, items } = {}) => {
     const planned = applyClientAiScopeChoices(planImportPaths(filePaths || []), items);
-    const { enqueued, scopePending } = enqueuePlannedImports(planned, enqueueImport);
-    if (scopePending.length) return { scopePending };
-    return enqueued > 0;
+    const { supported, skippedDirs } = partitionUnsupportedDirectories(planned);
+    notifySkippedDirectories(skippedDirs);
+    const { enqueued, scopePending } = enqueuePlannedImports(supported, enqueueImport);
+    return { imported: enqueued, skippedDirs, scopePending };
   });
 
   // Import file for session restore (no dialog)

@@ -34,7 +34,11 @@ async function importFile(filePath, preTabId, preSheetName, deps, queueItem = {}
 
   const tabId = preTabId || nextTabId();
   let fileName;
-  try { fileName = decodeURIComponent(path.basename(filePath)); } catch { fileName = path.basename(filePath); }
+  if (queueItem.displayName) {
+    fileName = queueItem.displayName;
+  } else {
+    try { fileName = decodeURIComponent(path.basename(filePath)); } catch { fileName = path.basename(filePath); }
+  }
 
   const aiHistory = queueItem.aiHistoryTool
     ? {
