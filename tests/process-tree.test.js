@@ -725,3 +725,118 @@ test("EID 4673 on a PID that was never created does not attach to any node", () 
   assert.equal(real.privilegeUse, null, "orphan 4673 must not attach to an unrelated process");
   assert.equal(tree.stats.privilegeMatched, 0);
 });
+
+// ── P2 golden corpus: multi-EID Sysmon fixture (1 + 10 + 4673 + 3) ──
+// Locks the end-to-end analyzer post-processing contract: GUID tree links,
+// injection/hollowing summary, privilege-use summary, network activity, and
+// stats counters. Fixture is in-memory (same stub pattern as above).
+
+const GOLDEN_HEADERS = [
+  "ProcessId", "ParentProcessId", "ProcessGuid", "ParentProcessGuid",
+  "Image", "ParentImage", "CommandLine", "User", "UtcTime",
+  "EventID", "Provider", "Computer",
+  "SourceProcessId", "TargetProcessId", "TargetProcessGuid", "GrantedAccess",
+  "PrivilegeList",
+];
+
+test("golden corpus: Sysmon create + EID10 + 4673 + EID3 attach to the same process entity", () => {
+  const attackerGuid = "{aaaaaaaa-1111-1111-1111-111111111111}";
+  const parentGuid = "{bbbbbbbb-0000-0000-0000-000000000001}";
+  const victimGuid = "{cccccccc-2222-2222-2222-222222222222}";
+  const rows = [
+    // Parent explorer
+    {
+      ProcessId: "1000", ParentProcessId: "500",
+      ProcessGuid: parentGuid, ParentProcessGuid: "{00000000-0000-0000-0000-000000000000}",
+      Image: "C:\\Windows\\explorer.exe", ParentImage: "C:\\Windows\\System32\\userinit.exe",
+      CommandLine: "explorer.exe", User: "CORP\\alice", UtcTime: "2026-04-01 12:00:00.000",
+      EventID: "1", Provider: "Microsoft-Windows-Sysmon", Computer: "WS-GOLDEN",
+      SourceProcessId: "", TargetProcessId: "", TargetProcessGuid: "", GrantedAccess: "",
+      PrivilegeList: "",
+    },
+    // Attacker powershell create
+    {
+      ProcessId: "4242", ParentProcessId: "1000",
+      ProcessGuid: attackerGuid, ParentProcessGuid: parentGuid,
+      Image: "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      ParentImage: "C:\\Windows\\explorer.exe",
+      CommandLine: "powershell.exe -enc AAAA", User: "CORP\\alice", UtcTime: "2026-04-01 12:00:01.000",
+      EventID: "1", Provider: "Microsoft-Windows-Sysmon", Computer: "WS-GOLDEN",
+      SourceProcessId: "", TargetProcessId: "", TargetProcessGuid: "", GrantedAccess: "",
+      PrivilegeList: "",
+    },
+    // Victim lsass create
+    {
+      ProcessId: "700", ParentProcessId: "400",
+      ProcessGuid: victimGuid, ParentProcessGuid: "{00000000-0000-0000-0000-0000000000aa}",
+      Image: "C:\\Windows\\System32\\lsass.exe", ParentImage: "C:\\Windows\\System32\\wininit.exe",
+      CommandLine: "lsass.exe", User: "SYSTEM", UtcTime: "2026-04-01 12:00:00.500",
+      EventID: "1", Provider: "Microsoft-Windows-Sysmon", Computer: "WS-GOLDEN",
+      SourceProcessId: "", TargetProcessId: "", TargetProcessGuid: "", GrantedAccess: "",
+      PrivilegeList: "",
+    },
+    // EID 10: attacker injects into lsass (hollowing window)
+    {
+      ProcessId: "", ParentProcessId: "",
+      ProcessGuid: "", ParentProcessGuid: "",
+      Image: "", ParentImage: "", CommandLine: "", User: "", UtcTime: "2026-04-01 12:00:00.700",
+      EventID: "10", Provider: "Microsoft-Windows-Sysmon", Computer: "WS-GOLDEN",
+      SourceProcessId: "4242", TargetProcessId: "700", TargetProcessGuid: victimGuid, GrantedAccess: "0x1F0FFF",
+      PrivilegeList: "",
+    },
+    // EID 4673: attacker uses SeDebug
+    {
+      ProcessId: "4242", ParentProcessId: "",
+      ProcessGuid: attackerGuid, ParentProcessGuid: "",
+      Image: "", ParentImage: "", CommandLine: "", User: "CORP\\alice", UtcTime: "2026-04-01 12:00:01.100",
+      EventID: "4673", Provider: "Microsoft-Windows-Security-Auditing", Computer: "WS-GOLDEN",
+      SourceProcessId: "", TargetProcessId: "", TargetProcessGuid: "", GrantedAccess: "",
+      PrivilegeList: "SeDebugPrivilege",
+    },
+    // EID 3: attacker outbound network (represented as create-column shape + event id)
+    {
+      ProcessId: "4242", ParentProcessId: "",
+      ProcessGuid: attackerGuid, ParentProcessGuid: "",
+      Image: "", ParentImage: "", CommandLine: "DestinationIp: 203.0.113.50 DestinationPort: 443", User: "",
+      UtcTime: "2026-04-01 12:00:02.000",
+      EventID: "3", Provider: "Microsoft-Windows-Sysmon", Computer: "WS-GOLDEN",
+      SourceProcessId: "4242", TargetProcessId: "", TargetProcessGuid: "", GrantedAccess: "",
+      PrivilegeList: "",
+    },
+  ];
+
+  const { meta, ctx } = makeEidStub(GOLDEN_HEADERS, rows, "EventID");
+  // Query only process creates for the tree nodes; enrichment queries other EIDs separately.
+  const tree = getProcessTree(meta, { eventIdValue: "1" }, ctx);
+
+  assert.ok(tree.processes.length >= 3, "golden corpus must produce create nodes");
+  assert.equal(tree.useGuid, true);
+
+  const attacker = tree.processes.find((p) => p.pid === "4242");
+  const victim = tree.processes.find((p) => p.pid === "700");
+  assert.ok(attacker, "attacker powershell node");
+  assert.ok(victim, "victim lsass node");
+
+  // GUID parent link explorer → powershell
+  assert.equal(attacker.linkSource, "guid");
+  assert.equal(attacker.linkConfidence, "high");
+
+  // Injection / hollowing on victim
+  assert.ok(victim.injectionIndicators, "lsass must have injectionIndicators");
+  assert.equal(victim.injectionIndicators.hollowingLikely, true);
+  assert.ok(victim.injectionIndicators.suspiciousAccessCount >= 1);
+
+  // Privilege use on attacker
+  assert.ok(attacker.privilegeUse, "attacker must have privilegeUse from 4673");
+  assert.ok((attacker.privilegeUse.privileges?.sedebugprivilege || 0) >= 1);
+
+  // Network activity on attacker (EID 3 matched by GUID/PID)
+  assert.ok(attacker.networkActivity, "attacker must have networkActivity from EID 3");
+  assert.ok(attacker.networkActivity.eventCount >= 1);
+
+  // Stats counters
+  assert.ok(tree.stats.accessMatched >= 1);
+  assert.ok(tree.stats.privilegeMatched >= 1);
+  assert.ok((tree.stats.networkMatched || 0) >= 1);
+  assert.equal(tree.stats.truncated, false);
+});

@@ -4,6 +4,7 @@ export const PT_VIEW_MODES = {
   story:  { label: "Story",  filter: "suspicious", clustered: true, incident: true },
   triage: { label: "Triage", filter: "suspicious", clustered: true },
   hunt:   { label: "Hunt",   filter: "medium+",    clustered: true },
+  graph:  { label: "Graph",  filter: "suspicious", clustered: false, graph: true },
   raw:    { label: "Raw",    filter: "all",         clustered: false },
 };
 

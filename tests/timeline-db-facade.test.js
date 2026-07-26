@@ -36,7 +36,7 @@ function makeEvtxEcmdPreviewMeta(rowCount = 3) {
 }
 
 test("TimelineDB facade exposes methods from extracted DB modules", () => {
-  for (const name of ["queryRows", "_applyStandardFilters", "_applyRowIdFilter", "exportQuery", "getColumnStats", "searchCount"]) {
+  for (const name of ["queryRows", "getRowIdsInRange", "countRowsByIdsMatching", "findSearchMatch", "_applyStandardFilters", "_applyRowIdFilter", "_applyExcludedRowIds", "_buildOrderExpression", "exportQuery", "getColumnStats", "searchCount"]) {
     assert.equal(TimelineDB.prototype[name], queryStore[name], `${name} should be mixed in from query-store`);
   }
 

@@ -72,7 +72,7 @@ Timeline-wide analytics that work on any imported tab (CSV, EVTX, XLSX, Plaso, e
 | **Tools → Analysis → Log Sources** | Gantt-style heatmap of log source coverage across time |
 | **Tools → Analysis → Burst Detection** | Identify abnormal spikes in event volume |
 | **Tools → Analysis → AI Artifacts → Collect AI Artifacts** | Discover and merge local AI assistant stores (this Mac or a KAPE/triage folder) into one **AI Query History** tab |
-| **Tools → Analysis → AI Artifacts → AI Apps → …** | Per-app import for Claude Code, Codex, ChatGPT Desktop, Gemini CLI, Cursor, Copilot, Windsurf, and Continue |
+| **Tools → Analysis → AI Artifacts → AI Apps → …** | Per-app import for Claude Code, Codex, Grok Build, ChatGPT Desktop, Gemini CLI, Cursor, Copilot, Windsurf, and Continue |
 
 #### Detection
 

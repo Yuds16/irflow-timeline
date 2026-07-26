@@ -20,6 +20,13 @@ const useUIStore = create((set) => ({
   setTimezone: (v) => set({ timezone: v }),
   setDateTimeFormat: (v) => set({ dateTimeFormat: v }),
 
+  // ── Triage-collection hand-off ───────────────────────────────────
+  // Set by TriageCollectionModal when it queues an import batch; App.jsx watches the
+  // import-complete/-error events for these tab ids and, once they are all terminal,
+  // launches the Lateral Movement Tracker across them.
+  pendingTriageBatch: null,
+  setPendingTriageBatch: (v) => set({ pendingTriageBatch: v }),
+
   // ── Menu open/close state ────────────────────────────────────────
   fileMenuOpen: false,
   viewMenuOpen: false,

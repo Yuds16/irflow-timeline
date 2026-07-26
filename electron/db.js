@@ -279,10 +279,11 @@ class TimelineDB {
    * Indexes, FTS, and ANALYZE are all deferred to async background builds
    * so the UI becomes interactive immediately after import completes.
    */
-  finalizeImport(tabId) {
+  finalizeImport(tabId, options = {}) {
     dbg("DB", `finalizeImport start`, { tabId });
     const meta = this.databases.get(tabId);
     if (!meta) { dbg("DB", `finalizeImport: no meta for tab`); return; }
+    const skipWalPromotion = !!options.skipWalPromotion;
 
     const db = meta.db;
 
@@ -341,12 +342,13 @@ class TimelineDB {
       }
     });
 
-    // Minimal pragmas so initial queries work while background builds run.
-    // buildIndexesAsync/buildFtsAsync set their own aggressive pragmas and
-    // restore full query mode (WAL + mmap + 256MB cache) when they finish.
-    db.pragma("journal_mode = WAL"); // need WAL for concurrent reads during build
-    db.pragma("synchronous = NORMAL");
-    db.pragma("cache_size = -262144"); // 256MB cache for queries
+    // Workers skip WAL promotion here — adoptTabFromFile on the main process sets WAL/mmap.
+    // Avoids a full checkpoint on close when the temp DB used journal_mode=OFF during ingest.
+    if (!skipWalPromotion) {
+      db.pragma("journal_mode = WAL"); // need WAL for concurrent reads during build
+      db.pragma("synchronous = NORMAL");
+      db.pragma("cache_size = -262144"); // 256MB cache for queries
+    }
 
     // Skip ANALYZE here — run after async index build completes
 
@@ -710,12 +712,15 @@ class TimelineDB {
       return aTs - bTs;
     });
 
-    // For large files, eagerly index ONLY timestamp columns (the ones analysts sort by
-    // first). Every other column is indexed lazily on first sort via _ensureIndex — this
-    // avoids the ~30-50GB all-column index footprint and ~10-25min build on a 30GB import.
+    // For large files, eagerly index timestamp columns plus EventID/Channel (JS Sigma
+    // logsource pre-filters). Other columns are indexed lazily on first sort via
+    // _ensureIndex — this avoids the ~30-50GB all-column index footprint on huge imports.
     // Deferred columns are intentionally NOT added to indexedCols, so _ensureIndex still
     // builds them on demand. (Small files keep eager all-column indexing for snappy filters.)
-    const eagerCols = meta.isLargeFile ? allCols.filter((c) => tsSet_.has(c.original)) : allCols;
+    const isSigmaFilterCol = (name) => /^(EventID|EventId|event_id|eventid|id|Channel|SourceName|Provider)$/i.test(String(name || ""));
+    const eagerCols = meta.isLargeFile
+      ? allCols.filter((c) => tsSet_.has(c.original) || isSigmaFilterCol(c.original))
+      : allCols;
 
     // Pre-filter: skip columns with uniform values (cardinality ≤ 1)
     // Sample-based: check first + middle + last 100 rows instead of full DISTINCT scan
@@ -1046,7 +1051,10 @@ class TimelineDB {
       let trackedEvents = 0;
       if (cols.eventId && meta.colMap[cols.eventId]) {
         const eidSafe = meta.colMap[cols.eventId];
-        const uiEids = ["4624","4625","4648","4672","4769","1149","21","22","25","4698","5140","5145","7045","4697","4688","1"];
+        // Derived from the detector registry so the pre-flight count can never advertise
+        // events the analysis will not request (or miss ones it will).
+        const { PREVIEW_EVENT_IDS } = require("./analyzers/lateral-movement/detector-registry");
+        const uiEids = PREVIEW_EVENT_IDS;
         const eidWhere = wc ? `${wc} AND` : "WHERE";
         const eidRows = db.prepare(`SELECT ${eidSafe} as eid, COUNT(*) as cnt FROM data ${eidWhere} ${eidSafe} IN (${uiEids.map(() => "?").join(",")}) GROUP BY ${eidSafe}`).all(...params, ...uiEids);
         for (const r of eidRows) { if (r.eid != null) { const k = String(r.eid).trim(); eventCounts[k] = r.cnt; trackedEvents += r.cnt; } }
@@ -1181,6 +1189,79 @@ class TimelineDB {
       applyStandardFilters: (...args) => this._applyStandardFilters(...args),
     };
     return _analyze(meta, options, ctx);
+  }
+
+  /**
+   * Multi-source persistence — merges EVTX + registry evidence from several tabs so a
+   * finding in one file can be corroborated by events in another (a 7045 in System.evtx
+   * against 4688 in Security.evtx and 4104 in PowerShell%4Operational.evtx).
+   */
+  getMultiSourcePersistence(tabIds, options = {}) {
+    const { getMultiSourcePersistence: _fn } = require("./analyzers/persistence/multi-source");
+    const metas = this._persistenceMetas(tabIds, options);
+    if (metas.length === 0) return { items: [], incidents: [], warnings: [], stats: {}, error: "No valid tabs" };
+    const ctx = {
+      applyStandardFilters: (...args) => this._applyStandardFilters(...args),
+      ensureIndex: (...args) => this._ensureIndex(...args),
+    };
+    return _fn(metas, options, ctx);
+  }
+
+  /**
+   * Preview for multi-source persistence — what each selected tab contributes.
+   */
+  previewMultiSourcePersistence(tabIds, options = {}) {
+    const { previewMultiSourcePersistence: _fn } = require("./analyzers/persistence/multi-source");
+    const metas = this._persistenceMetas(tabIds, options);
+    if (metas.length === 0) return { tabs: [], totalEvents: 0, error: "No valid tabs" };
+    const ctx = {
+      applyStandardFilters: (...args) => this._applyStandardFilters(...args),
+    };
+    return _fn(metas, options, ctx);
+  }
+
+  /**
+   * Persistence ⇄ lateral movement join. Runs both analyses over the same tabs and returns
+   * lateral movement's graph with each node annotated by what persistence found there, plus
+   * the pivot edges persistence can prove (a logon that LEFT something behind).
+   */
+  getPersistencePivotJoin(tabIds, options = {}) {
+    const { joinPersistenceToLateralMovement } = require("./analyzers/persistence/lm-handoff");
+    const ids = Array.isArray(tabIds) ? tabIds : [tabIds].filter(Boolean);
+    if (ids.length === 0) return { nodes: [], pivotEdges: [], byHost: {}, stats: {}, error: "No tabs selected" };
+
+    const persistence = ids.length > 1
+      ? this.getMultiSourcePersistence(ids, options)
+      : this.getPersistenceAnalysis(ids[0], options);
+    if (persistence?.error) return { nodes: [], pivotEdges: [], byHost: {}, stats: {}, error: persistence.error };
+
+    let lateral = null;
+    try {
+      lateral = ids.length > 1
+        ? this.getMultiSourceLateralMovement(ids, options)
+        : this.getLateralMovement(ids[0], options);
+    } catch (err) {
+      lateral = { nodes: [], edges: [], error: err.message };
+    }
+
+    const joined = joinPersistenceToLateralMovement(lateral || {}, persistence);
+    return {
+      ...joined,
+      // A lateral-movement failure must not hide the persistence half: the per-host rollup
+      // and pivot edges are derived from persistence alone and stay valid without a graph.
+      lateralMovementError: lateral?.error || null,
+      persistenceStats: persistence.stats || {},
+      error: null,
+    };
+  }
+
+  _persistenceMetas(tabIds, options = {}) {
+    const tabLabels = options._tabLabels || {};
+    return (tabIds || []).map((id) => {
+      const meta = this.databases.get(id);
+      if (!meta) return null;
+      return { meta, tabId: id, label: tabLabels[id] || id };
+    }).filter(Boolean);
   }
 
   /**
@@ -1401,6 +1482,12 @@ class TimelineDB {
     const analyzers = require("./analyzers");
     const getDatabaseMeta = (id) => this.databases.get(id);
     return analyzers.analyzeUsnJournal(this.databases.get(tabId), opts, getDatabaseMeta);
+  }
+
+  analyzeAiHistory(tabId, opts) {
+    const analyzers = require("./analyzers");
+    const o = typeof opts === "function" ? { progressCb: opts } : (opts || {});
+    return analyzers.analyzeAiHistory(this.databases.get(tabId), o);
   }
 
   resolveUsnPaths(tabId, mftTabId) {

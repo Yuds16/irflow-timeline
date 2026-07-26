@@ -6,24 +6,20 @@ import useCurrentTab from "../../hooks/useCurrentTab.js";
 import useTheme from "../../hooks/useTheme.js";
 import { DraggableResizableModal } from "../primitives/index.js";
 import useModalChrome from "../../hooks/useModalChrome.js";
-import { buildPillsByRowid } from "../../utils/evidence-pills.js";
+import { buildPillsByRowid, pillToneFor } from "../../utils/evidence-pills.js";
 import { collectEvidenceRefs, groupEvidenceRefs } from "../../utils/evidence-refs.js";
+import { toast } from "../../store/useToastStore.js";
+import { redactRow, csvCell, toCSV } from "../../utils/lm-export.js";
+import { formatDateTime } from "../../utils/datetime.js";
+import { normalizeTimestamp } from "../../utils/forensic-normalize.js";
 
 // ── Local utilities (previously defined in App.jsx scope) ────────────
-const _downloadFile = (content, filename, mime) => {
-  const blob = new Blob([content], { type: mime });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  a.click();
-  URL.revokeObjectURL(a.href);
-};
 
+/** Rows of objects -> CSV, via the shared formula-safe cell encoder. */
 const _toCSV = (rows) => {
   if (!rows.length) return "";
   const keys = Object.keys(rows[0]);
-  const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
-  return [keys.join(","), ...rows.map((r) => keys.map((k) => esc(r[k])).join(","))].join("\n");
+  return toCSV([keys, ...rows.map((r) => keys.map((k) => r[k]))]);
 };
 
 const _activeFilters = (tab) => {
@@ -40,6 +36,8 @@ export default function LateralMovementModal() {
   const setModal = useUIStore((s) => s.setModal);
   const ct = useCurrentTab();
   const { th } = useTheme();
+  const timezone = useUIStore((s) => s.timezone);
+  const dateTimeFormat = useUIStore((s) => s.dateTimeFormat);
   const tle = typeof window !== "undefined" ? window.tle : null;
   const setTabs = useTabStore((s) => s.setTabs);
   const tabs = useTabStore((s) => s.tabs);
@@ -54,10 +52,146 @@ export default function LateralMovementModal() {
   // ── Modal styles (mirrors App.jsx `ms` object) ──────────────────
   const ms = useModalChrome();
 
-  // Guard: only render when this modal is active
-  if (!modal || modal.type !== "lateralMovement" || !ct) return null;
+  // Guard-safe derivations. Every hook below must be declared BEFORE the early return
+  // so the hook order is stable — the guard used to sit above a useEffect and a useMemo,
+  // which is a latent "rendered fewer hooks than expected" crash (masked today only
+  // because App.jsx mounts this component under the same condition).
+  const isActive = !!modal && modal.type === "lateralMovement" && !!ct;
+  const data = isActive ? modal.data : null;
 
-  const { phase, columns: cols = {}, data, excludeLocal, excludeService } = modal;
+  // Debounce handle for the pre-flight preview. This was a plain `let` in the render
+  // body, so every render created a fresh `null` and clearTimeout() never cancelled
+  // anything — each column-mapping change queued another uncancelled 600ms scan.
+  const _lmPreviewTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(_lmPreviewTimerRef.current), []);
+
+  // Latest-value box so the effects below can call handlers that are declared further
+  // down without being re-subscribed on every render.
+  const _handlersRef = useRef({});
+  const _runSeqRef = useRef(0);
+
+  // Real analyzer progress. The modal used to animate an eased curve on a timer with no
+  // connection to the analysis at all; the analyzer now reports stage boundaries on the
+  // shared analysis-progress channel and the curve is only a fallback.
+  useEffect(() => {
+    if (!isActive || !tle?.onAnalysisProgress) return undefined;
+    const off = tle.onAnalysisProgress((p) => {
+      if (!p) return;
+      const method = p.method || p.metadata?.method;
+      if (method && method !== "getLateralMovement" && method !== "getMultiSourceLateralMovement") return;
+      const pct = Number(p.progress);
+      if (!Number.isFinite(pct)) return;
+      setModal((q) => (q?.type === "lateralMovement" && q.phase === "loading"
+        ? { ...q, lmProgress: Math.max(0, Math.min(99, pct)), lmPhaseLabel: p.phase || q.lmPhaseLabel, _lmRealProgress: true }
+        : q));
+    });
+    return typeof off === "function" ? off : undefined;
+  }, [isActive]);
+
+  // Multi-source: list of other data-ready tabs for correlation
+  const otherTabs = useMemo(() => tabs.filter(t => t.dataReady && t.id !== ct?.id), [tabs, ct?.id]);
+
+  // Kick the pre-flight preview + KAPE host detection once per open. These ran as bare
+  // `if (...) setModal(...)` statements in the render body, mutating store state during
+  // render ("Cannot update a component while rendering") and firing IPC as a side effect.
+  useEffect(() => {
+    if (!isActive || !modal._lmNeedsPreview) return;
+    setModal((p) => (p?.type === "lateralMovement" ? { ...p, _lmNeedsPreview: false } : p));
+    _handlersRef.current.refreshLmPreview?.();
+    if (!modal._kapeHostDetected && tle?.detectKapeCollectionHost) {
+      setModal((p) => (p?.type === "lateralMovement" ? { ...p, _kapeHostDetected: true } : p));
+      tle.detectKapeCollectionHost(ct.id).then((result) => {
+        if (isIpcError(result)) return; // best-effort banner; a failure is not actionable
+        if (result && result.collectionHost) {
+          setModal((p) => (p?.type === "lateralMovement" ? { ...p, kapeHost: result } : p));
+        }
+      }).catch(() => {});
+    }
+  }, [isActive, modal?._lmNeedsPreview, modal?._kapeHostDetected, ct?.id]);
+
+  // Auto-run when launched from a dedicated entry (e.g. the RDP Sessions menu item, or
+  // the triage importer's hand-off). Guarded by a ref so it can only fire once per open.
+  const _autoStartedRef = useRef(false);
+  useEffect(() => {
+    if (!isActive) return;
+    const wants = modal.autoStart || modal._lmAutoRun;
+    if (!wants || modal.phase !== "config" || modal.loading) return;
+    if (_autoStartedRef.current) return;
+    _autoStartedRef.current = true;
+    setModal((p) => (p?.type === "lateralMovement" ? { ...p, autoStart: false, _lmAutoRun: false } : p));
+    _handlersRef.current.handleAnalyze?.();
+  }, [isActive, modal?.autoStart, modal?._lmAutoRun, modal?.phase, modal?.loading]);
+
+  // Load persisted triage marks for the current scope. The isActive guard must stay the
+  // FIRST statement: when the component early-returns, this effect still runs, so it must
+  // not touch any of the helpers declared below the guard.
+  useEffect(() => {
+    if (!isActive || !data) return undefined;
+    const scope = _triageScope();
+    if (modal.lmTriageScope === scope.id && modal.lmTriageLoaded) return undefined;
+    const localState = _loadLmTriageState(scope);
+    setModal((p) => p?.type === "lateralMovement" ? {
+      ...p,
+      lmTriageScope: scope.id,
+      lmTriageState: localState,
+      lmTriageLoaded: false,
+    } : p);
+
+    if (!tle?.lateralMovementLoadTriage) {
+      setModal((p) => p?.type === "lateralMovement" && p.lmTriageScope === scope.id ? { ...p, lmTriageLoaded: true } : p);
+      return undefined;
+    }
+
+    let cancelled = false;
+    tle.lateralMovementLoadTriage(scope).then((remoteState) => {
+      if (cancelled) return;
+      // Unchecked, an error object was normalized into an EMPTY triage state, merged over
+      // the analyst's local marks and then written back to localStorage — silently
+      // destroying reviewed/false-positive marks on a transient read failure.
+      if (isIpcError(remoteState)) {
+        setModal((p) => (p?.type === "lateralMovement" && p.lmTriageScope === scope.id ? { ...p, lmTriageLoaded: true } : p));
+        return;
+      }
+      const remote = _normalizeLmTriageState(remoteState || {});
+      const selected = _isEmptyTriageState(remote) && !_isEmptyTriageState(localState) ? localState : remote;
+      if (_isEmptyTriageState(remote) && !_isEmptyTriageState(localState) && tle?.lateralMovementSaveTriage) {
+        // Best-effort seed of the on-disk store from localStorage. Deliberately silent:
+        // the marks are already safe locally and the next open retries.
+        tle.lateralMovementSaveTriage(scope, localState).catch(() => {});
+      }
+      setModal((p) => {
+        if (!p || p.type !== "lateralMovement" || p.lmTriageScope !== scope.id) return p;
+        const current = p.lmTriageState || {};
+        const merged = _normalizeLmTriageState({
+          reviewed: { ...(selected.reviewed || {}), ...(current.reviewed || {}) },
+          falsePositive: { ...(selected.falsePositive || {}), ...(current.falsePositive || {}) },
+          updatedAt: current.updatedAt || selected.updatedAt || null,
+        });
+        if (!_isEmptyTriageState(merged)) {
+          // Write the merge back to BOTH stores. Persisting only to localStorage let the
+          // two drift: disk kept the pre-merge state, so the next session read a stale
+          // set and the local-wins merge re-applied the difference every time.
+          try { window.localStorage?.setItem(_triageStorageKey(scope), JSON.stringify(merged)); } catch { /* quota */ }
+          if (tle?.lateralMovementSaveTriage) {
+            tle.lateralMovementSaveTriage(scope, merged).catch(() => { /* localStorage still holds it */ });
+          }
+        }
+        return { ...p, lmTriageState: merged, lmTriageLoaded: true };
+      });
+    }).catch(() => {
+      if (!cancelled) setModal((p) => p?.type === "lateralMovement" && p.lmTriageScope === scope.id ? { ...p, lmTriageLoaded: true } : p);
+    });
+    return () => { cancelled = true; };
+    // `tabs` was a dependency, but the scan writes evidence pills into the tab store on
+    // completion, so every run re-fired this effect with a stale `modal` closure, reset
+    // lmTriageLoaded and re-issued the load — racing any marks made in between. The
+    // scope id is what actually identifies the triage set, so depend on that.
+  }, [isActive, data, modal?.lmTriageScope, ct?.filePath, ct?.id, ct?.name]);
+
+  // Guard: only render when this modal is active
+  if (!isActive) return null;
+
+  const { phase, columns: cols = {}, excludeLocal, excludeService } = modal;
   const viewTab = modal.viewTab || "graph";
   const selectedNode = modal.selectedNode;
   const selectedEdge = modal.selectedEdge;
@@ -65,17 +199,57 @@ export default function LateralMovementModal() {
 
   // ── Shared pivot helpers — used by Findings, RDP Sessions, Accounts ──
   const _categoryEids = { "Brute Force": ["4625"], "Password Spray": ["4625"], "Credential Compromise": ["4624", "4625", "4648"], "PsExec Native": ["4688", "1", "7045", "4697"], "Impacket Execution": ["4688", "1", "7045", "4697", "4698"], "Impacket Summary": ["4688", "1", "7045", "4697", "4698"], "Impacket Credential Access": ["4688", "1"], "Remote Service Execution": ["7045", "4697"], "WMI Remote Execution": ["4688", "1"], "WMI Remote Activity": ["4688", "1"], "WinRM Remote Execution": ["4688", "1"], "WinRM Remote Activity": ["4688", "1"], "Scheduled Task Remote Execution": ["4698"], "Admin Share Access": ["5140", "5145"], "Concurrent RDP Sessions": ["4624", "1149", "21", "22"], "RMM Tool": ["4688", "1", "7045", "4697"], "RMM Suspicious Execution": ["4688", "1", "7045", "4697"], "RMM Executed": ["4688", "1", "7045", "4697"], "RMM Installed": ["7045", "4697"], "Remote Access Tunnel": ["4688", "1", "7045", "4697"], "Lateral Pivot": ["4624", "4625", "4648", "4672", "21", "25", "1149"], "First Seen": ["4624", "4625", "4648", "21", "25", "1149"], "Operator Host": ["4624", "4625", "4648", "4776", "4778", "4779", "5140", "5145"], "AS-REP Roasting": ["4768"], "DCSync": ["4662"], "LSASS Access": ["10"], "SAM/LSA Registry Dump": ["4688", "1"], "Port Forwarding": ["4688", "1"], "Kerberoasting": ["4769"] };
-  const _padTs = (s, deltaMs) => {
-    const d = new Date(s.replace("T", " ").replace("Z", ""));
-    if (isNaN(d)) return s;
-    const nd = new Date(d.getTime() + deltaMs);
-    const p = (n) => String(n).padStart(2, "0");
-    const sep = s.includes("T") ? "T" : " ";
-    return `${nd.getFullYear()}-${p(nd.getMonth()+1)}-${p(nd.getDate())}${sep}${p(nd.getHours())}:${p(nd.getMinutes())}:${p(nd.getSeconds())}`;
+  /**
+   * Render a timestamp for display, honouring the analyst's timezone and format.
+   *
+   * Replaces ~30 hand-rolled `.slice(0, 19)` truncations. Those left the ISO "T"
+   * separator in place (so the modal showed `2026-03-10T08:00:00` where the grid showed
+   * `2026-03-10 08:00:00`) and ignored the timezone setting entirely, so the same event
+   * read differently in the grid and in this panel.
+   */
+  const fmtTs = (raw) => {
+    if (!raw) return "";
+    return formatDateTime(String(raw), dateTimeFormat || "yyyy-MM-dd HH:mm:ss", timezone) || String(raw).slice(0, 19);
   };
-  /** Close modal and filter main timeline to events relevant to a finding-shaped object. */
+  /** Epoch ms for arithmetic. Naive timestamps are UTC, matching the analyzer. */
+  const tsMs = (raw) => normalizeTimestamp(raw);
+
+  /**
+   * Shift a timestamp by `deltaMs` and re-render it in the grid's own canonical form.
+   * Used to build the ±5 minute window for "Show in Timeline", so the output has to be
+   * comparable with the raw column values, not the analyst's display timezone. The old
+   * version round-tripped through LOCAL getters after stripping the Z, shifting the
+   * window by the host's UTC offset.
+   */
+  const _padTs = (s, deltaMs) => {
+    const ms = normalizeTimestamp(s);
+    if (!Number.isFinite(ms)) return s;
+    const d = new Date(ms + deltaMs);
+    const p = (n) => String(n).padStart(2, "0");
+    const sep = String(s).includes("T") ? "T" : " ";
+    return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}${sep}${p(d.getUTCHours())}:${p(d.getUTCMinutes())}:${p(d.getUTCSeconds())}`;
+  };
+  /**
+   * Close the modal and show the events behind a finding-shaped object in the grid.
+   *
+   * Prefers the exact evidence rows: those carry their own {tabId, rowId}, so they land
+   * on the RIGHT tab and show exactly the rows the detector fired on.
+   *
+   * The column-filter path below is a fallback for findings with no evidence refs. It is
+   * only sound for a single-tab run: it writes through updateActiveTab (the active tab,
+   * whichever that happens to be) using `data.columns`, which in a multi-source run is
+   * the FIRST detected tab's mapping — so it could filter tab A on a column that only
+   * exists in tab B, and never switch tabs to where the evidence actually lives.
+   */
   const _filterEvents = (f, e) => {
     if (e) e.stopPropagation();
+    if (_getEvidenceRefs(f).length > 0) { _openExactEvidence(f, null); return; }
+    if (data?.multiSource) {
+      toast.info("No exact rows for this finding", {
+        detail: "Column filters cannot be applied across a multi-source run — open the source tab and filter there.",
+      });
+      return;
+    }
     const lmCols = data?.columns || {};
     const eids = f.filterEids || _categoryEids[f.category];
     const cbf = { ...(ct?.checkboxFilters || {}) };
@@ -117,22 +291,43 @@ export default function LateralMovementModal() {
     }
     return (h >>> 0).toString(16);
   };
+  /**
+   * Identify the triage set the analyst's reviewed / false-positive marks belong to.
+   *
+   * The fingerprint used to include each tab's `totalRows`. That made it a fingerprint of
+   * the DATA rather than of the SOURCE, so re-importing the same file — or importing it
+   * with one more row appended — produced a different scope id and silently orphaned every
+   * mark the analyst had made. Identity now comes from the file path (or tab name) alone.
+   *
+   * `legacyId` is the old row-count-bearing id, so a load can fall back to it once and
+   * migrate the marks forward rather than appearing to have lost them.
+   */
   const _triageScope = () => {
-    const tabFingerprint = (tabId, fallbackLabel = "", fallbackRows = 0) => {
+    const tabIdentity = (tabId, fallbackLabel = "") => {
       const tab = tabs.find((t) => String(t.id) === String(tabId));
-      const stableName = tab?.filePath || tab?.name || fallbackLabel || tabId || "";
-      const rows = tab?.totalRows || fallbackRows || 0;
-      return `${stableName}:${rows}`;
+      return tab?.filePath || tab?.name || fallbackLabel || tabId || "";
     };
-    const tabScope = data?.multiSource && Array.isArray(data.tabSummaries)
-      ? data.tabSummaries.map((t) => tabFingerprint(t.tabId, t.label, t.rowCount)).sort().join("|")
+    const tabLegacy = (tabId, fallbackLabel = "", fallbackRows = 0) => {
+      const tab = tabs.find((t) => String(t.id) === String(tabId));
+      return `${tabIdentity(tabId, fallbackLabel)}:${tab?.totalRows || fallbackRows || 0}`;
+    };
+    const isMulti = data?.multiSource && Array.isArray(data.tabSummaries);
+    const tabScope = isMulti
+      ? data.tabSummaries.map((t) => tabIdentity(t.tabId, t.label)).sort().join("|")
+      : `${ct?.filePath || ct?.name || ct?.id || ""}`;
+    const legacyScope = isMulti
+      ? data.tabSummaries.map((t) => tabLegacy(t.tabId, t.label, t.rowCount)).sort().join("|")
       : `${ct?.filePath || ct?.name || ct?.id || ""}:${ct?.totalRows || 0}`;
-    const tabIds = data?.multiSource && Array.isArray(data.tabSummaries)
+    const tabIds = isMulti
       ? data.tabSummaries.map((t) => t.tabId).filter(Boolean)
       : [ct?.id].filter(Boolean);
     return {
       id: _hashString(tabScope),
-      label: data?.multiSource ? `multi-source:${tabIds.length}` : (ct?.name || ct?.id || "current-tab"),
+      legacyId: _hashString(legacyScope),
+      // For a multi-source run, also expose each member tab's own single-tab scope so marks
+      // made while looking at one tab are not lost when the correlation set changes.
+      memberIds: isMulti ? data.tabSummaries.map((t) => _hashString(tabIdentity(t.tabId, t.label))) : [],
+      label: isMulti ? `multi-source:${tabIds.length}` : (ct?.name || ct?.id || "current-tab"),
       tabIds,
       rowFingerprint: tabScope,
     };
@@ -149,14 +344,41 @@ export default function LateralMovementModal() {
     updatedAt: state?.updatedAt || null,
   });
   const _isEmptyTriageState = (state) => Object.keys(state?.reviewed || {}).length === 0 && Object.keys(state?.falsePositive || {}).length === 0;
+  /**
+   * Read the marks for a scope from localStorage.
+   *
+   * Falls back to the pre-migration `legacyId` (and, for a multi-source run, to each member
+   * tab's own single-tab scope) so marks made before the fingerprint changed — or made
+   * while looking at one tab of a correlation set — still surface instead of appearing lost.
+   */
   const _loadLmTriageState = (scope = _triageScope()) => {
     if (typeof window === "undefined" || !window.localStorage) return _emptyTriageState();
-    try {
-      const parsed = JSON.parse(window.localStorage.getItem(_triageStorageKey(scope)) || "null");
-      return _normalizeLmTriageState(parsed || {});
-    } catch {
-      return _emptyTriageState();
+    const read = (id) => {
+      try {
+        const parsed = JSON.parse(window.localStorage.getItem(_triageStorageKey(id)) || "null");
+        return parsed ? _normalizeLmTriageState(parsed) : null;
+      } catch { return null; }
+    };
+    const primary = read(scope?.id ?? scope);
+    if (primary && !_isEmptyTriageState(primary)) return primary;
+
+    const fallbacks = [scope?.legacyId, ...(scope?.memberIds || [])].filter(Boolean);
+    const merged = _emptyTriageState();
+    let found = false;
+    for (const id of fallbacks) {
+      const st = read(id);
+      if (!st || _isEmptyTriageState(st)) continue;
+      found = true;
+      Object.assign(merged.reviewed, st.reviewed || {});
+      Object.assign(merged.falsePositive, st.falsePositive || {});
+      merged.updatedAt = merged.updatedAt || st.updatedAt || null;
     }
+    if (found) {
+      // Migrate forward so the next read hits the primary key directly.
+      try { window.localStorage.setItem(_triageStorageKey(scope), JSON.stringify(merged)); } catch { /* quota */ }
+      return merged;
+    }
+    return primary || _emptyTriageState();
   };
   const _saveLmTriageState = (state, scope = _triageScope()) => {
     const clean = _normalizeLmTriageState(state || {});
@@ -164,7 +386,14 @@ export default function LateralMovementModal() {
       try { window.localStorage.setItem(_triageStorageKey(scope), JSON.stringify(clean)); } catch {}
     }
     if (tle?.lateralMovementSaveTriage) {
-      tle.lateralMovementSaveTriage(scope, clean).catch(() => {});
+      // Triage marks are analyst work product. A silent .catch(()=>{}) meant a failed
+      // write looked identical to a successful one; localStorage still holds the marks,
+      // so warn rather than error.
+      tle.lateralMovementSaveTriage(scope, clean).then((res) => {
+        if (isIpcError(res)) toast.warning("Triage marks not saved to disk", { detail: ipcErrorMessage(res) });
+      }).catch((err) => {
+        toast.warning("Triage marks not saved to disk", { detail: err?.message || "Kept in this session only." });
+      });
     }
   };
   const _triageState = () => modal.lmTriageState || _loadLmTriageState();
@@ -217,56 +446,17 @@ export default function LateralMovementModal() {
       try { window.localStorage.removeItem(_triageStorageKey(scope)); } catch {}
     }
     if (tle?.lateralMovementClearTriage) {
-      tle.lateralMovementClearTriage(scope).catch(() => {});
+      tle.lateralMovementClearTriage(scope).then((res) => {
+        if (isIpcError(res)) toast.warning("Triage marks not cleared on disk", { detail: ipcErrorMessage(res) });
+      }).catch((err) => {
+        toast.warning("Triage marks not cleared on disk", { detail: err?.message || "They may reappear next session." });
+      });
     } else {
       _saveLmTriageState(next, scope);
     }
     setModal((p) => p?.type === "lateralMovement" ? { ...p, lmTriageState: next } : p);
   };
 
-  useEffect(() => {
-    if (!modal || modal.type !== "lateralMovement" || !ct || !data) return undefined;
-    const scope = _triageScope();
-    if (modal.lmTriageScope === scope.id && modal.lmTriageLoaded) return undefined;
-    const localState = _loadLmTriageState(scope);
-    setModal((p) => p?.type === "lateralMovement" ? {
-      ...p,
-      lmTriageScope: scope.id,
-      lmTriageState: localState,
-      lmTriageLoaded: false,
-    } : p);
-
-    if (!tle?.lateralMovementLoadTriage) {
-      setModal((p) => p?.type === "lateralMovement" && p.lmTriageScope === scope.id ? { ...p, lmTriageLoaded: true } : p);
-      return undefined;
-    }
-
-    let cancelled = false;
-    tle.lateralMovementLoadTriage(scope).then((remoteState) => {
-      if (cancelled) return;
-      const remote = _normalizeLmTriageState(remoteState || {});
-      const selected = _isEmptyTriageState(remote) && !_isEmptyTriageState(localState) ? localState : remote;
-      if (_isEmptyTriageState(remote) && !_isEmptyTriageState(localState) && tle?.lateralMovementSaveTriage) {
-        tle.lateralMovementSaveTriage(scope, localState).catch(() => {});
-      }
-      setModal((p) => {
-        if (!p || p.type !== "lateralMovement" || p.lmTriageScope !== scope.id) return p;
-        const current = p.lmTriageState || {};
-        const merged = _normalizeLmTriageState({
-          reviewed: { ...(selected.reviewed || {}), ...(current.reviewed || {}) },
-          falsePositive: { ...(selected.falsePositive || {}), ...(current.falsePositive || {}) },
-          updatedAt: current.updatedAt || selected.updatedAt || null,
-        });
-        if (!_isEmptyTriageState(merged)) {
-          try { window.localStorage?.setItem(_triageStorageKey(scope), JSON.stringify(merged)); } catch {}
-        }
-        return { ...p, lmTriageState: merged, lmTriageLoaded: true };
-      });
-    }).catch(() => {
-      if (!cancelled) setModal((p) => p?.type === "lateralMovement" && p.lmTriageScope === scope.id ? { ...p, lmTriageLoaded: true } : p);
-    });
-    return () => { cancelled = true; };
-  }, [data, ct?.filePath, ct?.id, ct?.name, ct?.totalRows, tabs]);
 
   const _firstValue = (row, names) => {
     if (!row || typeof row !== "object") return "";
@@ -311,7 +501,7 @@ export default function LateralMovementModal() {
     for (const flag of _listify(item?.flags)) add("signal", flag, th.sev.high);
     for (const flag of _listify(item?.confidenceFlags)) add("confidence", flag, th.textDim);
     for (const pill of item?.evidencePills || []) add(pill.type || "evidence", pill.text, _pillColors[pill.type] || th.sev.low);
-    for (const cat of _listify(item?.categories || item?.category)) add("category", cat, th.accent);
+    for (const cat of _listify(item?.categories || item?.category)) add("category", cat, th.sev.info);
     for (const tech of _listify(item?.techniques || item?.technique || item?.mitre)) add("technique", tech, th.textDim);
     if (item?.eventBreakdown && typeof item.eventBreakdown === "object") {
       for (const [eid, count] of Object.entries(item.eventBreakdown).sort((a, b) => Number(b[1]) - Number(a[1])).slice(0, 8)) add("event", `EID ${eid}: ${count}`, th.textDim);
@@ -352,6 +542,9 @@ export default function LateralMovementModal() {
         if (timeline.length >= 100) break;
         const ids = [...rowIds].slice(0, 100 - timeline.length);
         const rows = await tle.getRowsByIds(tabId, ids);
+        // Unchecked, this rendered N rows of "(no time) / (unknown host)" — a failed
+        // fetch was indistinguishable from evidence that genuinely had no fields.
+        if (isIpcError(rows)) throw new Error(ipcErrorMessage(rows));
         ids.forEach((rowId, idx) => timeline.push(_summarizeEvidenceRow(tabId, rowId, rows?.[idx] || {})));
       }
       timeline.sort((a, b) => String(a.timestamp || "").localeCompare(String(b.timestamp || "")));
@@ -389,11 +582,15 @@ export default function LateralMovementModal() {
     if (e) e.stopPropagation();
     if (!tle || !ct) return;
     const refs = _getEvidenceRefs(item);
-    if (refs.length === 0) return;
+    if (refs.length === 0) { toast.info("Nothing to bookmark", { detail: "This item has no linked source rows." }); return; }
     const grouped = groupEvidenceRefs(refs, ct.id);
     try {
+      // safeHandle RESOLVES with {__ipcError:true} instead of rejecting, so a bare await
+      // looked successful and the optimistic store update below claimed rows were
+      // bookmarked when nothing had been written.
       for (const { tabId, rowIds } of grouped.values()) {
-        await tle.setBookmarks(tabId, [...rowIds], true);
+        const res = await tle.setBookmarks(tabId, [...rowIds], true);
+        if (isIpcError(res)) throw new Error(ipcErrorMessage(res));
       }
       setTabs((prev) => prev.map((tab) => {
         const hit = grouped.get(String(tab.id));
@@ -402,25 +599,66 @@ export default function LateralMovementModal() {
         hit.rowIds.forEach((rowId) => bookmarkedSet.add(rowId));
         return { ...tab, bookmarkedSet };
       }));
+      toast.success("Bookmarked", { detail: `${refs.length} evidence row${refs.length === 1 ? "" : "s"}.` });
     } catch (err) {
-      setModal((p) => p?.type === "lateralMovement" ? { ...p, error: err?.message || "Failed to bookmark exact evidence" } : p);
+      // modal.error only renders in the config phase, so setting it here was invisible.
+      toast.error("Bookmark failed", { detail: err?.message || "Could not bookmark the evidence rows." });
     }
   };
-  const _tagEvidence = async (item, e) => {
+  /**
+   * Write an export through Electron's save dialog.
+   *
+   * Replaces a synthetic <a download> that revoked its blob URL synchronously after
+   * click() and never attached the anchor to the document — fragile for large payloads,
+   * and it wrote wherever the browser decided without asking the analyst.
+   */
+  const _saveExport = async (content, filename, filters) => {
+    if (!tle?.saveTextFile) { toast.error("Export unavailable", { detail: "File saving is not available in this window." }); return; }
+    try {
+      const res = await tle.saveTextFile(content, filename, filters);
+      if (isIpcError(res)) { toast.error("Export failed", { detail: ipcErrorMessage(res) }); return; }
+      if (res && res.canceled) return;
+      toast.success("Exported", { detail: filename });
+    } catch (err) {
+      toast.error("Export failed", { detail: err?.message || "Could not write the file." });
+    }
+  };
+
+  /** Suggested tag for an item, also the default in the tag picker. */
+  const _defaultTagFor = (item) => `lateral:${String(item?.severity || item?.technique || "evidence")
+    .toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "evidence"}`;
+
+  /**
+   * Open the in-modal tag picker.
+   *
+   * This used to call window.prompt(), which Electron does not implement — the call threw
+   * ("prompt() is and will not be supported"), so the Tag button silently did nothing and
+   * the throw surfaced as an unhandled rejection.
+   */
+  const _tagEvidence = (item, e) => {
     if (e) e.stopPropagation();
     if (!tle || !ct) return;
     const refs = _getEvidenceRefs(item);
+    if (refs.length === 0) { toast.info("Nothing to tag", { detail: "This item has no linked source rows." }); return; }
+    setModal((p) => (p?.type === "lateralMovement"
+      ? { ...p, lmTagPicker: { item, refCount: refs.length, value: _defaultTagFor(item) } }
+      : p));
+  };
+
+  /** Apply `tag` to the exact evidence rows of the item currently in the tag picker. */
+  const _applyEvidenceTag = async (item, tag) => {
+    const finalTag = String(tag || "").trim();
+    if (!finalTag || !tle || !ct) return;
+    setModal((p) => (p?.type === "lateralMovement" ? { ...p, lmTagPicker: null } : p));
+    const refs = _getEvidenceRefs(item);
     if (refs.length === 0) return;
-    const defaultTag = `lateral:${String(item?.severity || item?.technique || "evidence").toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "") || "evidence"}`;
-    const tag = window.prompt("Tag exact lateral-movement evidence rows:", defaultTag);
-    if (!tag?.trim()) return;
-    const finalTag = tag.trim();
     const grouped = groupEvidenceRefs(refs, ct.id);
     try {
       for (const { tabId, rowIds } of grouped.values()) {
         const tagMap = {};
         for (const rowId of rowIds) tagMap[rowId] = [finalTag];
-        await tle.bulkAddTags(tabId, tagMap);
+        const res = await tle.bulkAddTags(tabId, tagMap);
+        if (isIpcError(res)) throw new Error(ipcErrorMessage(res));
       }
       setTabs((prev) => prev.map((tab) => {
         const hit = grouped.get(String(tab.id));
@@ -429,31 +667,54 @@ export default function LateralMovementModal() {
         for (const rowId of hit.rowIds) rowTags[rowId] = [...new Set([...(rowTags[rowId] || []), finalTag])];
         return { ...tab, rowTags, tagColors: { ...(tab.tagColors || {}), [finalTag]: th.accent } };
       }));
+      toast.success("Tagged", { detail: `${refs.length} row${refs.length === 1 ? "" : "s"} tagged "${finalTag}".` });
     } catch (err) {
-      setModal((p) => p?.type === "lateralMovement" ? { ...p, error: err?.message || "Failed to tag exact evidence" } : p);
+      toast.error("Tag failed", { detail: err?.message || "Could not tag the evidence rows." });
     }
   };
+  /**
+   * Export the exact evidence rows behind an item.
+   *
+   * Two things were wrong here: the package contained complete raw source rows
+   * (command lines with `-p <password>`, `/user:` pairs, cleartext-logon context) with no
+   * redaction, and it was written with a synthetic <a download> that bypasses Electron's
+   * save dialog. Redacted is now the default and the write goes through saveTextFile;
+   * including raw rows takes an explicit, clearly-worded confirmation.
+   */
   const _exportEvidencePackage = async (item, e) => {
     if (e) e.stopPropagation();
     if (!tle || !ct) return;
     const refs = _getEvidenceRefs(item);
-    if (refs.length === 0) return;
-    const grouped = groupEvidenceRefs(refs, ct.id);
-    const evidence = [];
-    for (const { tabId, rowIds } of grouped.values()) {
-      const rows = await tle.getRowsByIds(tabId, rowIds);
-      const tab = tabs.find((t) => String(t.id) === String(tabId));
-      evidence.push({ tabId, tabName: tab?.name || tabId, rowIds, rows });
+    if (refs.length === 0) { toast.info("Nothing to export", { detail: "This item has no linked source rows." }); return; }
+    try {
+      const grouped = groupEvidenceRefs(refs, ct.id);
+      const evidence = [];
+      for (const { tabId, rowIds } of grouped.values()) {
+        const rows = await tle.getRowsByIds(tabId, rowIds);
+        // Unchecked, the error object itself was serialized into the on-disk package.
+        if (isIpcError(rows)) throw new Error(ipcErrorMessage(rows));
+        const tab = tabs.find((t) => String(t.id) === String(tabId));
+        evidence.push({ tabId, tabName: tab?.name || tabId, rowIds: [...rowIds], rows: (rows || []).map(redactRow) });
+      }
+      const payload = {
+        exportedAt: new Date().toISOString(),
+        kind: "lateral-movement-evidence",
+        subject: _evidenceLabel(item),
+        evidenceRefCount: refs.length,
+        redacted: true,
+        redactionNote: "Credential-bearing values are masked. Generated by IRFlow Timeline.",
+        triage: _itemTriage(item),
+        item,
+        evidence,
+      };
+      const name = `${_safeFileToken(_evidenceLabel(item))}-evidence.json`;
+      const res = await tle.saveTextFile(JSON.stringify(payload, null, 2), name, [{ name: "JSON", extensions: ["json"] }]);
+      if (isIpcError(res)) { toast.error("Export failed", { detail: ipcErrorMessage(res) }); return; }
+      if (res && res.canceled) return;
+      toast.success("Evidence exported", { detail: `${refs.length} row${refs.length === 1 ? "" : "s"}, credentials masked.` });
+    } catch (err) {
+      toast.error("Export failed", { detail: err?.message || "Could not export the evidence package." });
     }
-    _downloadFile(JSON.stringify({
-      exportedAt: new Date().toISOString(),
-      kind: "lateral-movement-evidence",
-      subject: _evidenceLabel(item),
-      evidenceRefCount: refs.length,
-      triage: _itemTriage(item),
-      item,
-      evidence,
-    }, null, 2), `${_safeFileToken(_evidenceLabel(item))}-evidence.json`, "application/json");
   };
   const EvidenceActions = ({ item, compact = false, hideDetails = false }) => {
     const refs = _getEvidenceRefs(item);
@@ -510,7 +771,7 @@ export default function LateralMovementModal() {
     const entities = _entitySummary(item);
     const triage = _itemTriage(item);
     const sev = String(item.severity || item.confidence || (score >= 50 ? "critical" : score >= 25 ? "high" : score >= 10 ? "medium" : "info")).toLowerCase();
-    const sevColor = LM_SEV_COLORS[sev] || th.accent;
+    const sevColor = LM_SEV_COLORS[sev] || th.sev.info;
     const close = () => setModal((p) => p?.type === "lateralMovement" ? { ...p, lmEvidenceItem: null, lmEvidenceRefs: [], lmEvidenceTimeline: [], lmEvidenceLoading: false, lmEvidenceError: null } : p);
     return (
       <div style={{ marginBottom: 12, border: `1px solid ${sevColor}44`, borderRadius: 10, background: `linear-gradient(135deg, ${sevColor}0d, ${th.panelBg}ee)`, overflow: "hidden" }}>
@@ -593,7 +854,7 @@ export default function LateralMovementModal() {
                 {timeline.map((row, idx) => (
                   <div key={`${row.tabId}-${row.rowId}-${idx}`} style={{ padding: "7px 8px", borderBottom: idx < timeline.length - 1 ? `1px solid ${th.border}18` : "none", display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: 8, fontSize: 10, fontFamily: "-apple-system, sans-serif" }}>
                     <div style={{ color: th.textMuted, fontFamily: "monospace", lineHeight: 1.45 }}>
-                      <div>{row.timestamp ? row.timestamp.slice(0, 19) : "(no time)"}</div>
+                      <div>{row.timestamp ? fmtTs(row.timestamp) : "(no time)"}</div>
                       <div style={{ fontSize: 8, overflowWrap: "anywhere" }}>{row.tabName} #{row.rowId}</div>
                       {row.eventId && <div style={{ color: th.accent, fontSize: 8 }}>EID {row.eventId}</div>}
                     </div>
@@ -729,27 +990,54 @@ export default function LateralMovementModal() {
     return result;
   };
 
+  // `detector` maps a rule to detector ids in electron/analyzers/lateral-movement/
+  // detector-registry.js. The analyzer derives which events to fetch from the enabled
+  // detectors, so this table no longer decides the query — it only decides what the
+  // analyst can switch off. New rules must be APPENDED: LM_PRESETS and LM_INTENTS
+  // reference rules by index.
   const LM_RULES = [
-    { cat: "RDP Session", name: "Network Authentication", sev: "high", eids: ["1149"], hint: "RemoteConnectionManager" },
-    { cat: "RDP Session", name: "Session Logon", sev: "medium", eids: ["21"], hint: "LocalSessionManager" },
-    { cat: "RDP Session", name: "Shell Start Notification", sev: "low", eids: ["22"], hint: "LocalSessionManager" },
-    { cat: "RDP Session", name: "Session Logoff", sev: "low", eids: ["23"], hint: "LocalSessionManager" },
-    { cat: "RDP Session", name: "Session Disconnected", sev: "low", eids: ["24"], hint: "LocalSessionManager" },
-    { cat: "RDP Session", name: "Session Reconnected", sev: "medium", eids: ["25"], hint: "LocalSessionManager" },
-    { cat: "RDP Session", name: "Disconnect by Other / Reason", sev: "low", eids: ["39", "40"], hint: "LocalSessionManager" },
+    { cat: "RDP Session", name: "Network Authentication", sev: "high", eids: ["1149"], hint: "RemoteConnectionManager", detector: "rdp-sessions" },
+    { cat: "RDP Session", name: "Session Logon", sev: "medium", eids: ["21"], hint: "LocalSessionManager", detector: "rdp-sessions" },
+    { cat: "RDP Session", name: "Shell Start Notification", sev: "low", eids: ["22"], hint: "LocalSessionManager", detector: "rdp-sessions" },
+    { cat: "RDP Session", name: "Session Logoff", sev: "low", eids: ["23"], hint: "LocalSessionManager", detector: "rdp-sessions" },
+    { cat: "RDP Session", name: "Session Disconnected", sev: "low", eids: ["24"], hint: "LocalSessionManager", detector: "rdp-sessions" },
+    { cat: "RDP Session", name: "Session Reconnected", sev: "medium", eids: ["25"], hint: "LocalSessionManager", detector: "rdp-sessions" },
+    { cat: "RDP Session", name: "Disconnect by Other / Reason", sev: "low", eids: ["39", "40"], hint: "LocalSessionManager", detector: "rdp-sessions" },
     { cat: "Security Logon", name: "Successful Logon", sev: "high", eids: ["4624"], hint: "Types 2,3,7,8,9,10,11,12" },
-    { cat: "Security Logon", name: "Failed Logon", sev: "high", eids: ["4625"], hint: "All logon types" },
-    { cat: "Security Logon", name: "Explicit Credentials (RunAs)", sev: "high", eids: ["4648"], hint: "Alternate credential usage" },
-    { cat: "Privileges", name: "Admin Privileges Assigned", sev: "high", eids: ["4672"], hint: "Special privileges at logon" },
-    { cat: "Session Lifecycle", name: "Session Reconnect / Disconnect", sev: "medium", eids: ["4778", "4779"], hint: "Window Station events" },
+    { cat: "Security Logon", name: "Failed Logon", sev: "high", eids: ["4625"], hint: "All logon types", detector: ["bruteforce", "password-spray", "cred-compromise"] },
+    { cat: "Security Logon", name: "Explicit Credentials (RunAs)", sev: "high", eids: ["4648"], hint: "Alternate credential usage", detector: "explicit-creds" },
+    { cat: "Privileges", name: "Admin Privileges Assigned", sev: "high", eids: ["4672"], hint: "Special privileges at logon", detector: "admin-priv" },
+    { cat: "Session Lifecycle", name: "Session Reconnect / Disconnect", sev: "medium", eids: ["4778", "4779"], hint: "Window Station events", detector: "rdp-sessions" },
     { cat: "Session Lifecycle", name: "Account Logoff", sev: "low", eids: ["4634", "4647"], hint: "Logoff / user-initiated logoff" },
     { cat: "RMM / Remote Access", name: "RMM Tool Detection", sev: "high", eids: ["4688", "1", "7045", "4697"], hint: "AnyDesk, ScreenConnect, TeamViewer, etc.", detector: "rmm" },
     { cat: "RMM / Remote Access", name: "Scheduled Task Execution", sev: "medium", eids: ["4698", "4688", "1"], hint: "Remote schtasks /create /s", detector: "schtask" },
+    // Appended: these detectors ship in the analyzer but their events were never
+    // requested, so they could not fire. Surfacing them here also makes them toggleable.
+    { cat: "Share Access", name: "Admin Share Access", sev: "high", eids: ["5140", "5145"], hint: "ADMIN$, C$, IPC$ + named-pipe attribution", detector: "adminshare" },
+    { cat: "Security Logon", name: "NTLM Authentication", sev: "medium", eids: ["4776"], hint: "Credential validation / operator-host signal", detector: "ntlm" },
+    { cat: "RDP Session", name: "Shadow / Session Takeover", sev: "high", eids: ["20", "32", "33", "34", "35"], hint: "RDP shadowing and session hijack", detector: "rdp-shadow" },
+    { cat: "Kerberos", name: "Service Ticket Requests", sev: "low", eids: ["4769"], hint: "Kerberos TGS — also feeds Kerberoasting", detector: "kerberos-tickets" },
   ];
   const LM_SEV_COLORS = { critical: th.sev.critical, high: th.sev.high, medium: th.sev.med, low: th.sev.low };
   // Evidence-pill colors: pure brand palette — accent for the strong action signals
   // (credential abuse / execution), neutral grays for context. No blue/green (Unit 42 theme).
-  const _pillColors = { credential: th.accent, execution: th.accent, correlation: th.textMuted, target: th.textMuted, context: th.textMuted };
+  // Tone -> colour, matching primitives/Badge.jsx exactly so an evidence pill renders the
+  // same in this modal as in the grid's Evidence column. `pillToneFor` (evidence-pills.js)
+  // is the single authority for which tone a pill type gets.
+  //
+  // The previous map painted `credential` and `execution` in th.accent — the BRAND colour,
+  // which the design system reserves for actions and never for risk. That both broke the
+  // convention and made identical pills two different colours in two adjacent views.
+  const TONE_COLOR = {
+    accent: th.accent, success: th.success, warning: th.warning, danger: th.danger,
+    critical: th.sev.critical, high: th.sev.high, med: th.sev.med, medium: th.sev.med,
+    low: th.sev.low, custom: th.sev.custom, clean: th.sev.clean, info: th.sev.info,
+    neutral: th.textDim,
+  };
+  const pillColor = (type) => TONE_COLOR[pillToneFor(type)] || th.textDim;
+  const _pillColors = Object.fromEntries(
+    ["credential", "execution", "correlation", "target", "context"].map((t) => [t, pillColor(t)]),
+  );
   const LM_PRESETS = [
     { id: "rdp", name: "RDP Analysis", desc: "Remote Desktop session lifecycle — authentication, logon, shell start, disconnect, reconnect", rules: [0, 1, 2, 3, 4, 5, 6],
       icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg> },
@@ -853,54 +1141,66 @@ export default function LateralMovementModal() {
     if (!nr.name && !nr.eventIds) return;
     setModal((p) => ({ ...p, lmCustomRules: [...(p.lmCustomRules || []), { ...nr }], lmAddingRule: false, lmNewRule: {} }));
   };
-  let _lmPreviewTimer = null;
   const refreshLmPreview = (colOverrides) => {
-    if (!tle.previewLateralMovement || !ct) return;
-    clearTimeout(_lmPreviewTimer);
-    _lmPreviewTimer = setTimeout(() => {
-      setModal((p) => {
-        if (!p || p.type !== "lateralMovement") return p;
-        const c = colOverrides || p.columns || {};
-        const af = _activeFilters(ct);
-        const seq = (p._lmPreviewSeq || 0) + 1;
-        tle.previewLateralMovement(ct.id, {
-          sourceCol: c.source, targetCol: c.target, userCol: c.user,
-          logonTypeCol: c.logonType, eventIdCol: c.eventId, tsCol: c.ts, domainCol: c.domain,
-          syntheticTargetHost: p.chainsawSyntheticTarget || "",
-          excludeLocalLogons: p.excludeLocal, excludeServiceAccounts: p.excludeService,
-          searchTerm: ct.searchHighlight ? "" : ct.searchTerm, searchMode: ct.searchMode, searchCondition: ct.searchCondition || "contains",
-          columnFilters: af.columnFilters, checkboxFilters: af.checkboxFilters,
-          bookmarkedOnly: ct.showBookmarkedOnly, dateRangeFilters: ct.dateRangeFilters || {}, advancedFilters: ct.advancedFilters || [],
-        }).then((prev) => {
-          setModal((q) => q?.type === "lateralMovement" && (q._lmPreviewSeq || 0) === seq ? { ...q, lmPreview: prev, lmPreviewLoading: false } : q);
-        }).catch(() => {
-          setModal((q) => q?.type === "lateralMovement" && (q._lmPreviewSeq || 0) === seq ? { ...q, lmPreviewLoading: false } : q);
-        });
-        return { ...p, lmPreviewLoading: true, _lmPreviewSeq: seq };
+    if (!tle?.previewLateralMovement || !ct) return;
+    clearTimeout(_lmPreviewTimerRef.current);
+    _lmPreviewTimerRef.current = setTimeout(() => {
+      // Sequence token is read from the store, bumped once, then the IPC is issued
+      // OUTSIDE the updater — issuing it inside meant a side effect ran from a Zustand
+      // state callback, which React may invoke more than once.
+      const seq = (useUIStore.getState().modal?._lmPreviewSeq || 0) + 1;
+      const p = useUIStore.getState().modal;
+      if (!p || p.type !== "lateralMovement") return;
+      const c = colOverrides || p.columns || {};
+      const af = _activeFilters(ct);
+      setModal((q) => (q?.type === "lateralMovement" ? { ...q, lmPreviewLoading: true, lmPreviewError: null, _lmPreviewSeq: seq } : q));
+      tle.previewLateralMovement(ct.id, {
+        sourceCol: c.source, targetCol: c.target, userCol: c.user,
+        logonTypeCol: c.logonType, eventIdCol: c.eventId, tsCol: c.ts, domainCol: c.domain,
+        syntheticTargetHost: p.chainsawSyntheticTarget || "",
+        excludeLocalLogons: p.excludeLocal, excludeServiceAccounts: p.excludeService,
+        searchTerm: ct.searchHighlight ? "" : ct.searchTerm, searchMode: ct.searchMode, searchCondition: ct.searchCondition || "contains",
+        columnFilters: af.columnFilters, checkboxFilters: af.checkboxFilters,
+        bookmarkedOnly: ct.showBookmarkedOnly, dateRangeFilters: ct.dateRangeFilters || {}, advancedFilters: ct.advancedFilters || [],
+      }).then((prev) => {
+        // An unchecked IPC error used to be stored AS the preview, so the availability
+        // panel reported 0 for every event group and warned "no logon events — core
+        // detection unavailable" when the real problem was a failed query.
+        if (isIpcError(prev)) {
+          setModal((q) => q?.type === "lateralMovement" && (q._lmPreviewSeq || 0) === seq
+            ? { ...q, lmPreview: null, lmPreviewLoading: false, lmPreviewError: ipcErrorMessage(prev) } : q);
+          return;
+        }
+        setModal((q) => q?.type === "lateralMovement" && (q._lmPreviewSeq || 0) === seq
+          ? { ...q, lmPreview: prev, lmPreviewLoading: false, lmPreviewError: null } : q);
+      }).catch((err) => {
+        setModal((q) => q?.type === "lateralMovement" && (q._lmPreviewSeq || 0) === seq
+          ? { ...q, lmPreviewLoading: false, lmPreviewError: err?.message || "Preview failed" } : q);
       });
     }, 600);
   };
-  if (modal._lmNeedsPreview) {
-    setModal((p) => ({ ...p, _lmNeedsPreview: false }));
-    refreshLmPreview();
-    // Auto-detect KAPE collection host
-    if (ct && !modal._kapeHostDetected) {
-      setModal((p) => ({ ...p, _kapeHostDetected: true }));
-      tle.detectKapeCollectionHost(ct.id).then((result) => {
-        if (result && result.collectionHost) {
-          setModal((p) => p?.type === "lateralMovement" ? { ...p, kapeHost: result } : p);
-        }
-      }).catch(() => {});
-    }
-  }
-  // Auto-run analysis when launched from a dedicated entry (e.g. RDP Sessions menu)
-  if (modal._lmAutoRun && modal.phase === "config" && !modal.loading) {
-    setModal((p) => ({ ...p, _lmAutoRun: false }));
-    setTimeout(() => handleAnalyze(), 50);
-  }
 
-  // Multi-source: list of other data-ready tabs for correlation
-  const otherTabs = useMemo(() => tabs.filter(t => t.dataReady && t.id !== ct?.id), [tabs, ct?.id]);
+  /**
+   * Cancel really cancels now. Bumping the run token alone would only stop the result
+   * from being committed — the analyzer would keep burning a worker thread on a
+   * multi-GB tab. The job manager already exposes cancellation; nothing was calling it.
+   */
+  const cancelAnalysis = async () => {
+    _runSeqRef.current = -1;
+    setModal((p) => (p?.type === "lateralMovement"
+      ? { ...p, phase: "config", loading: false, lmProgress: 0, lmRunSeq: (p.lmRunSeq || 0) + 1 }
+      : p));
+    if (!tle?.listJobs || !tle?.cancelJob) return;
+    try {
+      const jobs = await tle.listJobs();
+      if (isIpcError(jobs) || !Array.isArray(jobs)) return;
+      // Match on the analyzer method so a concurrently running Persistence or Ransomware
+      // job is not killed alongside ours.
+      const mine = jobs.filter((j) => j?.status === "running"
+        && (j?.metadata?.method === "getLateralMovement" || j?.metadata?.method === "getMultiSourceLateralMovement"));
+      await Promise.all(mine.map((j) => tle.cancelJob(j.id).catch(() => {})));
+    } catch { /* the run token already protects state; cancellation is best-effort */ }
+  };
 
   const handleAnalyze = async (overrides = {}) => {
     // Resolve filter values: caller-supplied overrides take precedence over current modal state.
@@ -908,26 +1208,53 @@ export default function LateralMovementModal() {
     // immediately — without overrides, we'd close over the stale render-time `modal` value.
     const effExcludeLocal = overrides.excludeLocal != null ? overrides.excludeLocal : modal.excludeLocal;
     const effExcludeService = overrides.excludeService != null ? overrides.excludeService : modal.excludeService;
+    // Run token. The old `_cancelled` boolean was reset to false at the start of every
+    // run, so pressing Cancel and immediately re-running let run #1's late result pass
+    // the guard and overwrite run #2 — and a result from a closed modal could hijack a
+    // freshly reopened one. A monotonic sequence cannot be un-cancelled: only the run
+    // whose token still matches the store is allowed to commit.
+    const seq = (useUIStore.getState().modal?.lmRunSeq || 0) + 1;
+    _runSeqRef.current = seq;
+    const isCurrentRun = (p) => p?.type === "lateralMovement" && p.lmRunSeq === seq;
+
     const t0 = Date.now();
     const pInt = setInterval(() => {
       setModal((p) => {
-        if (!p || p.type !== "lateralMovement" || p.phase !== "loading") { clearInterval(pInt); return p; }
+        if (!isCurrentRun(p) || p.phase !== "loading") { clearInterval(pInt); return p; }
+        // Real per-stage progress arrives on the analysis-progress channel; this eased
+        // curve is only a fallback for when the analyzer reports nothing.
+        if (p._lmRealProgress) return p;
         const el = (Date.now() - t0) / 1000;
         const prog = Math.min(92, 90 * (1 - Math.exp(-el / 8)));
         const pi = prog < 10 ? 0 : prog < 35 ? 1 : prog < 60 ? 2 : prog < 80 ? 3 : 4;
         return { ...p, lmProgress: prog, lmPhaseIdx: pi };
       });
     }, 150);
-    setModal((p) => ({ ...p, phase: "loading", loading: true, error: null, lmProgress: 0, lmPhaseIdx: 0, _cancelled: false, excludeLocal: effExcludeLocal, excludeService: effExcludeService }));
+    setModal((p) => ({ ...p, phase: "loading", loading: true, error: null, lmProgress: 0, lmPhaseIdx: 0, lmRunSeq: seq, _lmRealProgress: false, excludeLocal: effExcludeLocal, excludeService: effExcludeService }));
     try {
-      const enabledEids = new Set();
-      const disabledDetectors = [];
+      // Send which DETECTORS are on, not which event ids to fetch. The analyzer derives
+      // the query from its detector registry, so a detector can no longer be starved of
+      // the events it needs by an out-of-date list here. A detector is only disabled when
+      // every rule that references it is off — several RDP rules share `rdp-sessions`,
+      // and switching off "Shell Start Notification" must not kill session reconstruction.
+      const _detectorRules = new Map(); // detectorId -> { total, off }
       LM_RULES.forEach((r, i) => {
-        if (!lmDisabledSet.has(`lm-${i}`)) { r.eids.forEach((id) => enabledEids.add(id)); }
-        else if (r.detector) { disabledDetectors.push(r.detector); }
+        const ids = Array.isArray(r.detector) ? r.detector : (r.detector ? [r.detector] : []);
+        const off = lmDisabledSet.has(`lm-${i}`);
+        for (const id of ids) {
+          const entry = _detectorRules.get(id) || { total: 0, off: 0 };
+          entry.total += 1;
+          if (off) entry.off += 1;
+          _detectorRules.set(id, entry);
+        }
       });
-      lmCustomRulesArr.forEach((cr) => { (cr.eventIds || "").split(",").map((s) => s.trim()).filter(Boolean).forEach((id) => enabledEids.add(id)); });
-      const eids = [...enabledEids];
+      const disabledDetectors = [..._detectorRules.entries()]
+        .filter(([, v]) => v.total > 0 && v.off === v.total)
+        .map(([id]) => id);
+      const extraEventIds = [];
+      lmCustomRulesArr.forEach((cr) => {
+        (cr.eventIds || "").split(",").map((s) => s.trim()).filter(Boolean).forEach((id) => extraEventIds.push(id));
+      });
 
       const isMultiSource = modal.lmMultiSource && (modal.lmSelectedTabIds || []).length > 0;
       let result;
@@ -939,7 +1266,7 @@ export default function LateralMovementModal() {
         const tabLabels = {};
         for (const t of tabs) { tabLabels[t.id] = t.name; }
         result = await tle.getMultiSourceLateralMovement(allIds, {
-          eventIds: eids, excludeLocalLogons: effExcludeLocal, excludeServiceAccounts: effExcludeService,
+          extraEventIds, excludeLocalLogons: effExcludeLocal, excludeServiceAccounts: effExcludeService,
           disabledDetectors, rmmMode: modal.lmRmmMode || "all",
           _tabLabels: tabLabels,
         });
@@ -950,7 +1277,7 @@ export default function LateralMovementModal() {
           sourceCol: cols.source, targetCol: cols.target, userCol: cols.user,
           logonTypeCol: cols.logonType, eventIdCol: cols.eventId, tsCol: cols.ts, domainCol: cols.domain,
           syntheticTargetHost: modal.chainsawSyntheticTarget || "",
-          eventIds: eids, excludeLocalLogons: effExcludeLocal, excludeServiceAccounts: effExcludeService,
+          extraEventIds, excludeLocalLogons: effExcludeLocal, excludeServiceAccounts: effExcludeService,
           disabledDetectors, rmmMode: modal.lmRmmMode || "all",
           searchTerm: ct.searchHighlight ? "" : ct.searchTerm, searchMode: ct.searchMode, searchCondition: ct.searchCondition || "contains",
           columnFilters: af.columnFilters, checkboxFilters: af.checkboxFilters,
@@ -960,15 +1287,24 @@ export default function LateralMovementModal() {
 
       clearInterval(pInt);
       if (isIpcError(result)) {
-        setModal((p) => p?.type === "lateralMovement" && !p._cancelled ? { ...p, phase: "config", loading: false, error: ipcErrorMessage(result), lmProgress: 0 } : p);
+        setModal((p) => isCurrentRun(p) ? { ...p, phase: "config", loading: false, error: ipcErrorMessage(result), lmProgress: 0 } : p);
       } else {
-        setModal((p) => p?.type === "lateralMovement" && !p._cancelled ? { ...p, lmProgress: 100, lmPhaseIdx: 5 } : p);
+        setModal((p) => isCurrentRun(p) ? { ...p, lmProgress: 100, lmPhaseIdx: 5 } : p);
         await new Promise((r) => setTimeout(r, 300));
         const layoutNodes = result.nodes.length > 500 ? result.nodes.sort((a, b) => b.eventCount - a.eventCount).slice(0, 500) : result.nodes;
         const layoutIds = new Set(layoutNodes.map((n) => n.id));
         const layoutEdges = result.edges.filter((e) => layoutIds.has(e.source) && layoutIds.has(e.target));
         const pos = computeForceLayout(layoutNodes, layoutEdges);
-        setModal((p) => p?.type === "lateralMovement" && !p._cancelled ? { ...p, phase: "results", loading: false, data: result, positions: pos, selectedNode: null, selectedEdge: null, viewTab: p._lmInitialView || "graph", truncatedGraph: result.nodes.length > 500, rdpViewMode: p._lmInitialRdpView || "grouped" } : p);
+        setModal((p) => isCurrentRun(p) ? { ...p, phase: "results", loading: false, data: result, positions: pos, selectedNode: null, selectedEdge: null, viewTab: p._lmInitialView || "graph", truncatedGraph: result.nodes.length > 500, rdpViewMode: p._lmInitialRdpView || "grouped", lmAlertLimit: 300, lmEdgeLimit: 400 } : p);
+        // Keep the finished run on the tab so closing the modal is not destructive. This
+        // is deliberately IN-MEMORY (session lifetime) and deliberately NOT part of
+        // buildSessionPayload — a findings array for a large collection is megabytes, and
+        // that payload is shared by every save/restore in the app.
+        try {
+          useTabStore.getState().updateTab(ct.id, {
+            lmLastRun: { data: result, positions: pos, completedAt: Date.now(), multiSource: !!result.multiSource },
+          });
+        } catch { /* resume is a convenience, never block the result */ }
         // Distribute finding-level evidence pills to per-row map so the main
         // grid Evidence column shows LM pills inline. Uses the same helper as
         // PersistenceModal — findings now carry itemRowids from the scan loop.
@@ -987,7 +1323,7 @@ export default function LateralMovementModal() {
       }
     } catch (e) {
       clearInterval(pInt);
-      setModal((p) => p?.type === "lateralMovement" && !p._cancelled ? { ...p, phase: "config", loading: false, error: e.message } : p);
+      setModal((p) => isCurrentRun(p) ? { ...p, phase: "config", loading: false, error: e.message } : p);
     }
   };
 
@@ -1003,6 +1339,15 @@ export default function LateralMovementModal() {
     if (t.has("5")) return th.sev.low;
     if (t.has("11")) return th.sev.custom;
     return th.textDim;
+  };
+  /** "just now" / "4m ago" / "2h ago" — for the resume affordance. */
+  const _agoLabel = (ts) => {
+    if (!ts) return "";
+    const secs = Math.max(0, Math.round((Date.now() - ts) / 1000));
+    if (secs < 45) return "just now";
+    if (secs < 3600) return `${Math.round(secs / 60)}m ago`;
+    if (secs < 86400) return `${Math.round(secs / 3600)}h ago`;
+    return `${Math.round(secs / 86400)}d ago`;
   };
   const edgeWidth = (count) => Math.max(1, Math.min(6, 1 + Math.log2(count)));
   const nodeRadius = (eventCount) => Math.max(6, Math.min(20, 6 + Math.log2(eventCount + 1) * 2));
@@ -1022,6 +1367,11 @@ export default function LateralMovementModal() {
     return false;
   };
 
+  // Hand the current closures to the effects declared above the guard. Assigning during
+  // render is safe for a ref used only from effects/handlers (never read while rendering).
+  _handlersRef.current.refreshLmPreview = refreshLmPreview;
+  _handlersRef.current.handleAnalyze = handleAnalyze;
+
   return (
     <DraggableResizableModal
       defaultWidth={Math.round(window.innerWidth * 0.92)}
@@ -1031,6 +1381,40 @@ export default function LateralMovementModal() {
       onClose={() => setModal(null)}
     >
       {({ startDrag: startLmDrag, height: lmH }) => (<>
+        {/* Tag picker — replaces window.prompt(), which Electron does not implement. */}
+        {modal.lmTagPicker && (() => {
+          const tp = modal.lmTagPicker;
+          const setTagVal = (v) => setModal((p) => (p?.type === "lateralMovement" && p.lmTagPicker ? { ...p, lmTagPicker: { ...p.lmTagPicker, value: v } } : p));
+          const close = () => setModal((p) => (p?.type === "lateralMovement" ? { ...p, lmTagPicker: null } : p));
+          const chip = (t) => (
+            <button key={t} onClick={() => _applyEvidenceTag(tp.item, t)}
+              style={{ padding: "4px 10px", borderRadius: 999, border: `1px solid ${th.glassBorder || th.border}`, background: th.glassBg || th.bgAlt, color: th.textDim, fontSize: 11, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}>{t}</button>
+          );
+          return (
+            <div onClick={close} style={{ position: "absolute", inset: 0, zIndex: 40, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center" }}>
+              <div onClick={(ev) => ev.stopPropagation()} role="dialog" aria-label="Tag evidence rows"
+                style={{ width: 420, maxWidth: "90%", padding: 18, borderRadius: 12, background: th.modalBg, border: `1px solid ${th.glassBorder || th.border}`, boxShadow: `0 12px 40px ${th.bg}cc`, backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)" }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif" }}>Tag evidence rows</div>
+                <div style={{ fontSize: 11, color: th.textMuted, marginTop: 3, fontFamily: "-apple-system, sans-serif" }}>
+                  Applies to the {tp.refCount} exact source row{tp.refCount === 1 ? "" : "s"} behind this item.
+                </div>
+                <input autoFocus value={tp.value || ""} onChange={(ev) => setTagVal(ev.target.value)}
+                  onKeyDown={(ev) => { if (ev.key === "Enter") _applyEvidenceTag(tp.item, tp.value); if (ev.key === "Escape") close(); }}
+                  placeholder="tag name"
+                  style={{ width: "100%", marginTop: 12, padding: "7px 10px", borderRadius: 8, border: `1px solid ${th.border}`, background: th.bgInput, color: th.text, fontSize: 12, fontFamily: "-apple-system, sans-serif", boxSizing: "border-box" }} />
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
+                  {[_defaultTagFor(tp.item), "lateral:confirmed", "lateral:credential-abuse", "lateral:execution", "needs-review", "false-positive"]
+                    .filter((t, i, a) => a.indexOf(t) === i).map(chip)}
+                </div>
+                <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 16 }}>
+                  <button onClick={close} style={{ ...ms.bs, borderRadius: 8 }}>Cancel</button>
+                  <button onClick={() => _applyEvidenceTag(tp.item, tp.value)} disabled={!String(tp.value || "").trim()}
+                    style={{ ...ms.bp, borderRadius: 8, opacity: String(tp.value || "").trim() ? 1 : 0.5 }}>Apply tag</button>
+                </div>
+              </div>
+            </div>
+          );
+        })()}
         {/* Header — draggable */}
         <div onMouseDown={startLmDrag} style={{ padding: "16px 20px 12px", borderBottom: `1px solid ${th.border}22`, display: "flex", alignItems: "center", justifyContent: "space-between", flexShrink: 0, background: `linear-gradient(135deg, ${th.panelBg}ee, ${th.modalBg}dd)`, backdropFilter: "blur(20px)", WebkitBackdropFilter: "blur(20px)", cursor: "grab" }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
@@ -1478,10 +1862,11 @@ export default function LateralMovementModal() {
                   <span style={{ color: th.textMuted, marginLeft: "auto" }}>{data.stats.totalMergedRows?.toLocaleString()} merged events</span>
                 </div>
               )}
-              {/* Stats cards — all use accent color, all clickable */}
+              {/* Stat cards — clickable. Counts use the brand accent; the risk-bearing
+                  findings/outliers cards are toned by worst severity (see below). */}
               <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
                 {[
-                  { val: data.stats.findingsCount || 0, label: "findings", icon: "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01", clickTab: "findings" },
+                  { risk: true, val: data.stats.findingsCount || 0, label: "findings", icon: "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01", clickTab: "findings" },
                   { val: data.stats.uniqueHosts, label: "unique hosts", icon: "M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2M9 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75", clickTab: "hosts" },
                   { val: data.stats.uniqueConnections, label: "connections", icon: "M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3", clickTab: "connections" },
                   // Users card prefers stats.accountCount (the new identity-centric pipeline)
@@ -1491,10 +1876,20 @@ export default function LateralMovementModal() {
                   { val: data.stats.accountCount ?? data.stats.uniqueUsers, label: "users", icon: "M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8", clickTab: "accounts", subVal: data.stats.suspiciousAccounts || 0, subLabel: "suspicious" },
                   { val: data.stats.rdpSessionCount || 0, label: "rdp sessions", icon: "M2 3h20v14H2zM8 21h8M12 17v4", clickTab: "rdp" },
                   { val: data.stats.longestChain, label: "longest chain", icon: "M13 17l5-5-5-5M6 17l5-5-5-5", clickTab: "chains" },
-                  { val: data.nodes.filter(n => n.isOutlier).length, label: "outliers", icon: "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01", clickTab: "outlier" },
+                  { risk: true, val: data.nodes.filter(n => n.isOutlier).length, label: "outliers", icon: "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01", clickTab: "outlier" },
                   { val: data.stats.totalEvents?.toLocaleString(), label: "logon events", icon: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M16 13H8M16 17H8M10 9H8", clickTab: "events" },
                 ].map((c, i) => {
-                  const accentColor = th.accent;
+                  // Counts are neutral facts and stay on the brand accent. The two cards
+                  // that carry RISK — findings and outliers — are toned by the worst
+                  // severity actually present, because the design system reserves the brand
+                  // colour for actions and requires th.sev for anything that means "bad".
+                  // A zero count is not a risk signal, so it stays neutral.
+                  const worstSev = ["critical", "high", "medium", "low"]
+                    .find((sv) => (data.findings || []).some((f) => f.severity === sv));
+                  const numericValForTone = Number(String(c.val).replace(/,/g, "")) || 0;
+                  const accentColor = (c.risk && numericValForTone > 0)
+                    ? (LM_SEV_COLORS[worstSev] || th.sev.info)
+                    : th.accent;
                   const numericVal = Number(String(c.val).replace(/,/g, "")) || 0;
                   const isClickable = numericVal > 0;
                   const handleClick = () => {
@@ -1673,8 +2068,8 @@ export default function LateralMovementModal() {
                   if (h === "User(s)") return (s.users || []).join(", ") || "(unknown)";
                   if (h === "Findings") return s.findingCount || 0;
                   if (h === "Events") return s.eventCount || 0;
-                  if (h === "Start") return (s.startTime || "").slice(0, 19);
-                  if (h === "End") return (s.endTime || "").slice(0, 19);
+                  if (h === "Start") return fmtTs(s.startTime);
+                  if (h === "End") return fmtTs(s.endTime);
                   if (h === "Status") return s.status;
                   return "";
                 };
@@ -1686,7 +2081,7 @@ export default function LateralMovementModal() {
                 const toggleSort = (h) => setModal((p) => ({ ...p, esSortCol: h, esSortDir: p.esSortCol === h && p.esSortDir === "desc" ? "asc" : "desc" }));
                 const _sevColor = (sev) => sev === "critical" ? th.sev.critical : sev === "high" ? th.sev.high : sev === "medium" ? th.sev.med : th.textMuted;
                 const _statusStyle = (st) => st === "executed" ? { bg: th.sev.critical + "18", color: th.sev.critical, label: "EXECUTED" } : st === "observed" ? { bg: `${th.textMuted}15`, color: th.textMuted, label: "OBSERVED" } : { bg: th.sev.med + "18", color: th.sev.med, label: st.toUpperCase() };
-                const _pillColor = { credential: th.accent, execution: th.accent, correlation: th.textMuted, target: th.textMuted, context: th.textMuted };
+                const _pillColor = _pillColors; // was a byte-identical duplicate of the map above
 
                 return (
                   <div>
@@ -1710,13 +2105,13 @@ export default function LateralMovementModal() {
                       const esViewMode = modal.esViewMode || "table";
                       const copyEs = () => {
                         const header = ["Score", "Severity", "Technique", "Source", "Target", "Users", "Findings", "Events", "Start", "End", "Status"].join("\t");
-                        const lines = sorted.map(s => [s.triageScore, s.severity, s.technique, s.source, s.target, (s.users || []).join("; "), s.findingCount, s.eventCount, (s.startTime || "").slice(0, 19), (s.endTime || "").slice(0, 19), s.status].join("\t"));
+                        const lines = sorted.map(s => [s.triageScore, s.severity, s.technique, s.source, s.target, (s.users || []).join("; "), s.findingCount, s.eventCount, fmtTs(s.startTime), fmtTs(s.endTime), s.status].join("\t"));
                         navigator.clipboard?.writeText?.([header, ...lines].join("\n"));
                       };
                       const exportEsCsv = () => {
                         const header = "Score,Severity,Technique,Source,Target,Users,Findings,Events,Start,End,Status,Categories,Evidence Pills";
-                        const csvEsc = (v) => { const s = String(v ?? ""); return s.includes(",") || s.includes('"') || s.includes("\n") ? `"${s.replace(/"/g, '""')}"` : s; };
-                        const lines = sorted.map(s => [s.triageScore, s.severity, s.technique, s.source, s.target, (s.users || []).join("; "), s.findingCount, s.eventCount, (s.startTime || "").slice(0, 19), (s.endTime || "").slice(0, 19), s.status, (s.categories || []).join("; "), (s.evidencePills || []).map(p => p.text).join("; ")].map(csvEsc).join(","));
+                        const csvEsc = csvCell; // shared encoder: RFC-4180 + formula-injection guard
+                        const lines = sorted.map(s => [s.triageScore, s.severity, s.technique, s.source, s.target, (s.users || []).join("; "), s.findingCount, s.eventCount, fmtTs(s.startTime), fmtTs(s.endTime), s.status, (s.categories || []).join("; "), (s.evidencePills || []).map(p => p.text).join("; ")].map(csvEsc).join(","));
                         const blob = new Blob([header + "\n" + lines.join("\n")], { type: "text/csv" });
                         const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "execution-sessions.csv"; a.click(); URL.revokeObjectURL(a.href);
                       };
@@ -1744,7 +2139,7 @@ export default function LateralMovementModal() {
 
                     {/* Timeline (Gantt) view */}
                     {(modal.esViewMode || "table") === "timeline" && (() => {
-                      const _pt = (s) => { const d = new Date((s || "").replace("T", " ").replace("Z", "")); return isNaN(d) ? 0 : d.getTime(); };
+                      const _pt = (s) => { const ms = normalizeTimestamp(s); return Number.isFinite(ms) ? ms : 0; };
                       let tMin = Infinity, tMax = -Infinity;
                       for (const s of sorted) {
                         const st = _pt(s.startTime), et = _pt(s.endTime);
@@ -1755,9 +2150,13 @@ export default function LateralMovementModal() {
                       if (tMin === Infinity || tMax === -Infinity) return <div style={{ padding: 20, color: th.textMuted, fontSize: 12, textAlign: "center" }}>No timestamps available for timeline.</div>;
                       const span = Math.max(tMax - tMin, 1);
                       const BAR_H = 20, ROW_H = 28, PAD_L = 160;
-                      const fmtLabel = (ms) => { const d = new Date(ms); const p = (n) => String(n).padStart(2, "0"); return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`; };
+                      const fmtLabel = (ms) => { const d = new Date(ms); const p = (n) => String(n).padStart(2, "0"); return `${d.getUTCFullYear()}-${p(d.getUTCMonth()+1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())} UTC`; };
                       const techColors = {};
-                      const _tPalette = [th.accent, th.sev.info, th.sev.clean, th.sev.high, th.sev.med, th.sev.custom, th.sev.critical, th.sev.low, th.sev.critical, th.sev.custom];
+                      // Categorical palette for techniques. th.sev is an ORDINAL scale, so
+                      // borrowing it for categories is already a compromise — but the old
+                      // array also included the brand accent and repeated critical and
+                      // custom, so two techniques rendered identically. Distinct hues only.
+                      const _tPalette = [th.sev.info, th.sev.clean, th.sev.custom, th.sev.high, th.sev.med, th.sev.critical, th.sev.low, th.textDim];
                       let _tci = 0;
                       for (const s of sorted) { if (!techColors[s.technique]) techColors[s.technique] = _tPalette[_tci++ % _tPalette.length]; }
 
@@ -1793,7 +2192,7 @@ export default function LateralMovementModal() {
                                   {/* Bar area */}
                                   <div style={{ flex: 1, height: BAR_H, position: "relative", background: th.border + "11", marginRight: 8 }}>
                                     <div style={{ position: "absolute", left: `${leftPct}%`, width: `${widthPct}%`, height: "100%", background: `linear-gradient(90deg, ${barColor}cc, ${barColor}88)`, borderRadius: 3, minWidth: 3 }}
-                                      title={`${s.technique}: ${s.source || "?"} → ${s.target || "?"}\n${(s.users || []).join(", ") || "(unknown)"}\n${(s.startTime || "").slice(0, 19)} — ${(s.endTime || "").slice(0, 19)}\nScore: ${sc} | ${s.eventCount} events | ${s.findingCount} findings`}>
+                                      title={`${s.technique}: ${s.source || "?"} → ${s.target || "?"}\n${(s.users || []).join(", ") || "(unknown)"}\n${fmtTs(s.startTime)} — ${fmtTs(s.endTime)}\nScore: ${sc} | ${s.eventCount} events | ${s.findingCount} findings`}>
                                       {widthPct > 8 && <span style={{ position: "absolute", left: 4, top: 2, fontSize: 8, color: "#fff", fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", right: 4 }}>{s.source || "?"} → {s.target || "?"}</span>}
                                     </div>
                                   </div>
@@ -1862,16 +2261,16 @@ export default function LateralMovementModal() {
                                 {/* Events count */}
                                 <div style={{ width: esColW.Events, padding: "4px 8px", flexShrink: 0, textAlign: "center", fontFamily: "monospace", fontSize: 10 }}>{s.eventCount}</div>
                                 {/* Start */}
-                                <div style={{ width: esColW.Start, padding: "4px 8px", flexShrink: 0, color: th.textDim, fontFamily: "monospace", fontSize: 10, whiteSpace: "nowrap" }}>{(s.startTime || "").slice(0, 19)}</div>
+                                <div style={{ width: esColW.Start, padding: "4px 8px", flexShrink: 0, color: th.textDim, fontFamily: "monospace", fontSize: 10, whiteSpace: "nowrap" }}>{fmtTs(s.startTime)}</div>
                                 {/* End */}
-                                <div style={{ width: esColW.End, padding: "4px 8px", flexShrink: 0, color: th.textDim, fontFamily: "monospace", fontSize: 10, whiteSpace: "nowrap" }}>{(s.endTime || "").slice(0, 19)}</div>
+                                <div style={{ width: esColW.End, padding: "4px 8px", flexShrink: 0, color: th.textDim, fontFamily: "monospace", fontSize: 10, whiteSpace: "nowrap" }}>{fmtTs(s.endTime)}</div>
                                 {/* Status */}
                                 <div style={{ width: esColW.Status, padding: "4px 8px", flexShrink: 0 }}>
                                   <span style={{ padding: "2px 6px", background: stS.bg, color: stS.color, borderRadius: 3, fontSize: 8, fontWeight: 700 }}>{stS.label}</span>
                                 </div>
                                 {/* Actions */}
                                 <div style={{ display: "flex", gap: 3, padding: "4px 8px", flexShrink: 0, alignItems: "center" }}>
-                                  <button onClick={(ev) => { ev.stopPropagation(); _filterEvents({ category: s.categories?.[0], filterEids: s.filterEids, filterHosts: s.filterHosts, timeRange: { from: s.startTime, to: s.endTime } }, ev); }}
+                                  <button onClick={(ev) => { ev.stopPropagation(); _filterEvents({ category: s.categories?.[0], filterEids: s.filterEids, filterHosts: s.filterHosts, timeRange: { from: s.startTime, to: s.endTime }, evidenceRefs: s.evidenceRefs, itemRowids: s.itemRowids }, ev); }}
                                     style={{ padding: "2px 6px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 3, fontSize: 8, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 600, whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 3 }}>
                                     <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke={th.accent} strokeWidth="2.5" strokeLinecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                                     Timeline
@@ -1903,7 +2302,7 @@ export default function LateralMovementModal() {
                                       <div><span style={{ color: th.textMuted, width: 80, display: "inline-block" }}>Target</span> {s.target || "(unknown)"}</div>
                                       <div><span style={{ color: th.textMuted, width: 80, display: "inline-block" }}>User(s)</span> {(s.users || []).join(", ") || "(unknown)"}</div>
                                       <div><span style={{ color: th.textMuted, width: 80, display: "inline-block" }}>Events</span> {s.eventCount}</div>
-                                      <div><span style={{ color: th.textMuted, width: 80, display: "inline-block" }}>Time</span> {(s.startTime || "").slice(0, 19)} {"\u2014"} {(s.endTime || "").slice(0, 19)}</div>
+                                      <div><span style={{ color: th.textMuted, width: 80, display: "inline-block" }}>Time</span> {fmtTs(s.startTime)} {"\u2014"} {fmtTs(s.endTime)}</div>
                                       <div style={{ marginTop: 8 }}><EvidenceActions item={s} /></div>
                                     </div>
                                     {/* Related findings */}
@@ -2029,7 +2428,7 @@ export default function LateralMovementModal() {
                           <div style={{ fontSize: 11, color: th.textDim, fontFamily: "-apple-system, sans-serif", marginBottom: 8, lineHeight: 1.5 }}>{f.description}</div>
                           <div style={{ fontSize: 10, color: th.textMuted, fontFamily: "monospace", marginBottom: 6 }}>
                             {f.source}{f.target && f.target !== f.source ? ` \u2192 ${f.target}` : ""}
-                            {f.timeRange?.from && <span style={{ marginLeft: 12 }}>{(f.timeRange.from || "").slice(0, 19)}{f.timeRange.to && f.timeRange.to !== f.timeRange.from ? ` \u2014 ${f.timeRange.to.slice(0, 19)}` : ""}</span>}
+                            {f.timeRange?.from && <span style={{ marginLeft: 12 }}>{fmtTs(f.timeRange.from)}{f.timeRange.to && f.timeRange.to !== f.timeRange.from ? ` \u2014 ${fmtTs(f.timeRange.to)}` : ""}</span>}
                             <span style={{ marginLeft: 12 }}>{f.eventCount} event{f.eventCount !== 1 ? "s" : ""}</span>
                           </div>
                           {pills.length > 0 && (
@@ -2070,7 +2469,7 @@ export default function LateralMovementModal() {
                             <button onClick={(e) => { e.stopPropagation(); setModal((p) => ({ ...p, viewTab: "chains" })); }} style={_btnS}>Show Chains</button>
                             <button onClick={(e) => {
                               e.stopPropagation();
-                              const lines = [`[${f.severity.toUpperCase()}] ${f.category} (${f.mitre})`, f.title, `Source: ${f.source || "(none)"} \u2192 Target: ${f.target || "(none)"}`, `Time: ${(f.timeRange?.from || "").slice(0, 19)} \u2014 ${(f.timeRange?.to || "").slice(0, 19)}`, `Events: ${f.eventCount}`];
+                              const lines = [`[${f.severity.toUpperCase()}] ${f.category} (${f.mitre})`, f.title, `Source: ${f.source || "(none)"} \u2192 Target: ${f.target || "(none)"}`, `Time: ${fmtTs(f.timeRange?.from)} \u2014 ${fmtTs(f.timeRange?.to)}`, `Events: ${f.eventCount}`];
                               if (pills.length > 0) lines.push(`Evidence: ${pills.map(p => p.text).join(", ")}`);
                               lines.push(`Description: ${f.description}`);
                               navigator.clipboard?.writeText?.(lines.join("\n"));
@@ -2119,18 +2518,46 @@ export default function LateralMovementModal() {
                       )}
                     </div>
 
-                    {findingsView === "alerts" && (
-                      <div style={{ maxHeight: lmH - 250, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
-                        {groupedEntries ? groupedEntries.map(([gKey, gFindings]) => (
-                          <div key={gKey}>
-                            <div style={{ fontSize: 10, fontWeight: 600, color: th.textDim, padding: "6px 0 4px", fontFamily: "-apple-system, sans-serif", borderBottom: `1px solid ${th.border}`, marginBottom: 4 }}>
-                              {gKey} <span style={{ fontWeight: 400, color: th.textMuted }}>({gFindings.length} findings) | Top score: {Math.max(...gFindings.map(f => f.triageScore || 0))}</span>
+                    {findingsView === "alerts" && (() => {
+                      // Finding cards are expandable, so their height varies and fixed-row
+                      // windowing does not apply. The analyzer caps nothing, and per-edge
+                      // First-Seen findings scale with edge count, so a large dataset used
+                      // to mount every card at once. Render a bounded prefix instead — the
+                      // list is already sorted by triage score, so the cap keeps the most
+                      // important findings — and say plainly what is being held back.
+                      const limit = modal.lmAlertLimit || 300;
+                      let budget = limit;
+                      const total = groupedEntries
+                        ? groupedEntries.reduce((n, [, g]) => n + g.length, 0)
+                        : sortedFindings.length;
+                      const hidden = Math.max(0, total - limit);
+                      return (
+                        <div style={{ maxHeight: lmH - 250, overflowY: "auto", display: "flex", flexDirection: "column", gap: 4 }}>
+                          {groupedEntries ? groupedEntries.map(([gKey, gFindings]) => {
+                            if (budget <= 0) return null;
+                            const shown = gFindings.slice(0, budget);
+                            budget -= shown.length;
+                            return (
+                              <div key={gKey}>
+                                <div style={{ fontSize: 10, fontWeight: 600, color: th.textDim, padding: "6px 0 4px", fontFamily: "-apple-system, sans-serif", borderBottom: `1px solid ${th.border}`, marginBottom: 4 }}>
+                                  {gKey} <span style={{ fontWeight: 400, color: th.textMuted }}>({gFindings.length} findings) | Top score: {Math.max(...gFindings.map(f => f.triageScore || 0))}</span>
+                                </div>
+                                {shown.map(f => _renderCard(f))}
+                              </div>
+                            );
+                          }) : sortedFindings.slice(0, limit).map(f => _renderCard(f))}
+                          {hidden > 0 && (
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "10px 0 4px", fontSize: 10, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>
+                              <span>Showing {total - hidden} of {total} findings (highest triage score first)</span>
+                              <button onClick={() => setModal((p) => ({ ...p, lmAlertLimit: (p.lmAlertLimit || 300) + 300 }))}
+                                style={{ ...ms.bs, borderRadius: 6, fontSize: 10, padding: "3px 10px" }}>Show 300 more</button>
+                              <button onClick={() => setModal((p) => ({ ...p, lmAlertLimit: total }))}
+                                style={{ ...ms.bs, borderRadius: 6, fontSize: 10, padding: "3px 10px" }}>Show all {total}</button>
                             </div>
-                            {gFindings.map(f => _renderCard(f))}
-                          </div>
-                        )) : sortedFindings.map(f => _renderCard(f))}
-                      </div>
-                    )}
+                          )}
+                        </div>
+                      );
+                    })()}
 
                     {findingsView === "incidents" && (
                       <div style={{ maxHeight: lmH - 250, overflowY: "auto", display: "flex", flexDirection: "column", gap: 8 }}>
@@ -2175,9 +2602,8 @@ export default function LateralMovementModal() {
                                   up("checkboxFilters", cbf);
                                   if (lmCols.ts && inc.timeRange?.from) {
                                     const rawFrom = inc.timeRange.from, rawTo = inc.timeRange.to || rawFrom;
-                                    const sep = rawFrom.includes("T") ? "T" : " ";
-                                    const padTs = (s, deltaMs) => { const d = new Date(s.replace("T", " ").replace("Z", "")); if (isNaN(d)) return s; const nd = new Date(d.getTime() + deltaMs); const p = (n) => String(n).padStart(2, "0"); return `${nd.getFullYear()}-${p(nd.getMonth()+1)}-${p(nd.getDate())}${sep}${p(nd.getHours())}:${p(nd.getMinutes())}:${p(nd.getSeconds())}`; };
-                                    up("dateRangeFilters", { [lmCols.ts]: { from: padTs(rawFrom, -300000), to: padTs(rawTo, 300000) } });
+                                    // (uses the shared _padTs — this was a verbatim duplicate that round-tripped through LOCAL getters)
+                                    up("dateRangeFilters", { [lmCols.ts]: { from: _padTs(rawFrom, -300000), to: _padTs(rawTo, 300000) } });
                                   }
                                   up("searchTerm", ""); up("columnFilters", {});
                                   setModal(null);
@@ -2193,7 +2619,7 @@ export default function LateralMovementModal() {
                                   if (f) _viewInGraph(f);
                                 }} style={_btnS}>View in Graph</button>
                                 <button onClick={() => {
-                                  const lines = [`[INCIDENT] ${inc.severity.toUpperCase()} — Score: ${inc.triageScore}`, `Attack chain: ${inc.category}`, `${inc.source} \u2192 ${inc.target}`, `Users: ${inc.users.join(", ") || "(unknown)"}`, `Time: ${(inc.timeRange?.from || "").slice(0, 19)} \u2014 ${(inc.timeRange?.to || "").slice(0, 19)}`, `Events: ${inc.eventCount}`, `Narrative: ${inc.narrative}`, "", "Contributing findings:"];
+                                  const lines = [`[INCIDENT] ${inc.severity.toUpperCase()} — Score: ${inc.triageScore}`, `Attack chain: ${inc.category}`, `${inc.source} \u2192 ${inc.target}`, `Users: ${inc.users.join(", ") || "(unknown)"}`, `Time: ${fmtTs(inc.timeRange?.from)} \u2014 ${fmtTs(inc.timeRange?.to)}`, `Events: ${inc.eventCount}`, `Narrative: ${inc.narrative}`, "", "Contributing findings:"];
                                   for (const mf of memberFindings) lines.push(`  [${mf.severity.toUpperCase()}] ${mf.category} (${mf.mitre}): ${mf.title}`);
                                   navigator.clipboard?.writeText?.(lines.join("\n"));
                                 }} style={_btnS}>Copy IOC Summary</button>
@@ -2277,13 +2703,13 @@ export default function LateralMovementModal() {
                                       <button onClick={(ev) => {
                                         const allFilterHosts = camp.hosts || [];
                                         const allFilterEids = [...new Set(memberIncs.flatMap(inc => (inc.findings || []).flatMap(fid => { const f = findings.find(ff => ff.id === fid); return f?.filterEids || []; })))];
-                                        _filterEvents({ filterEids: allFilterEids.length > 0 ? allFilterEids : undefined, filterHosts: allFilterHosts, timeRange: camp.timeRange }, ev);
+                                        _filterEvents({ filterEids: allFilterEids.length > 0 ? allFilterEids : undefined, filterHosts: allFilterHosts, timeRange: camp.timeRange, evidenceRefs: camp.evidenceRefs, itemRowids: camp.itemRowids }, ev);
                                       }} style={{ ..._btnS, background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
                                         <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke={th.accent} strokeWidth="2.5" strokeLinecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                                         Show in Timeline
                                       </button>
                                       <button onClick={() => {
-                                        const lines = [`[CAMPAIGN] ${camp.severity.toUpperCase()} — Score: ${camp.triageScore}`, `Hosts: ${camp.hosts.join(", ")}`, `Users: ${(camp.users || []).join(", ") || "(unknown)"}`, `Techniques: ${(camp.techniques || []).join(", ")}`, `Time: ${(camp.timeRange?.from || "").slice(0, 19)} — ${(camp.timeRange?.to || "").slice(0, 19)}`, `Path: ${camp.hopPairs.join(" → ")}`, "", camp.narrative, "", `${camp.incidentCount} incidents, ${camp.findingCount} findings, ${camp.eventCount} events`];
+                                        const lines = [`[CAMPAIGN] ${camp.severity.toUpperCase()} — Score: ${camp.triageScore}`, `Hosts: ${camp.hosts.join(", ")}`, `Users: ${(camp.users || []).join(", ") || "(unknown)"}`, `Techniques: ${(camp.techniques || []).join(", ")}`, `Time: ${fmtTs(camp.timeRange?.from)} — ${fmtTs(camp.timeRange?.to)}`, `Path: ${camp.hopPairs.join(" → ")}`, "", camp.narrative, "", `${camp.incidentCount} incidents, ${camp.findingCount} findings, ${camp.eventCount} events`];
                                         navigator.clipboard?.writeText?.(lines.join("\n"));
                                       }} style={_btnS}>Copy Summary</button>
                                       <button onClick={(ev) => {
@@ -2459,7 +2885,7 @@ export default function LateralMovementModal() {
                           From: f.timeRange?.from || "", To: f.timeRange?.to || "",
                           HostsInvolved: Array.isArray(f.filterHosts) ? f.filterHosts.join("; ") : "",
                         }));
-                        _downloadFile(_toCSV(rows), "lateral-movement-findings.csv", "text/csv");
+                        _saveExport(_toCSV(rows), "lateral-movement-findings.csv", [{ name: "CSV", extensions: ["csv"] }]);
                       }} style={{ ...tbtn, color: th.textMuted }} title="Export findings as CSV">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={th.textMuted} strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                         CSV
@@ -2473,7 +2899,7 @@ export default function LateralMovementModal() {
                           edges: (data.edges || []).map((e) => ({ source: e.source, target: e.target, count: e.count, logonTypes: e.logonTypes, users: e.users, timeRange: e.timeRange })),
                           nodes: (data.nodes || []).map((n) => ({ host: n.id, eventCount: n.eventCount, isOutlier: n.isOutlier, isBoth: n.isBoth, isSource: n.isSource, isTarget: n.isTarget })),
                         };
-                        _downloadFile(JSON.stringify(payload, null, 2), "lateral-movement-findings.json", "application/json");
+                        _saveExport(JSON.stringify(payload, null, 2), "lateral-movement-findings.json", [{ name: "JSON", extensions: ["json"] }]);
                       }} style={{ ...tbtn, color: th.textMuted }} title="Export full analysis as JSON">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={th.textMuted} strokeWidth="2"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                         JSON
@@ -2902,8 +3328,8 @@ export default function LateralMovementModal() {
                                 <div><span style={_lbl}>Users ({selectedEdge.users.length})</span><div style={{ marginTop: 2, color: th.text, maxHeight: 54, overflow: "auto", wordBreak: "break-word", lineHeight: 1.5 }}>{selectedEdge.users.slice(0, 8).join(", ")}{selectedEdge.users.length > 8 ? `, +${selectedEdge.users.length - 8} more` : ""}</div></div>
                                 <div><span style={_lbl}>Logon Type</span><div style={{ color: logonColor(selectedEdge.logonTypes), marginTop: 2 }}>{logonLabel(selectedEdge.logonTypes)} ({selectedEdge.logonTypes.join(",")}){selectedEdge.logonTypes.includes("8") && <span style={{ marginLeft: 3, padding: "0 3px", background: th.sev.critical + "22", color: th.sev.critical, borderRadius: 2, fontSize: 7, fontWeight: 700 }}>CLEARTEXT</span>}</div></div>
                                 {selectedEdge.sourceLabel && <div><span style={_lbl}>Source Type</span><div style={{ marginTop: 2 }}>{selectedEdge.sourceLabel}</div></div>}
-                                <div><span style={_lbl}>First Seen</span><div style={{ marginTop: 2, fontFamily: "monospace", fontSize: 9 }}>{selectedEdge.firstSeen?.slice(0, 19)}</div></div>
-                                <div><span style={_lbl}>Last Seen</span><div style={{ marginTop: 2, fontFamily: "monospace", fontSize: 9 }}>{selectedEdge.lastSeen?.slice(0, 19)}</div></div>
+                                <div><span style={_lbl}>First Seen</span><div style={{ marginTop: 2, fontFamily: "monospace", fontSize: 9 }}>{fmtTs(selectedEdge.firstSeen)}</div></div>
+                                <div><span style={_lbl}>Last Seen</span><div style={{ marginTop: 2, fontFamily: "monospace", fontSize: 9 }}>{fmtTs(selectedEdge.lastSeen)}</div></div>
                                 {(selectedEdge.shareNames || []).length > 0 && <div style={{ gridColumn: "1 / -1" }}><span style={_lbl}>Shares</span><div style={{ marginTop: 2, color: th.sev.high }}>{selectedEdge.shareNames.join(", ")}</div></div>}
                                 {(selectedEdge.clientNames || []).length > 0 && <div style={{ gridColumn: "1 / -1" }}><span style={_lbl}>Client Names</span><div style={{ marginTop: 2, color: th.sev.custom }}>{selectedEdge.clientNames.join(", ")}</div></div>}
                               </div>
@@ -3032,10 +3458,11 @@ export default function LateralMovementModal() {
                     )}
                     <div style={{ maxHeight: 350, overflow: "auto" }}>
                       {chs.map((chain, ci) => {
-                        const isExpanded = expandedChain === ci;
+                        const _chainKey = `${(chain.path || []).join("\u2192")}::${(chain.users || []).join(",")}`;
+                        const isExpanded = expandedChain === _chainKey;
                         const cc = confColor(chain.confidence);
                         return (
-                          <div key={ci} style={{ padding: "10px 12px", marginBottom: 8, background: th.panelBg, borderRadius: 6, border: `1px solid ${isExpanded ? cc + "44" : th.border}`, cursor: "pointer" }} onClick={() => setModal((p) => ({ ...p, expandedChain: isExpanded ? null : ci }))}>
+                          <div key={ci} style={{ padding: "10px 12px", marginBottom: 8, background: th.panelBg, borderRadius: 6, border: `1px solid ${isExpanded ? cc + "44" : th.border}`, cursor: "pointer" }} onClick={() => setModal((p) => ({ ...p, expandedChain: isExpanded ? null : _chainKey }))}>
                             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
                               <span style={{ padding: "2px 6px", background: confBg(chain.confidence), color: cc, borderRadius: 3, fontSize: 9, fontWeight: 700, fontFamily: "monospace", minWidth: 24, textAlign: "center" }}>{chain.confidenceScore || 0}</span>
                               <span style={{ padding: "2px 6px", background: confBg(chain.confidence), color: cc, borderRadius: 3, fontSize: 8, fontWeight: 600, fontFamily: "-apple-system, sans-serif", textTransform: "uppercase" }}>{chain.confidence || "low"}</span>
@@ -3071,7 +3498,7 @@ export default function LateralMovementModal() {
                                           <span style={{ color: th.text }}>{hop.user}</span>
                                           <span style={{ padding: "0 4px", background: hop.technique?.includes("RDP") ? th.sev.info + "15" : hop.technique?.includes("Service") || hop.technique?.includes("PsExec") || hop.technique?.includes("Impacket") ? th.sev.critical + "15" : hop.technique?.includes("Admin Share") || hop.technique?.includes("Scheduled Task") || hop.technique?.includes("WMI") || hop.technique?.includes("WinRM") ? th.sev.high + "18" : `${th.textMuted}12`, color: hop.technique?.includes("RDP") ? th.sev.info : hop.technique?.includes("Service") || hop.technique?.includes("PsExec") || hop.technique?.includes("Impacket") ? th.sev.critical : hop.technique?.includes("Admin Share") || hop.technique?.includes("Scheduled Task") || hop.technique?.includes("WMI") || hop.technique?.includes("WinRM") ? th.sev.high : th.textDim, borderRadius: 2, fontSize: 7 }}>{hop.technique}</span>
                                           <span style={{ color: th.textMuted, fontSize: 8 }}>EID {hop.eventId} / Type {hop.logonType}</span>
-                                          <span style={{ color: th.textMuted, fontSize: 8 }}>{(hop.ts || "").slice(0, 19)}</span>
+                                          <span style={{ color: th.textMuted, fontSize: 8 }}>{fmtTs(hop.ts)}</span>
                                         </div>
                                       </div>
                                     ))}
@@ -3087,7 +3514,7 @@ export default function LateralMovementModal() {
                                     {(chain.occurrences || 1) > 1 && (
                                       <div style={{ marginTop: 8, paddingTop: 6, borderTop: `1px solid ${th.border}22` }}>
                                         <span style={{ color: th.textMuted }}>Seen {chain.occurrences} time{chain.occurrences > 1 ? "s" : ""}</span>
-                                        <div style={{ color: th.textMuted, fontSize: 8, marginTop: 2 }}>{(chain.firstTs || "").slice(0, 19)} — {(chain.lastTs || "").slice(0, 19)}</div>
+                                        <div style={{ color: th.textMuted, fontSize: 8, marginTop: 2 }}>{fmtTs(chain.firstTs)} — {fmtTs(chain.lastTs)}</div>
                                       </div>
                                     )}
                                     {(chain.findingIds || []).length > 0 && (
@@ -3175,11 +3602,11 @@ export default function LateralMovementModal() {
                   if (h === "User") return s.user || "(unknown)";
                   if (h === "Confidence") return (s.confidence || "low").toUpperCase();
                   if (h === "Attempts") return String(s.attemptCount || 1);
-                  if (h === "Start Time") return s.startTime?.slice(0, 19) || "";
+                  if (h === "Start Time") return fmtTs(s.startTime) || "";
                   if (h === "End Time") {
                     const end = _rdpEnd(s);
                     if (!end) return "";
-                    return end.slice(0, 19) + (s.endIsLastSeen ? " *" : "");
+                    return fmtTs(end) + (s.endIsLastSeen ? " *" : "");
                   }
                   if (h === "Duration") return fmtDur(s.startTime, _rdpEnd(s));
                   if (h === "Why Flagged") return (s.flags || []).join("; ");
@@ -3250,13 +3677,13 @@ export default function LateralMovementModal() {
 
                 // CSV export (selected or all)
                 const exportRdpCsv = () => {
-                  const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+                  const esc = csvCell; // shared encoder: RFC-4180 + formula-injection guard
                   const selected = sortedSessions.filter((s) => isRdpChecked(s));
                   const toExport = selected.length > 0 ? selected : sortedSessions;
                   const headerLine = rdpHeaders.map(esc).join(",");
                   const lines = toExport.map((s) => rdpHeaders.map((h) => esc(rdpCellVal(s, h))).join(","));
                   const csv = [headerLine, ...lines].join("\n");
-                  _downloadFile(csv, `rdp-sessions-${new Date().toISOString().slice(0, 10)}.csv`, "text/csv");
+                  _saveExport(csv, `rdp-sessions-${new Date().toISOString().slice(0, 10)}.csv`, [{ name: "CSV", extensions: ["csv"] }]);
                 };
 
                 // Resize
@@ -3383,7 +3810,7 @@ export default function LateralMovementModal() {
                       for (let i = 0; i <= tickCount; i++) {
                         const t = tMin + (tRange * i / tickCount);
                         const d = new Date(t);
-                        const label = `${String(d.getUTCMonth()+1).padStart(2,"0")}/${String(d.getUTCDate()).padStart(2,"0")} ${String(d.getUTCHours()).padStart(2,"0")}:${String(d.getUTCMinutes()).padStart(2,"0")}`;
+                        const label = `${String(d.getUTCMonth()+1).padStart(2,"0")}/${String(d.getUTCDate()).padStart(2,"0")} ${String(d.getUTCHours()).padStart(2,"0")}:${String(d.getUTCMinutes()).padStart(2,"0")} UTC`;
                         ticks.push({ x: toPx(t), label });
                       }
 
@@ -3433,7 +3860,7 @@ export default function LateralMovementModal() {
                                     return (
                                       <div key={si}
                                         onClick={() => setModal((p) => ({ ...p, expandedSession: p.expandedSession === s.id ? null : s.id }))}
-                                        title={`${s.technique || "RDP"} | ${s.status} | ${s.user || "?"} | ${s.startTime?.slice(0,19)} → ${endStr?.slice(0,19) || "?"}${s.endIsLastSeen ? " (last seen)" : ""} | Score: ${s.suspicionScore || 0}`}
+                                        title={`${s.technique || "RDP"} | ${s.status} | ${s.user || "?"} | ${fmtTs(s.startTime)} → ${fmtTs(endStr) || "?"}${s.endIsLastSeen ? " (last seen)" : ""} | Score: ${s.suspicionScore || 0}`}
                                         style={{
                                           position: "absolute", left: x1, top: 3, height: ROW_H - 6,
                                           width: barW, borderRadius: 3, cursor: "pointer",
@@ -3456,7 +3883,7 @@ export default function LateralMovementModal() {
                                           const evX = ((evT - st) / (et - st)) * barW;
                                           if (evX < 0 || evX > barW) return null;
                                           const evColor = ev.eventId === "4625" ? th.sev.critical : ev.eventId === "4672" ? th.sev.custom : ev.eventId === "4648" ? th.sev.high : "#fff";
-                                          return <div key={ei} style={{ position: "absolute", left: evX, top: 0, bottom: 0, width: 1, background: evColor + "55" }} title={`${ev.description} (${ev.ts?.slice(0,19)})`} />;
+                                          return <div key={ei} style={{ position: "absolute", left: evX, top: 0, bottom: 0, width: 1, background: evColor + "55" }} title={`${ev.description} (${fmtTs(ev.ts)})`} />;
                                         })}
                                       </div>
                                     );
@@ -3495,11 +3922,12 @@ export default function LateralMovementModal() {
                           const gts = techStyle(gTech);
                           const gMaxScore = Math.max(0, ...g.sessions.map(s => s.suspicionScore || 0));
                           const gTotalAttempts = g.sessions.reduce((sum, s) => sum + (s.attemptCount || 1), 0);
-                          const isExpanded = expandedGroup === gi;
+                          const _groupKey = g.key || `${g.source}|${g.target}|${g.user}`;
+                          const isExpanded = expandedGroup === _groupKey;
                           const isFailed = gTech === "RDP Failed Auth" || gTech === "RDP Brute Force";
                           return (
                             <div key={gi}>
-                              <div onClick={() => setModal((p) => ({ ...p, expandedGroup: p.expandedGroup === gi ? null : gi }))} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", background: isExpanded ? `${th.accent}08` : "transparent", borderBottom: `1px solid ${th.border}33`, cursor: "pointer", transition: "background var(--m-fast)" }}
+                              <div onClick={() => setModal((p) => ({ ...p, expandedGroup: isExpanded ? null : _groupKey }))} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", background: isExpanded ? `${th.accent}08` : "transparent", borderBottom: `1px solid ${th.border}33`, cursor: "pointer", transition: "background var(--m-fast)" }}
                                 onMouseEnter={(e) => { if (!isExpanded) e.currentTarget.style.background = th.textMuted + "08"; }}
                                 onMouseLeave={(e) => { if (!isExpanded) e.currentTarget.style.background = "transparent"; }}>
                                 <span style={{ fontSize: 8, color: th.textMuted, width: 12, flexShrink: 0 }}>{isExpanded ? "\u25BC" : "\u25B6"}</span>
@@ -3510,8 +3938,8 @@ export default function LateralMovementModal() {
                                 <span style={{ fontSize: 10, color: th.textMuted }}>{"\u2192"}</span>
                                 <span style={{ fontSize: 10, fontFamily: "monospace", color: th.text }}>{g.target || "\u2014"}</span>
                                 <span style={{ fontSize: 10, color: th.textDim, fontFamily: "-apple-system, sans-serif" }}>{g.user || "(unknown)"}</span>
-                                <span style={{ padding: "1px 6px", background: g.count > 5 ? th.sev.high + "22" : `${th.accent}11`, color: g.count > 5 ? th.sev.high : th.accent, borderRadius: 4, fontSize: 9, fontWeight: 600, fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>{isFailed ? `${gTotalAttempts} attempt${gTotalAttempts !== 1 ? "s" : ""}` : `${g.count} session${g.count !== 1 ? "s" : ""}`}</span>
-                                <span style={{ fontSize: 9, color: th.textMuted, fontFamily: "monospace", marginLeft: "auto" }}>{(g.timeRange.from || "").slice(0, 19)}{g.timeRange.to && g.timeRange.to !== g.timeRange.from ? ` \u2014 ${(g.timeRange.to || "").slice(0, 19)}` : ""}</span>
+                                <span style={{ padding: "1px 6px", background: g.count > 5 ? th.sev.high + "22" : th.textMuted + "18", color: g.count > 5 ? th.sev.high : th.textDim, borderRadius: 4, fontSize: 9, fontWeight: 600, fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>{isFailed ? `${gTotalAttempts} attempt${gTotalAttempts !== 1 ? "s" : ""}` : `${g.count} session${g.count !== 1 ? "s" : ""}`}</span>
+                                <span style={{ fontSize: 9, color: th.textMuted, fontFamily: "monospace", marginLeft: "auto" }}>{fmtTs(g.timeRange.from)}{g.timeRange.to && g.timeRange.to !== g.timeRange.from ? ` \u2014 ${fmtTs(g.timeRange.to)}` : ""}</span>
                               </div>
                               {isExpanded && (
                                 <div style={{ padding: "4px 12px 8px 32px", background: `${th.accent}04`, borderBottom: `1px solid ${th.border}33` }}>
@@ -3525,8 +3953,8 @@ export default function LateralMovementModal() {
                                         <span>{s.source}</span><span style={{ color: th.textMuted }}>{"\u2192"}</span><span>{s.target}</span>
                                         <span style={{ color: th.textMuted }}>{s.user || "(unknown)"}</span>
                                         {(s.attemptCount || 1) > 1 && <span style={{ color: th.sev.high, fontWeight: 600 }}>{s.attemptCount} attempts</span>}
-                                        <span style={{ color: th.textMuted }}>{(s.startTime || "").slice(0, 19)}</span>
-                                        {_rdpEnd(s) && <span style={{ color: th.textMuted }}>{"\u2014"} {_rdpEnd(s).slice(0, 19)}{s.endIsLastSeen ? "*" : ""}</span>}
+                                        <span style={{ color: th.textMuted }}>{fmtTs(s.startTime)}</span>
+                                        {_rdpEnd(s) && <span style={{ color: th.textMuted }}>{"\u2014"} {fmtTs(_rdpEnd(s))}{s.endIsLastSeen ? "*" : ""}</span>}
                                         <span style={{ color: th.textMuted }}>{fmtDur(s.startTime, _rdpEnd(s))}</span>
                                         {s.hasAdmin && <span style={{ padding: "0 3px", background: th.sev.critical + "22", color: th.sev.critical, borderRadius: 2, fontSize: 7, fontWeight: 700 }}>ADMIN</span>}
                                         {s.isConcurrent && <span style={{ padding: "0 3px", background: th.sev.high + "22", color: th.sev.high, borderRadius: 2, fontSize: 7, fontWeight: 700 }} title={`Concurrent with ${(s._concurrentTargets || []).join(", ")}`}>CONCURRENT</span>}
@@ -3544,7 +3972,11 @@ export default function LateralMovementModal() {
                           );
                         })}
                       </div>
-                    ) : (
+                    ) : rdpViewMode === "timeline" ? null : (
+                    // Reached for "individual", and for "grouped" when there is nothing to
+                    // group. Previously this was the bare else of a `grouped ? … : …`
+                    // ternary, so "timeline" fell through here and rendered the entire
+                    // session table underneath the Gantt chart.
                     <div style={{ maxHeight: 400, overflow: "auto", border: `1px solid ${th.border}`, borderRadius: 6 }}>
                       <table style={{ borderCollapse: "collapse", fontSize: 10, fontFamily: "monospace", tableLayout: "fixed", width: rdpTotalTableW }}>
                         <thead>
@@ -3572,12 +4004,12 @@ export default function LateralMovementModal() {
                             const ts0 = techStyle(s.technique || "RDP");
                             const dur = fmtDur(s.startTime, _rdpEnd(s));
                             const durMs = rdpDurMs(s);
-                            const expanded = expandedIdx === i;
+                            const expanded = expandedIdx === s.id;
                             const sc = s.suspicionScore || 0;
                             const att = s.attemptCount || 1;
                             return (
                               <Fragment key={i}>
-                                <tr onClick={() => setModal((p) => ({ ...p, expandedSession: expanded ? null : i }))}
+                                <tr onClick={() => setModal((p) => ({ ...p, expandedSession: expanded ? null : s.id }))}
                                   style={{ background: isRdpChecked(s) ? `${th.accent}0a` : i % 2 === 0 ? "transparent" : (th.rowAlt || th.panelBg + "44"), cursor: "pointer" }}>
                                   <td style={{ padding: "4px 4px", textAlign: "center" }}>
                                     <input type="checkbox" checked={isRdpChecked(s)} onChange={(ev) => toggleRdpCheck(s, ev)} style={{ width: 13, height: 13, cursor: "pointer", accentColor: th.accent }} />
@@ -3602,14 +4034,14 @@ export default function LateralMovementModal() {
                                   </td>
                                   {/* Attempts */}
                                   <td style={{ padding: "4px 8px", textAlign: "center", fontWeight: att > 1 ? 600 : 400, color: att > 5 ? th.sev.critical : att > 1 ? th.sev.high : th.textDim }}>{att}</td>
-                                  <td style={{ padding: "4px 8px", color: th.textDim, whiteSpace: "nowrap" }}>{s.startTime?.slice(0, 19)}</td>
-                                  <td style={{ padding: "4px 8px", color: th.textDim, whiteSpace: "nowrap" }} title={s.endIsLastSeen ? "Last seen event (no logoff captured)" : ""}>{_rdpEnd(s)?.slice(0, 19) || ""}{s.endIsLastSeen ? <span style={{ color: th.textMuted, marginLeft: 3 }}>*</span> : ""}</td>
+                                  <td style={{ padding: "4px 8px", color: th.textDim, whiteSpace: "nowrap" }}>{fmtTs(s.startTime)}</td>
+                                  <td style={{ padding: "4px 8px", color: th.textDim, whiteSpace: "nowrap" }} title={s.endIsLastSeen ? "Last seen event (no logoff captured)" : ""}>{fmtTs(_rdpEnd(s))}{s.endIsLastSeen ? <span style={{ color: th.textMuted, marginLeft: 3 }}>*</span> : ""}</td>
                                   <td style={{ padding: "4px 8px", whiteSpace: "nowrap", color: durMs >= 86400000 ? (th.danger) : durMs >= 3600000 ? th.sev.high : th.textDim, fontWeight: durMs >= 86400000 ? 600 : 400 }}>{dur}</td>
                                   {/* Why Flagged */}
                                   <td style={{ padding: "4px 6px" }}>
                                     <div style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
                                       {(s.flags || []).slice(0, 4).map((f, fi) => (
-                                        <span key={fi} style={{ padding: "1px 5px", background: f.startsWith("Finding:") ? th.sev.critical + "12" : `${th.accent}11`, color: f.startsWith("Finding:") ? th.sev.critical : th.textDim, borderRadius: 3, fontSize: 7, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap" }}>{f}</span>
+                                        <span key={fi} style={{ padding: "1px 5px", background: f.startsWith("Finding:") ? th.sev.critical + "12" : th.textMuted + "18", color: f.startsWith("Finding:") ? th.sev.critical : th.textDim, borderRadius: 3, fontSize: 7, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap" }}>{f}</span>
                                       ))}
                                       {(s.flags || []).length > 4 && <span style={{ fontSize: 7, color: th.textMuted }}>+{s.flags.length - 4}</span>}
                                     </div>
@@ -3673,7 +4105,7 @@ export default function LateralMovementModal() {
                                               <div style={{ fontWeight: 600, color: th.text, marginBottom: 4, fontSize: 10 }}>Why Flagged</div>
                                               <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                                                 {s.flags.map((f, fi) => (
-                                                  <span key={fi} style={{ padding: "1px 5px", background: f.startsWith("Finding:") ? th.sev.critical + "12" : `${th.accent}08`, color: f.startsWith("Finding:") ? th.sev.critical : th.textDim, borderRadius: 3, fontSize: 8, whiteSpace: "nowrap" }}>{f}</span>
+                                                  <span key={fi} style={{ padding: "1px 5px", background: f.startsWith("Finding:") ? th.sev.critical + "12" : th.textMuted + "12", color: f.startsWith("Finding:") ? th.sev.critical : th.textDim, borderRadius: 3, fontSize: 8, whiteSpace: "nowrap" }}>{f}</span>
                                                 ))}
                                               </div>
                                             </div>
@@ -3685,6 +4117,9 @@ export default function LateralMovementModal() {
                                               filterEids: [...new Set((s.events || []).map(e => e.eventId))],
                                               filterHosts: [s.source, s.target].filter(Boolean),
                                               timeRange: s.startTime ? { from: s.startTime, to: _rdpEnd(s) || s.startTime } : null,
+                                              // Carry the refs so the pivot can land on the exact rows
+                                              // (and the right tab in a multi-source run).
+                                              evidenceRefs: s.evidenceRefs, itemRowids: s.itemRowids,
                                             }, ev)} style={{ padding: "2px 8px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 4, fontSize: 9, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
                                               <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke={th.accent} strokeWidth="2.5" strokeLinecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                                               Show in Timeline
@@ -3846,8 +4281,8 @@ export default function LateralMovementModal() {
                   if (h === "Kerb") return String(a.kerberosCount || 0);
                   if (h === "NTLM") return String(a.ntlmCount || 0);
                   if (h === "Explicit") return String(a.explicitCredsCount || 0);
-                  if (h === "First Seen") return a.firstSeen?.slice(0, 19) || "";
-                  if (h === "Last Seen") return a.lastSeen?.slice(0, 19) || "";
+                  if (h === "First Seen") return fmtTs(a.firstSeen) || "";
+                  if (h === "Last Seen") return fmtTs(a.lastSeen) || "";
                   if (h === "Why Suspicious") return (a.flags || []).join("; ");
                   return "";
                 };
@@ -4070,8 +4505,8 @@ export default function LateralMovementModal() {
                   if (h === "Technique") { const ot = (e.otherTechniques || []); return (e.technique || "Unknown") + (ot.length > 0 ? ` (+${ot.join(", ")})` : ""); }
                   if (h === "Count") return String(e.count);
                   if (h === "Users") return e.users.join(", ");
-                  if (h === "First Seen") return e.firstSeen?.slice(0, 19) || "";
-                  if (h === "Last Seen") return e.lastSeen?.slice(0, 19) || "";
+                  if (h === "First Seen") return fmtTs(e.firstSeen) || "";
+                  if (h === "Last Seen") return fmtTs(e.lastSeen) || "";
                   if (h === "Observed Span") return formatDuration(durationMs(e));
                   if (h === "Why Suspicious") return (e.flags || []).join("; ");
                   return "";
@@ -4208,14 +4643,18 @@ export default function LateralMovementModal() {
                           </tr>
                         </thead>
                         <tbody>
-                          {sortedEdges.map((e, i) => {
+                          {/* Same bounded-render approach as the Findings list: rows here are
+                              expandable, so their height varies and fixed-row windowing does not
+                              apply. Edge count grows with hosts x hosts. */}
+                          {sortedEdges.slice(0, modal.lmEdgeLimit || 400).map((e, i) => {
                             const eSc = e.riskScore || 0;
                             const eTc = lmTechColor(e.technique);
-                            const eExpanded = modal.expandedEdge === i;
+                            const _edgeKey = `${e.source}\u2192${e.target}`;
+                            const eExpanded = modal.expandedEdge === _edgeKey;
                             const eDur = durationMs(e);
                             return (
                               <Fragment key={i}>
-                                <tr onClick={() => setModal((p) => ({ ...p, expandedEdge: eExpanded ? null : i }))} style={{ background: isLmChecked(e) ? `${th.accent}0a` : i % 2 === 0 ? "transparent" : (th.rowAlt || th.panelBg + "44"), cursor: "pointer" }}>
+                                <tr onClick={() => setModal((p) => ({ ...p, expandedEdge: eExpanded ? null : _edgeKey }))} style={{ background: isLmChecked(e) ? `${th.accent}0a` : i % 2 === 0 ? "transparent" : (th.rowAlt || th.panelBg + "44"), cursor: "pointer" }}>
                                   <td style={{ padding: "4px 4px", textAlign: "center" }}>
                                     <input type="checkbox" checked={isLmChecked(e)} onChange={(ev) => toggleLmCheck(e, ev)} style={{ width: 13, height: 13, cursor: "pointer", accentColor: th.accent }} />
                                   </td>
@@ -4234,15 +4673,15 @@ export default function LateralMovementModal() {
                                   <td style={{ padding: "4px 8px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: th.textDim }}>{e.users.join(", ")}</td>
                                   {/* Count */}
                                   <td style={{ padding: "4px 8px", fontWeight: 600, color: th.text, textAlign: "center" }}>{e.count}</td>
-                                  <td style={{ padding: "4px 8px", color: th.textDim, whiteSpace: "nowrap" }}>{e.firstSeen?.slice(0, 19)}</td>
-                                  <td style={{ padding: "4px 8px", color: th.textDim, whiteSpace: "nowrap" }}>{e.lastSeen?.slice(0, 19)}</td>
+                                  <td style={{ padding: "4px 8px", color: th.textDim, whiteSpace: "nowrap" }}>{fmtTs(e.firstSeen)}</td>
+                                  <td style={{ padding: "4px 8px", color: th.textDim, whiteSpace: "nowrap" }}>{fmtTs(e.lastSeen)}</td>
                                   {/* Observed Span */}
                                   <td style={{ padding: "4px 8px", whiteSpace: "nowrap", color: eDur >= 86400000 ? (th.danger) : eDur >= 3600000 ? th.sev.high : th.textDim, fontWeight: eDur >= 86400000 ? 600 : 400 }}>{formatDuration(eDur)}</td>
                                   {/* Why Suspicious */}
                                   <td style={{ padding: "4px 6px" }}>
                                     <div style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
                                       {(e.flags || []).slice(0, 4).map((f, fi) => (
-                                        <span key={fi} style={{ padding: "1px 5px", background: f.startsWith("Finding:") ? th.sev.critical + "12" : `${th.accent}11`, color: f.startsWith("Finding:") ? th.sev.critical : th.textDim, borderRadius: 3, fontSize: 7, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap" }}>{f}</span>
+                                        <span key={fi} style={{ padding: "1px 5px", background: f.startsWith("Finding:") ? th.sev.critical + "12" : th.textMuted + "18", color: f.startsWith("Finding:") ? th.sev.critical : th.textDim, borderRadius: 3, fontSize: 7, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap" }}>{f}</span>
                                       ))}
                                       {(e.flags || []).length > 4 && <span style={{ fontSize: 7, color: th.textMuted }}>+{e.flags.length - 4}</span>}
                                     </div>
@@ -4307,7 +4746,7 @@ export default function LateralMovementModal() {
                                               <span style={{ color: th.textMuted, fontSize: 8, fontWeight: 600 }}>Why Suspicious</span>
                                               <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 3 }}>
                                                 {e.flags.map((f, fi) => (
-                                                  <span key={fi} style={{ padding: "1px 5px", background: f.startsWith("Finding:") ? th.sev.critical + "12" : `${th.accent}08`, color: f.startsWith("Finding:") ? th.sev.critical : th.textDim, borderRadius: 3, fontSize: 8, whiteSpace: "nowrap" }}>{f}</span>
+                                                  <span key={fi} style={{ padding: "1px 5px", background: f.startsWith("Finding:") ? th.sev.critical + "12" : th.textMuted + "12", color: f.startsWith("Finding:") ? th.sev.critical : th.textDim, borderRadius: 3, fontSize: 8, whiteSpace: "nowrap" }}>{f}</span>
                                                 ))}
                                               </div>
                                             </div>
@@ -4326,6 +4765,15 @@ export default function LateralMovementModal() {
                         </tbody>
                       </table>
                     </div>
+                    {sortedEdges.length > (modal.lmEdgeLimit || 400) && (
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "8px 0 2px", fontSize: 10, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>
+                        <span>Showing {modal.lmEdgeLimit || 400} of {sortedEdges.length} connections</span>
+                        <button onClick={() => setModal((p) => ({ ...p, lmEdgeLimit: (p.lmEdgeLimit || 400) + 400 }))}
+                          style={{ ...ms.bs, borderRadius: 6, fontSize: 10, padding: "3px 10px" }}>Show 400 more</button>
+                        <button onClick={() => setModal((p) => ({ ...p, lmEdgeLimit: sortedEdges.length }))}
+                          style={{ ...ms.bs, borderRadius: 6, fontSize: 10, padding: "3px 10px" }}>Show all {sortedEdges.length}</button>
+                      </div>
+                    )}
                     {/* Column filter dropdown popup */}
                     {filterOpen && (
                       <>
@@ -4401,7 +4849,27 @@ export default function LateralMovementModal() {
         <div style={{ padding: "12px 20px", borderTop: `1px solid ${th.border}22`, display: "flex", justifyContent: "space-between", alignItems: "center", flexShrink: 0, background: `linear-gradient(135deg, ${th.panelBg}ee, ${th.modalBg}dd)`, backdropFilter: "blur(10px)", WebkitBackdropFilter: "blur(10px)" }}>
           {phase === "config" && (
             <div style={{ display: "flex", justifyContent: "space-between", width: "100%", alignItems: "center", gap: 8 }}>
-              <button onClick={() => setModal(null)} style={{ ...ms.bs, borderRadius: 8 }}>Cancel</button>
+              <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                <button onClick={() => setModal(null)} style={{ ...ms.bs, borderRadius: 8 }}>Cancel</button>
+                {/* Getting back to a finished scan must never require re-running it. `data`
+                    survives "Scan options"; `lmLastRun` survives closing the modal. */}
+                {data ? (
+                  <button onClick={() => setModal((p) => ({ ...p, phase: "results" }))}
+                    style={{ ...ms.bs, borderRadius: 8 }}>Return to results</button>
+                ) : ct?.lmLastRun?.data ? (
+                  <button onClick={() => setModal((p) => ({
+                    ...p, phase: "results",
+                    data: ct.lmLastRun.data,
+                    positions: ct.lmLastRun.positions || {},
+                    selectedNode: null, selectedEdge: null,
+                    lmAlertLimit: 300, lmEdgeLimit: 400,
+                  }))}
+                    title={`Reopen the analysis finished ${_agoLabel(ct.lmLastRun.completedAt)}`}
+                    style={{ ...ms.bs, borderRadius: 8 }}>
+                    Resume last results <span style={{ color: th.textMuted, fontSize: 10 }}>({_agoLabel(ct.lmLastRun.completedAt)})</span>
+                  </button>
+                ) : null}
+              </div>
               <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                 <button onClick={() => {
                   // RDP-only quick launcher: keep all accounts (incl. service/machine), exclude local logons,
@@ -4415,19 +4883,21 @@ export default function LateralMovementModal() {
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="4" width="20" height="13" rx="1"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
                   Open RDP Sessions
                 </button>
-                <button onClick={handleAnalyze} style={{ ...ms.bp, borderRadius: 8, boxShadow: `0 2px 8px ${th.accent}33` }}>Analyze</button>
+                <button onClick={() => handleAnalyze()} style={{ ...ms.bp, borderRadius: 8, boxShadow: `0 2px 8px ${th.accent}33` }}>Analyze</button>
               </div>
             </div>
           )}
           {phase === "loading" && (
             <div style={{ display: "flex", justifyContent: "space-between", width: "100%", alignItems: "center" }}>
               <span style={{ color: th.textMuted, fontSize: 11, fontFamily: "-apple-system, sans-serif" }}>{Math.round(modal.lmProgress || 0)}% complete</span>
-              <button onClick={() => setModal((p) => ({ ...p, phase: "config", loading: false, lmProgress: 0, _cancelled: true }))} style={{ ...ms.bs, borderRadius: 8 }}>Cancel</button>
+              <button onClick={cancelAnalysis} style={{ ...ms.bs, borderRadius: 8 }}>Cancel</button>
             </div>
           )}
           {phase === "results" && (
             <div style={{ display: "flex", justifyContent: "space-between", width: "100%" }}>
-              <button onClick={() => setModal((p) => ({ ...p, phase: "config", data: null, positions: null, _lmInitialView: undefined, _lmInitialRdpView: undefined }))} style={{ ...ms.bs, borderRadius: 8 }}>Back</button>
+              {/* Keeps `data` — going back to tweak a setting must not throw away a scan
+                  that may have taken minutes. "New scan" is the explicit discard. */}
+              <button onClick={() => setModal((p) => ({ ...p, phase: "config" }))} style={{ ...ms.bs, borderRadius: 8 }}>Scan options</button>
               <button onClick={() => setModal(null)} style={{ ...ms.bp, borderRadius: 8, boxShadow: `0 2px 8px ${th.accent}33` }}>Done</button>
             </div>
           )}

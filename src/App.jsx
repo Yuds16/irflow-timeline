@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useMemo, Fragment } from "react";
+import { lazy, Suspense, useState, useEffect, useRef, useCallback, useMemo, Fragment } from "react";
 import { createPortal } from "react-dom";
 // ── Extracted constants ──────────────────────────────────────────
 import { ROW_HEIGHT, HEADER_HEIGHT, FILTER_HEIGHT, OVERSCAN, VIRTUAL_WINDOW, VIRTUAL_AHEAD, QUERY_DEBOUNCE, DETAIL_PANEL_HEIGHT_DEFAULT, DETAIL_PANEL_MIN_HEIGHT, DETAIL_PANEL_MAX_HEIGHT, TAG_COL_WIDTH_DEFAULT, TAG_COL_WIDTH_MIN, BKMK_COL_WIDTH, CHECKBOX_COL_WIDTH, VT_COL_WIDTH, EVIDENCE_COL_WIDTH, VT_COMPATIBLE_RE, MAX_PHYSICAL_H } from "./constants/grid.js";
@@ -9,41 +9,33 @@ import { TAG_PRESETS } from "./constants/presets.js";
 // ── Extracted utilities ──────────────────────────────────────────
 import { formatBytes, formatNumber } from "./utils/format.js";
 import { formatDateTime } from "./utils/datetime.js";
-import { isIpcError, ipcErrorMessage } from "./utils/ipc-result";
+import { isIpcCancelled, isIpcError, ipcErrorMessage } from "./utils/ipc-result";
 import { compileColorRules, applyColors, buildTimelineColorRules } from "./utils/color-rules.js";
 import { detectKapeProfile, isChainsawDataset, isChainsawProcessDataset, isChainsawLogonDataset } from "./utils/dataset-detect.js";
+import {
+  checkboxFilterActive,
+  isAiHistorySourceFormat,
+  aiHistoryQueryIpcOptions,
+  normalizeCheckboxFilterValues,
+  resolveAiWorkspacePath,
+  buildWorkspaceCorrelationTargets,
+} from "./utils/ai-history-profile.js";
+import { handleOpenFileDialogResult } from "./utils/open-file-result.js";
 import { IOC_CATEGORY_PATTERNS } from "./utils/ioc-parsing.js";
+import { getGridBodyViewportHeight, getGridContentWidth, getRowScrollTarget, getVisibleRowRange } from "./utils/grid-layout.js";
+import { getSelectedRowCount, isRowSelected, selectRowIds, toggleRowSelection } from "./utils/row-selection.js";
+import { effectiveSearchTerm, isSearchTooShort } from "./utils/search.js";
 
 // ── Extracted components ─────────────────────────────────────────
 import { BkmkIcon, CheckboxIcon } from "./components/icons.jsx";
 import TabBar from "./components/TabBar.jsx";
-import MenuBar from "./components/MenuBar.jsx";
 import FilterBar, { SearchOptionsBar } from "./components/FilterBar.jsx";
 import StatusBar from "./components/StatusBar.jsx";
-import VirtualGrid from "./components/VirtualGrid.jsx";
+import SelectionBar from "./components/SelectionBar.jsx";
 import { Overlay, ColorModal, ColModal, ShortModal, SheetModal, ImportProgress, makeModalStyles } from "./components/InlineModals.jsx";
 import { ConfirmDialog, ToastContainer, Loading } from "./components/primitives/index.js";
-import { toast } from "./store/useToastStore.js";
+import useToastStore, { toast } from "./store/useToastStore.js";
 import { ProcessAnalyzerRoot } from "./components/process-analyzer/index.js";
-import LateralMovementModal from "./components/modals/LateralMovementModal.jsx";
-import PersistenceModal from "./components/modals/PersistenceModal.jsx";
-import RansomwareModal from "./components/modals/RansomwareModal.jsx";
-import UsnAnalysisModal from "./components/modals/UsnAnalysisModal.jsx";
-import IocModal from "./components/modals/IocModal.jsx";
-import GapAnalysisModal from "./components/modals/GapAnalysisModal.jsx";
-import LogSourceCoverageModal from "./components/modals/LogSourceCoverageModal.jsx";
-import BurstAnalysisModal from "./components/modals/BurstAnalysisModal.jsx";
-import TimestompingModal from "./components/modals/TimestompingModal.jsx";
-import HeatmapModal from "./components/modals/HeatmapModal.jsx";
-import AdsModal from "./components/modals/AdsModal.jsx";
-import StackingModal from "./components/modals/StackingModal.jsx";
-import ColumnStatsModal from "./components/modals/ColumnStatsModal.jsx";
-import PresetsModal from "./components/modals/PresetsModal.jsx";
-import EditFilterModal from "./components/modals/EditFilterModal.jsx";
-import BulkActionsModal from "./components/modals/BulkActionsModal.jsx";
-import QuickHelpModal from "./components/modals/QuickHelpModal.jsx";
-import SigmaRuleModal from "./components/modals/SigmaRuleModal.jsx";
-import RdpBitmapCacheModal from "./components/modals/RdpBitmapCacheModal.jsx";
 import {
   openColumnStatsModal,
   openIocLoadModal,
@@ -52,9 +44,11 @@ import {
 	  openSigmaModal,
   openSimpleModal,
   openStackingModal,
+  openAiWorkspaceCorrelateModal,
+  openAiHistoryProfileScanModal,
   updateModal,
 } from "./modals/modalRegistry.js";
-import { HOME_CAPABILITY_LAUNCHERS } from "./utils/analyzer-launch.js";
+import { HOME_CAPABILITY_LAUNCHERS, buildLateralMovementCols } from "./utils/analyzer-launch.js";
 
 // ── Custom hooks ────────────────────────────────────────────────
 import useColumnOps from "./hooks/useColumnOps.js";
@@ -66,6 +60,51 @@ import useGridInteractionStore from "./store/useGridInteractionStore.js";
 import packageJson from "../package.json";
 
 const APP_VERSION = packageJson.version;
+const APP_DESCRIPTION = packageJson.description;
+
+const MenuBar = lazy(() => import("./components/MenuBar.jsx"));
+const VirtualGrid = lazy(() => import("./components/VirtualGrid.jsx"));
+const LateralMovementModal = lazy(() => import("./components/modals/LateralMovementModal.jsx"));
+const TriageCollectionModal = lazy(() => import("./components/modals/TriageCollectionModal.jsx"));
+const PersistenceModal = lazy(() => import("./components/modals/PersistenceModal.jsx"));
+const RansomwareModal = lazy(() => import("./components/modals/RansomwareModal.jsx"));
+const UsnAnalysisModal = lazy(() => import("./components/modals/UsnAnalysisModal.jsx"));
+const IocModal = lazy(() => import("./components/modals/IocModal.jsx"));
+const GapAnalysisModal = lazy(() => import("./components/modals/GapAnalysisModal.jsx"));
+const LogSourceCoverageModal = lazy(() => import("./components/modals/LogSourceCoverageModal.jsx"));
+const BurstAnalysisModal = lazy(() => import("./components/modals/BurstAnalysisModal.jsx"));
+const TimestompingModal = lazy(() => import("./components/modals/TimestompingModal.jsx"));
+const HeatmapModal = lazy(() => import("./components/modals/HeatmapModal.jsx"));
+const AdsModal = lazy(() => import("./components/modals/AdsModal.jsx"));
+const StackingModal = lazy(() => import("./components/modals/StackingModal.jsx"));
+const ColumnStatsModal = lazy(() => import("./components/modals/ColumnStatsModal.jsx"));
+const PresetsModal = lazy(() => import("./components/modals/PresetsModal.jsx"));
+const EditFilterModal = lazy(() => import("./components/modals/EditFilterModal.jsx"));
+const BulkActionsModal = lazy(() => import("./components/modals/BulkActionsModal.jsx"));
+const QuickHelpModal = lazy(() => import("./components/modals/QuickHelpModal.jsx"));
+const SigmaRuleModal = lazy(() => import("./components/modals/SigmaRuleModal.jsx"));
+const RdpBitmapCacheModal = lazy(() => import("./components/modals/RdpBitmapCacheModal.jsx"));
+const AiHistoryProfileScanModal = lazy(() => import("./components/modals/AiHistoryProfileScanModal.jsx"));
+const AiHistoryExtractModal = lazy(() => import("./components/modals/AiHistoryExtractModal.jsx"));
+const AiWorkspaceCorrelateModal = lazy(() => import("./components/modals/AiWorkspaceCorrelateModal.jsx"));
+const AiHistoryScopeModal = lazy(() => import("./components/modals/AiHistoryScopeModal.jsx"));
+const AiSecretsModal = lazy(() => import("./components/modals/AiSecretsModal.jsx"));
+
+function ModalChunkFallback({ th }) {
+  return (
+    <Overlay th={th}>
+      <Loading label="Loading tool…" size="md" />
+    </Overlay>
+  );
+}
+
+function ShellChunkFallback({ th, label = "Loading controls…" }) {
+  return (
+    <div style={{ height: 42, display: "flex", alignItems: "center", padding: "0 14px", borderBottom: `1px solid ${th.border}`, background: th.panelBg }}>
+      <Loading label={label} variant="compact" />
+    </div>
+  );
+}
 
 const rowIdFilterSignature = (rowIdFilter) => {
   if (!Array.isArray(rowIdFilter) || rowIdFilter.length === 0) return "";
@@ -87,6 +126,44 @@ const debugRightClick = (message, data = {}) => {
     }
   } catch {}
 };
+
+/** Header-only widths — cheap first paint after a multi-GB import. */
+function fastColumnWidths(headers) {
+  const cw = {};
+  for (const h of headers) {
+    cw[h] = Math.max(80, Math.min(h.length * 8 + 36, 400));
+  }
+  return cw;
+}
+
+function measureColumnWidths(headers, initialRows) {
+  const cw = {};
+  const sampleRows = initialRows.slice(0, 100);
+  headers.forEach((h) => {
+    const hLen = h.length * 8 + 36;
+    const lengths = sampleRows.map((r) => (r[h] || "").length).filter((l) => l > 0);
+    const meanLen = lengths.length > 0 ? lengths.reduce((a, b) => a + b, 0) / lengths.length : 0;
+    const meanPx = meanLen * 6.5 + 16;
+    cw[h] = Math.max(80, Math.min(Math.max(hLen, Math.round(meanPx)), 400));
+  });
+  return cw;
+}
+
+const LARGE_TAB_HISTOGRAM_DEFER_MS = 60_000;
+
+function fetchLimitForTab(tab) {
+  return VIRTUAL_WINDOW;
+}
+
+function fetchAheadForLimit(limit) {
+  return Math.max(100, Math.min(VIRTUAL_AHEAD, Math.floor((limit || VIRTUAL_WINDOW) / 3)));
+}
+
+function rowWindowCovers(rowOffset, rowCount, firstVisibleRow, visibleRowCount) {
+  const start = rowOffset || 0;
+  const end = start + (rowCount || 0);
+  return firstVisibleRow >= start && firstVisibleRow + visibleRowCount <= end;
+}
 
 // ── Main App ───────────────────────────────────────────────────────
 export default function App() {
@@ -141,6 +218,12 @@ export default function App() {
   // ── Grid interaction state (from store) ──────────────────────────
   const selectedRows = useGridInteractionStore((s) => s.selectedRows);
   const setSelectedRows = useGridInteractionStore((s) => s.setSelectedRows);
+  const allRowsSelected = useGridInteractionStore((s) => s.allRowsSelected);
+  const setAllRowsSelected = useGridInteractionStore((s) => s.setAllRowsSelected);
+  const selectionTabId = useGridInteractionStore((s) => s.selectionTabId);
+  const setSelectionTabId = useGridInteractionStore((s) => s.setSelectionTabId);
+  const selectAllScopeSignature = useGridInteractionStore((s) => s.selectAllScopeSignature);
+  const setSelectAllScopeSignature = useGridInteractionStore((s) => s.setSelectAllScopeSignature);
   const lastClickedRow = useGridInteractionStore((s) => s.lastClickedRow);
   const setLastClickedRow = useGridInteractionStore((s) => s.setLastClickedRow);
   const detailPanelRef = useRef(null);
@@ -151,6 +234,11 @@ export default function App() {
   const cellPopup = useGridInteractionStore((s) => s.cellPopup);
   const setCellPopup = useGridInteractionStore((s) => s.setCellPopup);
   const [searchMatchIdx, setSearchMatchIdx] = useState(-1);
+  const searchMatchIdxRef = useRef(-1);
+  const searchNavigationPendingRef = useRef(false);
+  const [searchMatchPosition, setSearchMatchPosition] = useState(-1);
+  const [highlightMatchCount, setHighlightMatchCount] = useState(0);
+  const [hiddenSelectionCount, setHiddenSelectionCount] = useState(0);
   const resizingCol = useGridInteractionStore((s) => s.resizingCol);
   const setResizingCol = useGridInteractionStore((s) => s.setResizingCol);
   const resizeX = useGridInteractionStore((s) => s.resizeX);
@@ -219,6 +307,7 @@ export default function App() {
   const histogramLoaded = useUIStore((s) => s.histogramLoaded);
   const setHistogramLoaded = useUIStore((s) => s.setHistogramLoaded);
   const histogramCache = useRef({}); // { [tabId]: { sig, data } }
+  const histDeferUntilRef = useRef({}); // tabId -> epoch ms — defer histogram after large import
   const searchCache = useRef({}); // { [tabId]: { [sig]: { rows, rowOffset, totalFiltered, bookmarkedSet, rowTags } } }
   const histResizeStartY = useRef(0);
   const histResizeStartH = useRef(0);
@@ -235,10 +324,12 @@ export default function App() {
 
   // Filter dropdown internal state (stays local — ephemeral, reset on each open)
   const [fdValues, setFdValues] = useState([]);
+  const [fdSampled, setFdSampled] = useState(false);
   const [fdLoading, setFdLoading] = useState(false);
   const [fdSearch, setFdSearch] = useState("");
   const [fdSelected, setFdSelected] = useState(new Set());
   const [fdRegex, setFdRegex] = useState(false);
+  const [fdValueMeta, setFdValueMeta] = useState({ totalDistinct: 0, truncated: false });
 
   const scrollRef = useRef(null);
   const scrollTopRef = useRef(0);
@@ -295,12 +386,95 @@ export default function App() {
   // at import-complete to auto-open that analyzer. A ref (not state) so the import-complete
   // listener always reads the current value without re-registering.
   const pendingCapabilityRef = useRef(null);
+  // Triage-collection hand-off. TriageCollectionModal queues a batch of imports and
+  // records the tab ids; once every one of them is terminal (complete OR failed) we open
+  // the Lateral Movement Tracker across the successful ones. Tracked here rather than in
+  // the modal because the modal closes as soon as the batch is queued.
+  const triageBatchRef = useRef(null);
+  const pendingTriageBatch = useUIStore((s) => s.pendingTriageBatch);
+  const setPendingTriageBatch = useUIStore((s) => s.setPendingTriageBatch);
+  useEffect(() => {
+    if (!pendingTriageBatch) return;
+    triageBatchRef.current = {
+      ...pendingTriageBatch,
+      pending: new Set((pendingTriageBatch.items || []).map((i) => i.tabId)),
+      succeeded: [],
+    };
+    setPendingTriageBatch(null);
+  }, [pendingTriageBatch]);
+
+  /**
+   * Mark one tab of the active triage batch terminal. When the last one lands, launch the
+   * Lateral Movement Tracker across every tab that imported successfully.
+   */
+  const _settleTriageBatch = (tabId, ok, tabInfo) => {
+    const batch = triageBatchRef.current;
+    if (!batch || !batch.pending.has(tabId)) return;
+    batch.pending.delete(tabId);
+    if (ok) batch.succeeded.push(tabInfo);
+    if (batch.pending.size > 0) return;
+    triageBatchRef.current = null;
+    // The batch is done; retire its "Cancel remaining" toast so it cannot outlive the work.
+    if (batch.toastId != null) useToastStore.getState().dismiss(batch.toastId);
+
+    // Sigma lane. Both lanes can be selected, and two modals cannot occupy the screen at
+    // once — so if lateral movement is also running, offer Sigma as a toast action rather
+    // than stealing focus. The directory arrives pre-authorized and pre-counted, so the
+    // wizard opens ready to scan.
+    const offerSigma = (viaToast) => {
+      if (!batch.sigmaEvtxDir) return;
+      const open = () => setModal(openSigmaModal({ scanMode: "evtx-dir", evtxDir: batch.sigmaEvtxDir }));
+      if (!viaToast) { open(); return; }
+      toast.info("Sigma scan ready", {
+        detail: `${batch.sigmaEvtxDir.fileCount} EVTX files from this collection.`,
+        ttl: 0,
+        actionLabel: "Run Sigma scan",
+        onAction: open,
+      });
+    };
+
+    if (!batch.analyzeAfter || batch.succeeded.length === 0) {
+      if (batch.succeeded.length === 0) toast.error("Triage import failed", { detail: "No artifacts could be imported." });
+      else offerSigma(false);
+      return;
+    }
+    offerSigma(true);
+    // Analyse the richest tab first and correlate the rest through multi-source; the
+    // analyzer detects each tab's format independently, so raw EVTX and parsed EvtxECmd
+    // can safely sit in the same run.
+    const ranked = [...batch.succeeded].sort((a, b) => (b.rowCount || 0) - (a.rowCount || 0));
+    const primary = ranked[0];
+    const others = ranked.slice(1).map((t) => t.tabId);
+    setActiveTab(primary.tabId);
+    const { cols, chainsawSyntheticTarget } = buildLateralMovementCols(primary.headers || []);
+    setModal(openLateralMovementModal(cols, {
+      chainsawSyntheticTarget,
+      autoStart: true,
+      lmMultiSource: others.length > 0,
+      lmSelectedTabIds: others,
+    }));
+    toast.info("Analyzing collection", {
+      detail: `Lateral movement across ${ranked.length} artifact${ranked.length === 1 ? "" : "s"}.`,
+    });
+  };
+
   // tabId -> source filePath, captured at import-start so a failed import can offer one-click retry.
   const importPathsRef = useRef({});
 
   const ct = tabs.find((t) => t.id === activeTab);
   ctRef.current = ct;
   const tle = typeof window !== "undefined" ? window.tle : null;
+  const runOpenFileDialog = useCallback(async () => {
+    if (!tle) return null;
+    const r = await tle.openFileDialog();
+    handleOpenFileDialogResult(tle, setModal, r);
+    return r;
+  }, [tle, setModal]);
+  const runImportPaths = useCallback(async (paths) => {
+    if (!tle || !paths?.length) return;
+    const r = await tle.importFiles(paths);
+    if (r?.scopePending) handleOpenFileDialogResult(tle, setModal, r);
+  }, [tle, setModal]);
   const th = THEMES[themeName];
   const isGrouped = ct?.groupByColumns?.length > 0;
   const handleCheckForUpdates = async () => {
@@ -357,6 +531,34 @@ export default function App() {
   // ── Tab updater ──────────────────────────────────────────────────
   const up = useTabStore((s) => s.up);
 
+  const filterToAiSession = useCallback((sessionId) => {
+    if (!ct?.id || !sessionId) return;
+    const id = String(sessionId).trim();
+    if (!id) return;
+    up("columnFilters", { ...(ct.columnFilters || {}), SessionId: id });
+    toast.success("Session filter applied", { detail: `Column filter: SessionId contains “${id.length > 48 ? `${id.slice(0, 48)}…` : id}”` });
+  }, [ct, up]);
+
+  const correlateAiWorkspace = useCallback((workspace, sourceFile) => {
+    const pathStr = resolveAiWorkspacePath(workspace, sourceFile);
+    if (!pathStr) {
+      toast.warning("No workspace path", { detail: "This row has no resolvable Workspace path to correlate." });
+      return;
+    }
+    const targets = buildWorkspaceCorrelationTargets(useTabStore.getState().tabs, pathStr);
+    if (targets.length === 1) {
+      const t = targets[0];
+      useTabStore.getState().setActiveTab(t.tabId);
+      useTabStore.getState().updateTab(t.tabId, {
+        columnFilters: { [t.column]: t.value },
+        searchHighlight: false,
+      });
+      toast.success("Correlation filter applied", { detail: `${t.kind}: ${t.hint}` });
+      return;
+    }
+    setModal(openAiWorkspaceCorrelateModal({ path: pathStr, targets }));
+  }, [setModal]);
+
   // ── Export helpers ────────────────────────────────────────────────
   const _downloadFile = (content, filename, mime) => {
     const blob = new Blob([content], { type: mime });
@@ -376,12 +578,140 @@ export default function App() {
   // ── Query backend ────────────────────────────────────────────────
   const activeFilters = useCallback((tab) => {
     const dis = tab.disabledFilters || new Set();
-    if (dis.size === 0) return { columnFilters: tab.columnFilters, checkboxFilters: tab.checkboxFilters };
+    const normalizeCbf = (cbf) => Object.fromEntries(
+      Object.entries(cbf || {}).map(([k, v]) => [k, normalizeCheckboxFilterValues(v)]),
+    );
+    if (dis.size === 0) {
+      return { columnFilters: tab.columnFilters, checkboxFilters: normalizeCbf(tab.checkboxFilters) };
+    }
     return {
       columnFilters: Object.fromEntries(Object.entries(tab.columnFilters).filter(([k]) => !dis.has(k))),
-      checkboxFilters: Object.fromEntries(Object.entries(tab.checkboxFilters).filter(([k]) => !dis.has(k))),
+      checkboxFilters: normalizeCbf(Object.fromEntries(
+        Object.entries(tab.checkboxFilters || {}).filter(([k]) => !dis.has(k)),
+      )),
     };
   }, []);
+
+  // Canonical filter contract shared by the grid, selection actions, DB-backed
+  // range selection, and search navigation. Sort is intentionally separate:
+  // changing sort order must not change which rows "select all" refers to.
+  const currentFilterOptions = useMemo(() => {
+    if (!ct) return null;
+    const { columnFilters, checkboxFilters } = activeFilters(ct);
+    const rawSearch = ct.searchHighlight ? "" : (ct.searchTerm || "");
+    const effectiveSearch = effectiveSearchTerm(rawSearch);
+    return {
+      searchTerm: effectiveSearch,
+      searchMode: ct.searchMode,
+      searchCondition: ct.searchCondition || "contains",
+      columnFilters,
+      checkboxFilters,
+      bookmarkedOnly: !!ct.showBookmarkedOnly,
+      tagFilter: (ct.disabledFilters || new Set()).has("__tags__")
+        ? null
+        : (ct.tagFilter || null),
+      rowIdFilter: ct.rowIdFilter || null,
+      dateRangeFilters: ct.dateRangeFilters || {},
+      advancedFilters: ct.advancedFilters || [],
+    };
+  }, [
+    ct?.id,
+    ct?.searchHighlight,
+    ct?.searchTerm,
+    ct?.searchMode,
+    ct?.searchCondition,
+    ct?.columnFilters,
+    ct?.checkboxFilters,
+    ct?.showBookmarkedOnly,
+    ct?.disabledFilters,
+    ct?.tagFilter,
+    ct?.rowIdFilter,
+    ct?.dateRangeFilters,
+    ct?.advancedFilters,
+    activeFilters,
+  ]);
+
+  const currentFilterScopeSignature = useMemo(() => {
+    if (!ct || !currentFilterOptions) return "";
+    return JSON.stringify({
+      tabId: ct.id,
+      totalFiltered: ct.totalFiltered || 0,
+      ...currentFilterOptions,
+      rowIdFilter: rowIdFilterSignature(ct.rowIdFilter),
+    });
+  }, [ct?.id, ct?.totalFiltered, ct?.rowIdFilter, currentFilterOptions]);
+
+  const clearRowSelection = useCallback(() => {
+    setAllRowsSelected(false);
+    setSelectionTabId(null);
+    setSelectAllScopeSignature(null);
+    setSelectedRows(new Set());
+    setLastClickedRow(null);
+    setHiddenSelectionCount(0);
+  }, [
+    setAllRowsSelected,
+    setSelectionTabId,
+    setSelectAllScopeSignature,
+    setSelectedRows,
+    setLastClickedRow,
+  ]);
+
+  // Programmatic tab changes (cross-tab search, closing a tab, import restore)
+  // bypass TabBar's per-tab restoration. Never let stable row IDs from one
+  // SQLite database silently become selections in another.
+  useEffect(() => {
+    if (selectionTabId && ct?.id && selectionTabId !== ct.id) clearRowSelection();
+  }, [selectionTabId, ct?.id, clearRowSelection]);
+
+  // Select-all is bound to the exact filter population that was visible when
+  // it was activated. A later filter change clears it instead of silently
+  // retargeting a different (potentially destructive) population.
+  useEffect(() => {
+    if (!allRowsSelected || !currentFilterScopeSignature) return;
+    if (!selectAllScopeSignature) {
+      setSelectAllScopeSignature(currentFilterScopeSignature);
+      return;
+    }
+    if (selectAllScopeSignature !== currentFilterScopeSignature) {
+      clearRowSelection();
+      toast.info("Selection cleared because the filtered view changed.");
+    }
+  }, [
+    allRowsSelected,
+    selectAllScopeSignature,
+    currentFilterScopeSignature,
+    setSelectAllScopeSignature,
+    clearRowSelection,
+  ]);
+
+  // Explicit selections persist across filters and sorts. Resolve their
+  // visible/hidden split in SQLite so the UI never implies that hidden rows
+  // were dropped from the selection.
+  useEffect(() => {
+    if (!tle || !ct || !currentFilterOptions || (selectionTabId && selectionTabId !== ct.id) || allRowsSelected || selectedRows.size === 0) {
+      setHiddenSelectionCount(0);
+      return;
+    }
+    let cancelled = false;
+    tle.countRowsByIdsMatching(ct.id, [...selectedRows], currentFilterOptions)
+      .then((result) => {
+        if (cancelled || isIpcError(result)) return;
+        const matching = Math.max(0, Math.min(selectedRows.size, Number(result?.matching) || 0));
+        setHiddenSelectionCount(selectedRows.size - matching);
+      })
+      .catch(() => {
+        if (!cancelled) setHiddenSelectionCount(0);
+      });
+    return () => { cancelled = true; };
+  }, [
+    tle,
+    ct?.id,
+    currentFilterOptions,
+    currentFilterScopeSignature,
+    selectionTabId,
+    allRowsSelected,
+    selectedRows,
+  ]);
 
   const fetchData = useCallback(async (tab, centerRow = 0) => {
     if (!tle || !tab) return;
@@ -389,7 +719,7 @@ export default function App() {
     const myFetchId = ++fetchId.current;
     // Skip query for single-character searches (too broad, expensive on large datasets)
     const rawSearch = tab.searchHighlight ? "" : tab.searchTerm;
-    const effectiveSearch = rawSearch && rawSearch.trim().length < 2 ? "" : rawSearch;
+    const effectiveSearch = effectiveSearchTerm(rawSearch);
     const { columnFilters, checkboxFilters } = activeFilters(tab);
     const rowIdSig = rowIdFilterSignature(tab.rowIdFilter);
     // Build cache key for this query configuration
@@ -405,8 +735,14 @@ export default function App() {
         parentFilters: [],
       });
       if (fetchId.current !== myFetchId) return; // Stale — newer fetch in flight
+      if (isIpcCancelled(groupData)) {
+        setSearchLoading(false);
+        return;
+      }
       if (isIpcError(groupData)) {
         toast.error("Group failed", { detail: ipcErrorMessage(groupData, "Could not load groups") });
+        setSearchLoading(false);
+        return;
       }
       const safeGroupData = Array.isArray(groupData) ? groupData : [];
       setTabs((prev) => prev.map((t) =>
@@ -425,9 +761,16 @@ export default function App() {
       setSearchLoading(false);
       return;
     }
-    const fetchOffset = Math.max(0, centerRow - Math.floor(VIRTUAL_WINDOW / 2));
+    const aiHist = isAiHistorySourceFormat(tab.sourceFormat);
+    const fetchLimit = fetchLimitForTab(tab);
+    const knownTotal = Number.isFinite(tab.totalFiltered) && tab.totalFiltered > 0
+      ? tab.totalFiltered
+      : (Number.isFinite(tab.totalRows) ? tab.totalRows : 0);
+    const maxOffset = knownTotal > fetchLimit ? knownTotal - fetchLimit : 0;
+    const fetchOffset = Math.max(0, Math.min(maxOffset, centerRow - Math.floor(fetchLimit / 2)));
     const result = await tle.queryRows(tab.id, {
-      offset: fetchOffset, limit: VIRTUAL_WINDOW,
+      offset: fetchOffset, limit: fetchLimit,
+      ...(aiHist ? aiHistoryQueryIpcOptions() : {}),
       sortCol: tab.sortCol, sortDir: tab.sortDir,
       searchTerm: effectiveSearch, searchMode: tab.searchMode, searchCondition: tab.searchCondition || "contains",
       columnFilters, checkboxFilters,
@@ -437,6 +780,10 @@ export default function App() {
       dateRangeFilters: tab.dateRangeFilters || {}, advancedFilters: tab.advancedFilters || [],
     });
     if (fetchId.current !== myFetchId) return; // Stale — newer fetch in flight
+    if (isIpcCancelled(result)) {
+      setSearchLoading(false);
+      return;
+    }
     // A worker/SQL failure resolves queryRows with {__ipcError} (it is NOT a rejection),
     // so guard before caching/writing tab state — otherwise the grid blanks to `undefined`
     // rows and the failed result poisons the filter-signature cache (re-shown on FL/HL
@@ -527,6 +874,10 @@ export default function App() {
   useEffect(() => {
     if (histogramTimer.current) clearTimeout(histogramTimer.current);
     if (!histogramVisible || !ct?.dataReady || !ct?.tsColumns?.size || !tle) { setHistogramData([]); setHistogramLoaded(false); return; }
+    if (ct.isLargeFile && (histDeferUntilRef.current[ct.id] || 0) > Date.now()) {
+      setHistogramLoaded(false);
+      return;
+    }
     const hCol = histogramCol && ct.tsColumns.has(histogramCol) ? histogramCol : [...ct.tsColumns][0];
     if (!hCol) return;
     const sig = `${ct.id}:${hCol}:${histGranularity}:${ct.totalFiltered}:${ct.searchTerm}:${ct.searchMode}:${ct.showBookmarkedOnly}:${rowIdFilterSignature(ct.rowIdFilter)}:${JSON.stringify(ct.dateRangeFilters)}:${JSON.stringify(ct.advancedFilters)}`;
@@ -536,7 +887,7 @@ export default function App() {
     setHistogramLoaded(false);
     histogramTimer.current = setTimeout(async () => {
       const af = activeFilters(ct);
-      const effectiveSearch = ct.searchHighlight ? "" : ct.searchTerm;
+      const effectiveSearch = effectiveSearchTerm(ct.searchHighlight ? "" : ct.searchTerm);
       const data = await tle.getHistogramData(ct.id, hCol, {
         searchTerm: effectiveSearch, searchMode: ct.searchMode, searchCondition: ct.searchCondition || "contains",
         columnFilters: af.columnFilters, checkboxFilters: af.checkboxFilters,
@@ -545,6 +896,7 @@ export default function App() {
         granularity: histGranularity,
       });
       const result = isIpcError(data) || !Array.isArray(data) ? [] : data;
+      if (isIpcCancelled(data)) return;
       histogramCache.current[ct.id] = { sig, data: result };
       setHistogramData(result);
       setHistogramLoaded(true);
@@ -571,11 +923,18 @@ export default function App() {
   useEffect(() => {
     if (!ct || !ct.dataReady || isGrouped) return;
     const scrollRow = Math.floor(scrollMapRef.current.logicalScrollTop / ROW_HEIGHT);
-    const windowEnd = (ct.rowOffset || 0) + (ct.rows?.length || 0);
-    const needsFetch = scrollRow < (ct.rowOffset || 0) + VIRTUAL_AHEAD
-      || scrollRow + 60 > windowEnd - VIRTUAL_AHEAD;
-    // Only fetch if we're actually near the edge of the cached window
-    if (!needsFetch || (ct.rows?.length || 0) >= (ct.totalFiltered || 0)) return;
+    const rowOffset = ct.rowOffset || 0;
+    const loadedRows = ct.rows?.length || 0;
+    const windowEnd = rowOffset + loadedRows;
+    const visibleRows = Math.max(60, Math.ceil((scrollRef.current?.clientHeight || 0) / ROW_HEIGHT) + OVERSCAN);
+    const fetchLimit = fetchLimitForTab(ct);
+    const ahead = fetchAheadForLimit(Math.max(loadedRows, fetchLimit));
+    const cacheCoversViewport = rowWindowCovers(rowOffset, loadedRows, scrollRow, visibleRows);
+    const fullZeroBasedCache = rowOffset === 0 && loadedRows >= (ct.totalFiltered || 0);
+    const needsFetch = !cacheCoversViewport
+      || scrollRow < rowOffset + ahead
+      || scrollRow + visibleRows > windowEnd - ahead;
+    if (!needsFetch || fullZeroBasedCache) return;
     if (scrollFetchTimer.current) clearTimeout(scrollFetchTimer.current);
     scrollFetchTimer.current = setTimeout(() => fetchData(ct, scrollRow), 50);
   }, [scrollTop, ct?.rowOffset, ct?.rows?.length, ct?.totalFiltered, isGrouped]);
@@ -592,7 +951,7 @@ export default function App() {
       const nextCol = groupCols[nextLevel];
       const af = activeFilters(tab);
       const subGroups = await tle.getGroupValues(tab.id, nextCol, {
-        searchTerm: tab.searchHighlight ? "" : tab.searchTerm, searchMode: tab.searchMode, searchCondition: tab.searchCondition || "contains",
+        searchTerm: effectiveSearchTerm(tab.searchHighlight ? "" : tab.searchTerm), searchMode: tab.searchMode, searchCondition: tab.searchCondition || "contains",
         columnFilters: af.columnFilters, checkboxFilters: af.checkboxFilters,
         bookmarkedOnly: tab.showBookmarkedOnly,
         rowIdFilter: tab.rowIdFilter || null,
@@ -606,11 +965,13 @@ export default function App() {
     } else {
       // Leaf level — fetch actual rows (initial batch)
       const af = activeFilters(tab);
-      const GROUP_BATCH = 100000;
+      const aiHistGroup = isAiHistorySourceFormat(tab.sourceFormat);
+      const GROUP_BATCH = aiHistGroup ? fetchLimitForTab(tab) : 100000;
       const result = await tle.queryRows(tab.id, {
         offset: 0, limit: GROUP_BATCH,
+        ...(aiHistGroup ? aiHistoryQueryIpcOptions() : {}),
         sortCol: tab.sortCol, sortDir: tab.sortDir,
-        searchTerm: tab.searchHighlight ? "" : tab.searchTerm, searchMode: tab.searchMode, searchCondition: tab.searchCondition || "contains",
+        searchTerm: effectiveSearchTerm(tab.searchHighlight ? "" : tab.searchTerm), searchMode: tab.searchMode, searchCondition: tab.searchCondition || "contains",
         columnFilters: af.columnFilters, checkboxFilters: af.checkboxFilters,
         bookmarkedOnly: tab.showBookmarkedOnly,
         rowIdFilter: tab.rowIdFilter || null,
@@ -634,15 +995,17 @@ export default function App() {
     const tab = ctRef.current;
     const existing = tab.expandedGroups?.[pathKey];
     if (!existing || !existing.rows || !existing.groupFilters) return;
-    const GROUP_BATCH = 100000;
+    const aiHistGroup = isAiHistorySourceFormat(tab.sourceFormat);
+    const GROUP_BATCH = aiHistGroup ? fetchLimitForTab(tab) : 100000;
     const loaded = existing.rows.length;
     const remaining = existing.totalFiltered - loaded;
     if (remaining <= 0) return;
     const af = activeFilters(tab);
     const result = await tle.queryRows(tab.id, {
-      offset: loaded, limit: loadAll ? remaining : GROUP_BATCH,
+      offset: loaded, limit: loadAll ? Math.min(remaining, aiHistGroup ? fetchLimitForTab(tab) : remaining) : GROUP_BATCH,
+      ...(aiHistGroup ? aiHistoryQueryIpcOptions() : {}),
       sortCol: tab.sortCol, sortDir: tab.sortDir,
-      searchTerm: tab.searchHighlight ? "" : tab.searchTerm, searchMode: tab.searchMode, searchCondition: tab.searchCondition || "contains",
+      searchTerm: effectiveSearchTerm(tab.searchHighlight ? "" : tab.searchTerm), searchMode: tab.searchMode, searchCondition: tab.searchCondition || "contains",
       columnFilters: af.columnFilters, checkboxFilters: af.checkboxFilters,
       bookmarkedOnly: tab.showBookmarkedOnly,
       rowIdFilter: tab.rowIdFilter || null,
@@ -694,7 +1057,7 @@ export default function App() {
     if (crossTabTimer.current) clearTimeout(crossTabTimer.current);
     const term = ct?.searchTerm?.trim();
     const readyTabs = tabs.filter((t) => t.dataReady);
-    if (!term || readyTabs.length < 2 || !tle) { setCrossTabCounts(null); return; }
+    if (isSearchTooShort(term) || !term || readyTabs.length < 2 || !tle) { setCrossTabCounts(null); return; }
     setCrossTabOpen(true);
     crossTabTimer.current = setTimeout(async () => {
       const mode = ct?.searchMode || "mixed";
@@ -712,34 +1075,17 @@ export default function App() {
   // ── Electron IPC listeners (register once, clean up on unmount) ──
   useEffect(() => {
     if (!tle) return;
-
-    const allChannels = [
-      "import-start", "import-progress", "import-complete", "import-error", "import-queue",
-      "export-progress", "sheet-selection", "fts-progress", "index-progress",
-      "trigger-open", "trigger-export", "trigger-search",
-      "trigger-bookmark-toggle", "trigger-column-manager",
-      "trigger-color-rules", "trigger-shortcuts",
-      "trigger-generate-report",
-      "trigger-crossfind", "trigger-save-session", "trigger-load-session",
-      "trigger-close-tab", "trigger-close-all-tabs",
-      "trigger-check-for-updates",
-      "set-datetime-format", "set-timezone", "set-font-size",
-      "trigger-reset-columns", "set-theme", "trigger-histogram",
-      "trigger-vt-settings",
-      "vt-progress", "vt-complete",
-      "recent-files-updated", "extract-resident-progress",
-      "usn-paths-updated", "rw-progress", "hm-progress",
-      "updater-state", "job-progress", "analysis-progress", "process-tree-complete",
-    ];
-
-    // Remove any pre-existing listeners to avoid duplicates
-    allChannels.forEach((ch) => tle.removeAllListeners(ch));
+    const unsubs = [];
+    const listen = (subscribe, cb) => {
+      const unsub = subscribe?.(cb);
+      if (typeof unsub === "function") unsubs.push(unsub);
+    };
 
     // Load recent files on startup
     tle.getRecentFiles().then((files) => setRecentFiles(files || [])).catch(() => {});
-    tle.onRecentFilesUpdated((files) => setRecentFiles(files || []));
+    listen(tle.onRecentFilesUpdated, (files) => setRecentFiles(files || []));
 
-    tle.onImportStart(({ tabId, fileName, filePath, fileSize }) => {
+    listen(tle.onImportStart, ({ tabId, fileName, filePath, fileSize }) => {
       if (filePath) importPathsRef.current[tabId] = filePath;
       setImportingTabs((prev) => ({ ...prev, [tabId]: { fileName, rowsImported: 0, percent: 0, status: "importing", fileSize: fileSize || 0 } }));
       setTabs((prev) => [...prev, {
@@ -763,7 +1109,7 @@ export default function App() {
         pendingCapabilityRef.current.tabId = tabId;
       }
     });
-    tle.onImportProgress(({ tabId, fileName, rowsImported, percent, phase, bytesRead, totalBytes }) => {
+    listen(tle.onImportProgress, ({ tabId, fileName, rowsImported, percent, phase, bytesRead, totalBytes, statusDetail }) => {
       if (!tabId) return;
       const normalizedPercent = Number.isFinite(percent) ? percent : 0;
       setImportingTabs((prev) => ({
@@ -776,57 +1122,72 @@ export default function App() {
           phase: phase || (normalizedPercent >= 100 ? "finalizing" : "parsing"),
           bytesRead,
           totalBytes,
+          statusDetail: statusDetail || "",
           status: normalizedPercent >= 100 ? "indexing" : "importing",
         },
       }));
     });
-    tle.onImportComplete(({ tabId, fileName, headers, rowCount, tsColumns, numericColumns, initialRows, totalFiltered, emptyColumns, sourceFormat, evtxMessageMode, messagesDeferred, resolveStats, bookmarkedRowIds, rowTags, tagColors }) => {
+    listen(tle.onImportComplete, ({ tabId, fileName, headers, rowCount, tsColumns, numericColumns, initialRows, totalFiltered, emptyColumns, sourceFormat, evtxMessageMode, messagesDeferred, resolveStats, bookmarkedRowIds, rowTags, tagColors, importWarning, importNotice, isLargeFile, initialRowsDeferred }) => {
       delete importPathsRef.current[tabId];
-      const cw = {};
-      headers.forEach((h) => {
-        const hLen = h.length * 8 + 36;
-        const sampleRows = initialRows.slice(0, 100);
-        const lengths = sampleRows.map((r) => (r[h] || "").length).filter((l) => l > 0);
-        const meanLen = lengths.length > 0 ? lengths.reduce((a, b) => a + b, 0) / lengths.length : 0;
-        const meanPx = meanLen * 6.5 + 16;
-        // Use mean for typical width, but ensure header always fits
-        cw[h] = Math.max(80, Math.min(Math.max(hLen, Math.round(meanPx)), 400));
-      });
+      if (importWarning) {
+        const warnTitle = isAiHistorySourceFormat(sourceFormat) ? "AI history import"
+          : (sourceFormat === "registry" || String(importWarning).includes("hive") ? "Dirty registry hive" : "Import warning");
+        toast.warning(warnTitle, { detail: importWarning });
+      }
+      if (importNotice) toast.info("AI history import", { detail: importNotice });
+      const largeTab = !!isLargeFile || rowCount >= 2_500_000 || (isAiHistorySourceFormat(sourceFormat) && rowCount >= 50_000);
+      if (largeTab) {
+        histDeferUntilRef.current[tabId] = Date.now() + LARGE_TAB_HISTOGRAM_DEFER_MS;
+        toast.info("Large timeline loaded", {
+          detail: `${formatNumber(rowCount)} rows ready. Wait for indexes to finish before heavy column filters; search uses LIKE until FTS is skipped on files over 5 GB.`,
+          ttl: 12000,
+        });
+      }
+      const cw = largeTab ? fastColumnWidths(headers) : measureColumnWidths(headers, initialRows);
       const saved = pendingRestoresRef.current[tabId];
-      setTabs((prev) => prev.map((t) => {
+      const applyTabImport = (columnWidths) => setTabs((prev) => prev.map((t) => {
         if (t.id !== tabId) return t;
         const base = { ...t, name: fileName, headers, rows: initialRows, rowOffset: 0, totalRows: rowCount, totalFiltered,
           tsColumns: new Set(tsColumns || []), numericColumns: new Set(numericColumns || []),
-          columnWidths: saved ? { ...cw, ...saved.columnWidths } : cw, importing: false, dataReady: true, bookmarkedSet: new Set(bookmarkedRowIds || []),
+          columnWidths: saved ? { ...columnWidths, ...saved.columnWidths } : columnWidths, importing: false, dataReady: true, isLargeFile: largeTab,
+          bookmarkedSet: new Set(bookmarkedRowIds || []),
           rowTags: rowTags || {},
           tagColors: tagColors ? { ...TAG_PRESETS, ...tagColors } : { ...TAG_PRESETS },
           sourceFormat: sourceFormat || null,
           evtxMessageMode: evtxMessageMode || null,
           messagesDeferred: !!messagesDeferred,
+          aiSecretTriage: saved?.aiSecretTriage || {},
+          aiSecretSalt: saved?.aiSecretSalt || "",
           usnResolveStats: sourceFormat === "raw-usnjrnl" ? (resolveStats || null) : null };
         if (!saved) {
-          const autoHidden = new Set(emptyColumns || []);
-          // Raw binary parsers (MFT, USN Journal): show all columns, only hide empty
-          if (sourceFormat) {
-            return { ...base, hiddenColumns: autoHidden };
-          }
-          // Auto-detect KAPE/EZ Tools output and apply profile
+          // Auto-detect KAPE / AI history profiles (including ai-history-* imports)
           const kp = detectKapeProfile(headers);
+          const autoHidden = kp?.showAllColumns
+            ? new Set()
+            : new Set(emptyColumns || []);
           if (kp) {
             const order = (kp.columnOrder || []).filter((h) => headers.includes(h));
             const rest = headers.filter((h) => !order.includes(h));
             const autoRules = kp.autoColorColumn && headers.includes(kp.autoColorColumn)
               ? buildTimelineColorRules(initialRows, kp.autoColorColumn, true)
               : [];
-            // Merge KAPE hidden columns with auto-detected empty columns
-            const kpHidden = (kp.hiddenColumns || []).filter((h) => headers.includes(h));
-            kpHidden.forEach((h) => autoHidden.add(h));
+            if (!kp.showAllColumns) {
+              const kpHidden = (kp.hiddenColumns || []).filter((h) => headers.includes(h));
+              kpHidden.forEach((h) => autoHidden.add(h));
+            }
+            const sortPatch = kp.defaultSortCol && headers.includes(kp.defaultSortCol)
+              ? { sortCol: kp.defaultSortCol, sortDir: kp.defaultSortDir || "asc" }
+              : {};
             return { ...base, _detectedProfile: kp.name,
-              pinnedColumns: [],
               hiddenColumns: autoHidden,
               columnOrder: [...order, ...rest],
               colorRules: autoRules,
+              ...sortPatch,
             };
+          }
+          // Raw binary parsers (MFT, USN Journal): show all columns, only hide empty
+          if (sourceFormat) {
+            return { ...base, hiddenColumns: autoHidden };
           }
           return { ...base, hiddenColumns: autoHidden };
         }
@@ -847,8 +1208,44 @@ export default function App() {
           advancedFilters: saved.advancedFilters || [],
           searchHighlight: saved.searchHighlight || false,
           vtEnrichment: saved.vtEnrichment || null,
+          aiSecretTriage: saved.aiSecretTriage || {},
+          aiSecretSalt: saved.aiSecretSalt || "",
         };
       }));
+      applyTabImport(cw);
+      if (initialRowsDeferred || (isAiHistorySourceFormat(sourceFormat) && rowCount > 0 && (!initialRows || initialRows.length === 0))) {
+        const deferLimit = fetchLimitForTab({ sourceFormat });
+        tle.queryRows(tabId, {
+          offset: 0,
+          limit: deferLimit,
+          sortCol: null,
+          sortDir: "asc",
+          ...aiHistoryQueryIpcOptions(),
+        }).then((result) => {
+          if (!result || result.__ipcError) return;
+          setTabs((prev) => prev.map((t) =>
+            t.id === tabId ? {
+              ...t,
+              rows: result.rows,
+              rowOffset: 0,
+              totalFiltered: result.totalFiltered,
+              bookmarkedSet: new Set(result.bookmarkedRows || []),
+              rowTags: result.rowTags || {},
+            } : t,
+          ));
+        }).catch(() => {});
+      }
+      if (largeTab && initialRows.length > 0) {
+        const refine = () => {
+          const refined = measureColumnWidths(headers, initialRows);
+          setTabs((prev) => prev.map((t) => {
+            if (t.id !== tabId) return t;
+            return { ...t, columnWidths: saved ? { ...refined, ...saved.columnWidths } : refined };
+          }));
+        };
+        if (typeof requestIdleCallback === "function") requestIdleCallback(refine, { timeout: 3000 });
+        else setTimeout(refine, 0);
+      }
       setImportingTabs((prev) => { const next = { ...prev }; delete next[tabId]; return next; });
       // Restore bookmarks and tags from session
       if (saved) {
@@ -868,6 +1265,10 @@ export default function App() {
       // at import-COMPLETE when dataReady is true. Column mappings are pre-detected so
       // analyzers that need them (Process Inspector, Lateral Movement) never open with
       // an empty schema. Format-specific analyzers fall back to a toast + the grid.
+      // Triage batch bookkeeping — must run before the capability hand-off so a batch
+      // launch and a home-tile launch can never both fire for the same tab.
+      _settleTriageBatch(tabId, true, { tabId, headers, rowCount, sourceFormat: sourceFormat || null });
+
       const pendingCap = pendingCapabilityRef.current;
       if (pendingCap && pendingCap.tabId === tabId) {
         pendingCapabilityRef.current = null;
@@ -883,23 +1284,28 @@ export default function App() {
         }
       }
     });
-    tle.onImportQueue(({ pending }) => {
+    listen(tle.onImportQueue, ({ pending }) => {
       setImportQueue(pending || []);
     });
-    tle.onImportError(({ tabId, error }) => {
+    listen(tle.onImportError, ({ tabId, error }) => {
+      const errText = String(error || "");
+      const userCanceled = /job cancel|extraction cancel|canceled|cancelled/i.test(errText);
       // Drop the pending home-tile capability intent only if THIS (the bound) import failed.
       if (pendingCapabilityRef.current?.tabId === tabId) pendingCapabilityRef.current = null;
+      // A failed member must still settle, or the batch would wait forever for it.
+      _settleTriageBatch(tabId, false, null);
       setImportingTabs((prev) => { const next = { ...prev }; delete next[tabId]; return next; });
       setTabs((prev) => prev.filter((t) => t.id !== tabId));
+      if (userCanceled) return;
       // Offer one-click retry instead of silent data loss — the source path was captured at import-start.
       const failedPath = importPathsRef.current[tabId];
       delete importPathsRef.current[tabId];
       toast.error("Import failed", {
-        detail: String(error),
+        detail: errText,
         ...(failedPath ? { actionLabel: "Retry import", onAction: () => tle?.importFiles([failedPath]) } : {}),
       });
     });
-    tle.onIndexProgress(({ tabId, built, total, done, currentCol, error }) => {
+    listen(tle.onIndexProgress, ({ tabId, built, total, done, currentCol, error }) => {
       if (!tabId) return;
       setTabs((prev) => prev.map((t) =>
         t.id === tabId ? { ...t, indexesReady: done, indexesBuilt: built, indexesTotal: total, indexCurrentCol: currentCol || null, indexError: error || null } : t
@@ -907,7 +1313,7 @@ export default function App() {
       // Surface background-build failure instead of silently dismissing the overlay.
       if (error) toast.warning("Column indexing didn't finish", { detail: `Sorting and filtering may be slower than usual.\n\n${String(error)}` });
     });
-    tle.onFtsProgress(({ tabId, indexed, total, done, optimizing, error, skipped }) => {
+    listen(tle.onFtsProgress, ({ tabId, indexed, total, done, optimizing, error, skipped }) => {
       if (!tabId) return;
       setTabs((prev) => prev.map((t) =>
         t.id === tabId ? { ...t, ftsReady: done, ftsIndexed: indexed, ftsTotal: total, ftsOptimizing: !!optimizing, ftsError: error || null } : t
@@ -915,10 +1321,10 @@ export default function App() {
       if (error) toast.warning("Search index unavailable", { detail: `Full-text search falls back to a slower full-table scan.\n\n${String(error)}` });
       else if (skipped) toast.warning("Search index skipped (large file)", { detail: "Full-text search uses a substring scan (slower on very large datasets). Sorting and filtering still use column indexes." });
     });
-    tle.onExtractResidentProgress(({ processed, total, percent }) => {
+    listen(tle.onExtractResidentProgress, ({ processed, total, percent }) => {
       setExtractProgress({ processed, total, percent });
     });
-    tle.onUsnPathsUpdated(({ tabId, resolveStats }) => {
+    listen(tle.onUsnPathsUpdated, ({ tabId, resolveStats }) => {
       // MFT was loaded after USN Journal — paths have been re-resolved
       delete searchCache.current[tabId];
       setTabs((prev) => prev.map((t) =>
@@ -931,13 +1337,13 @@ export default function App() {
         ));
       }).catch(() => {});
     });
-    tle.onRwProgress((p) => {
+    listen(tle.onRwProgress, (p) => {
       setModal(updateModal("ransomware", (prev) => (prev.phase === "scanning" || prev.phase === "loading") ? { rwProgress: p } : null));
     });
-    tle.onHmProgress((p) => {
+    listen(tle.onHmProgress, (p) => {
       setModal(updateModal("heatmap", (prev) => prev.loading ? { hmProgress: p } : null));
     });
-    tle.onUpdaterState((state) => {
+    listen(tle.onUpdaterState, (state) => {
       setUpdaterPopup((prev) => ({
         phase: state?.phase || "idle",
         message: state?.message || "",
@@ -951,16 +1357,16 @@ export default function App() {
       }));
       if (state?.phase !== "checking") setCheckingForUpdates(false);
     });
-    tle.onSheetSelection(({ tabId, fileName, filePath, sheets }) => {
+    listen(tle.onSheetSelection, ({ tabId, fileName, filePath, sheets }) => {
       setModal(openSimpleModal("sheets", { tabId, fileName, filePath, sheets }));
     });
-    tle.onTriggerOpen(() => tle.openFileDialog());
-    tle.onTriggerExport(() => {
+    listen(tle.onTriggerOpen, () => { runOpenFileDialog(); });
+    listen(tle.onTriggerExport, () => {
       const cur = ctRef.current;
       if (cur) {
         const af = activeFilters(cur);
         tle.exportFiltered(cur.id, {
-          searchTerm: cur.searchHighlight ? "" : cur.searchTerm, searchMode: cur.searchMode, searchCondition: cur.searchCondition || "contains",
+          searchTerm: effectiveSearchTerm(cur.searchHighlight ? "" : cur.searchTerm), searchMode: cur.searchMode, searchCondition: cur.searchCondition || "contains",
           columnFilters: af.columnFilters, checkboxFilters: af.checkboxFilters,
           bookmarkedOnly: cur.showBookmarkedOnly, sortCol: cur.sortCol, sortDir: cur.sortDir,
           tagFilter: (cur.disabledFilters || new Set()).has("__tags__") ? null : (cur.tagFilter || null),
@@ -970,40 +1376,40 @@ export default function App() {
         });
       }
     });
-    tle.onTriggerGenerateReport(() => {
+    listen(tle.onTriggerGenerateReport, () => {
       const cur = ctRef.current;
       if (cur?.dataReady) tle.generateReport(cur.id, cur.name, cur.tagColors || {}, cur.vtEnrichment || null);
     });
-    tle.onTriggerSearch(() => document.getElementById("gs")?.focus());
-    tle.onTriggerBookmarkToggle(() => {
+    listen(tle.onTriggerSearch, () => document.getElementById("gs")?.focus());
+    listen(tle.onTriggerBookmarkToggle, () => {
       const cur = ctRef.current;
       if (cur) setTabs((prev) => prev.map((t) => t.id === cur.id ? { ...t, showBookmarkedOnly: !t.showBookmarkedOnly } : t));
     });
-    tle.onTriggerColumnManager(() => { setColMgrSearch(""); setModal(openSimpleModal("columns")); });
-    tle.onTriggerColorRules(() => setModal(openSimpleModal("colors")));
-    tle.onTriggerShortcuts(() => setModal(openSimpleModal("shortcuts")));
-    tle.onTriggerCrossFind(() => setModal(openSimpleModal("crossfind")));
-    tle.onTriggerSaveSession(() => handleSaveSessionRef.current?.());
-    tle.onTriggerLoadSession(() => handleLoadSessionRef.current?.());
-    tle.onTriggerCloseTab(() => { const cur = ctRef.current; if (cur) closeTabRef.current?.(cur.id); });
-    tle.onTriggerCloseAllTabs(() => { setTabs((prev) => { prev.forEach((t) => tle.closeTab(t.id)); return []; }); setActiveTab(null); });
-    tle.onTriggerCheckForUpdates(() => {
+    listen(tle.onTriggerColumnManager, () => { setColMgrSearch(""); setModal(openSimpleModal("columns")); });
+    listen(tle.onTriggerColorRules, () => setModal(openSimpleModal("colors")));
+    listen(tle.onTriggerShortcuts, () => setModal(openSimpleModal("shortcuts")));
+    listen(tle.onTriggerCrossFind, () => setModal(openSimpleModal("crossfind")));
+    listen(tle.onTriggerSaveSession, () => handleSaveSessionRef.current?.());
+    listen(tle.onTriggerLoadSession, () => handleLoadSessionRef.current?.());
+    listen(tle.onTriggerCloseTab, () => { const cur = ctRef.current; if (cur) closeTabRef.current?.(cur.id); });
+    listen(tle.onTriggerCloseAllTabs, () => { setTabs((prev) => { prev.forEach((t) => tle.closeTab(t.id)); return []; }); setActiveTab(null); });
+    listen(tle.onTriggerCheckForUpdates, () => {
       setHelpMenuOpen(false);
       handleCheckForUpdatesRef.current?.();
     });
 
     // Tools menu handlers
-    tle.onSetDatetimeFormat((fmt) => setDateTimeFormat(fmt));
-    tle.onSetTimezone((tz) => setTimezone(tz));
-    tle.onSetFontSize((val) => {
+    listen(tle.onSetDatetimeFormat, (fmt) => setDateTimeFormat(fmt));
+    listen(tle.onSetTimezone, (tz) => setTimezone(tz));
+    listen(tle.onSetFontSize, (val) => {
       if (val === "increase") setFontSize((s) => Math.min(18, s + 1));
       else if (val === "decrease") setFontSize((s) => Math.max(9, s - 1));
       else if (typeof val === "number") setFontSize(val);
     });
-    tle.onTriggerResetColumns(() => resetColumnWidthsRef.current?.());
-    tle.onSetTheme((name) => setThemeName(name));
-    tle.onTriggerHistogram(() => setHistogramVisible((v) => !v));
-    tle.onTriggerVtSettings(() => {
+    listen(tle.onTriggerResetColumns, () => resetColumnWidthsRef.current?.());
+    listen(tle.onSetTheme, (name) => setThemeName(name));
+    listen(tle.onTriggerHistogram, () => setHistogramVisible((v) => !v));
+    listen(tle.onTriggerVtSettings, () => {
       const cur = ctRef.current;
       if (cur?.dataReady) setModal(openIocLoadModal({ vtConfigExpanded: true }));
     });
@@ -1012,7 +1418,9 @@ export default function App() {
     tle.loadFilterPresets().then((p) => setFilterPresets(p || [])).catch(() => {});
 
     return () => {
-      allChannels.forEach((ch) => tle.removeAllListeners(ch));
+      for (const unsub of unsubs.splice(0)) {
+        try { unsub(); } catch {}
+      }
     };
   }, [tle]);
 
@@ -1364,10 +1772,12 @@ export default function App() {
 
   const handleExport = async () => {
     if (!tle || !ct) return;
-    const visHeaders = ct.headers.filter((h) => !ct.hiddenColumns.has(h));
+    const visSet = new Set(ct.headers.filter((h) => !ct.hiddenColumns.has(h)));
+    if (isAiHistorySourceFormat(ct.sourceFormat) && ct.headers.includes("FullText")) visSet.add("FullText");
+    const visHeaders = ct.headers.filter((h) => visSet.has(h));
     const af = activeFilters(ct);
     await tle.exportFiltered(ct.id, {
-      sortCol: ct.sortCol, sortDir: ct.sortDir, searchTerm: ct.searchHighlight ? "" : ct.searchTerm, searchMode: ct.searchMode, searchCondition: ct.searchCondition || "contains",
+      sortCol: ct.sortCol, sortDir: ct.sortDir, searchTerm: effectiveSearchTerm(ct.searchHighlight ? "" : ct.searchTerm), searchMode: ct.searchMode, searchCondition: ct.searchCondition || "contains",
       columnFilters: af.columnFilters, checkboxFilters: af.checkboxFilters,
       bookmarkedOnly: ct.showBookmarkedOnly, visibleHeaders: visHeaders,
       tagFilter: (ct.disabledFilters || new Set()).has("__tags__") ? null : (ct.tagFilter || null),
@@ -1401,15 +1811,10 @@ export default function App() {
     if (tle) await tle.closeTab(id);
     delete histogramCache.current[id];
     delete searchCache.current[id];
+    delete histDeferUntilRef.current[id];
     const rem = tabs.filter((t) => t.id !== id);
     setTabs(rem);
     if (activeTab === id) setActiveTab(rem.length ? rem[rem.length - 1].id : null);
-  };
-
-  const copyCell = (val) => {
-    navigator.clipboard?.writeText(val || "");
-    setCopiedMsg(true);
-    setTimeout(() => setCopiedMsg(false), 1200);
   };
 
   // ── Temporal Proximity Search ──────────────────────────────────
@@ -1451,6 +1856,8 @@ export default function App() {
         groupByColumns: tab.groupByColumns, showBookmarkedOnly: tab.showBookmarkedOnly,
         dateRangeFilters: tab.dateRangeFilters || {}, advancedFilters: tab.advancedFilters || [], searchHighlight: tab.searchHighlight || false,
         vtEnrichment: tab.vtEnrichment || null,
+        aiSecretTriage: tab.aiSecretTriage || {},
+        aiSecretSalt: tab.aiSecretSalt || "",
       });
     }
     return { version: 1, savedAt: new Date().toISOString(), activeTabIndex: tabs.findIndex((t) => t.id === activeTab), tabs: sessionTabs };
@@ -1634,53 +2041,90 @@ export default function App() {
     return (localIdx >= 0 && localIdx < rows.length) ? rows[localIdx] : null;
   }, [isGrouped, displayRows, rows, ct?.rowOffset]);
 
-  // Primary selected row (last clicked) for detail panel
-  const selectedRow = lastClickedRow !== null && selectedRows.has(lastClickedRow) ? lastClickedRow : null;
-
-  const selectedRowData = useMemo(() => {
-    if (selectedRow === null) return null;
-    const item = getRowAt(selectedRow);
+  const getDataRowAt = useCallback((absIdx) => {
+    const item = getRowAt(absIdx);
     if (!item) return null;
     if (isGrouped) return item.type === "row" ? item.data : null;
     return item;
-  }, [selectedRow, getRowAt, isGrouped]);
+  }, [getRowAt, isGrouped]);
 
-  const handleRowClick = (ai, e) => {
+  const getRowIdAt = useCallback((absIdx) => {
+    const row = getDataRowAt(absIdx);
+    const rowId = Number(row?.__idx);
+    return Number.isInteger(rowId) && rowId > 0 ? rowId : null;
+  }, [getDataRowAt]);
+
+  const lastClickedRowData = useMemo(
+    () => lastClickedRow === null ? null : getDataRowAt(lastClickedRow),
+    [lastClickedRow, getDataRowAt],
+  );
+  const selectionBelongsToCurrentTab = !selectionTabId || selectionTabId === ct?.id;
+  // The visual position can change after sorting; membership is keyed by row ID.
+  const selectedRow = selectionBelongsToCurrentTab && lastClickedRow !== null
+    && isRowSelected(selectedRows, allRowsSelected, lastClickedRowData?.__idx)
+    ? lastClickedRow
+    : null;
+  const selectedRowData = selectedRow === null ? null : lastClickedRowData;
+
+  const handleRowClick = async (ai, e) => {
     // Skip if this click was a Cmd+Click / Ctrl+Click that triggered the context menu
     if (rightClickFired.current) return;
+    const rowId = getRowIdAt(ai);
+    if (rowId === null) return;
     if (e.shiftKey && lastClickedRow !== null) {
       // Shift+Click: range select
       const from = Math.min(lastClickedRow, ai);
       const to = Math.max(lastClickedRow, ai);
+      let rowIds = [];
+      if (isGrouped) {
+        for (let i = from; i <= to; i++) {
+          const id = getRowIdAt(i);
+          if (id !== null) rowIds.push(id);
+        }
+      } else {
+        try {
+          const result = await tle.getRowIdsInRange(ct.id, {
+            ...currentFilterOptions,
+            sortCol: ct.sortCol,
+            sortDir: ct.sortDir,
+            offset: from,
+            limit: to - from + 1,
+          });
+          if (isIpcError(result) || !Array.isArray(result?.rowIds)) {
+            throw new Error(ipcErrorMessage(result, "Could not resolve the selected range"));
+          }
+          rowIds = result.rowIds;
+        } catch (err) {
+          toast.error("Range selection failed", { detail: String(err?.message || err) });
+          return;
+        }
+      }
+      if (rowIds.length === 0) return;
+      setSelectionTabId(ct.id);
       setSelectedRows((prev) => {
-        const next = new Set(prev);
-        for (let i = from; i <= to; i++) next.add(i);
-        return next;
+        return selectRowIds(prev, allRowsSelected, rowIds);
       });
     } else if (e.metaKey || e.ctrlKey) {
       // Cmd/Ctrl+Click: toggle individual
-      setSelectedRows((prev) => {
-        const next = new Set(prev);
-        if (next.has(ai)) next.delete(ai);
-        else next.add(ai);
-        return next;
-      });
+      setSelectionTabId(ct.id);
+      setSelectedRows((prev) => toggleRowSelection(prev, allRowsSelected, rowId));
       setLastClickedRow(ai);
     } else {
       // Plain click: single select
-      setSelectedRows(new Set([ai]));
+      setAllRowsSelected(false);
+      setSelectionTabId(ct.id);
+      setSelectAllScopeSignature(null);
+      setSelectedRows(new Set([rowId]));
       setLastClickedRow(ai);
     }
     setDetailPanelOpen(true);
   };
 
   const handleCheckboxToggle = (ai) => {
-    setSelectedRows((prev) => {
-      const next = new Set(prev);
-      if (next.has(ai)) next.delete(ai);
-      else next.add(ai);
-      return next;
-    });
+    const rowId = getRowIdAt(ai);
+    if (rowId === null) return;
+    setSelectionTabId(ct.id);
+    setSelectedRows((prev) => toggleRowSelection(prev, allRowsSelected, rowId));
     setLastClickedRow(ai);
   };
 
@@ -1689,19 +2133,28 @@ export default function App() {
     const groupItem = displayRows[groupHeaderAi];
     if (!groupItem || groupItem.type !== "group") return;
     const baseDepth = groupItem.depth;
-    const rowIndices = [];
+    const rowIds = [];
     for (let j = groupHeaderAi + 1; j < displayRows.length; j++) {
       const child = displayRows[j];
       if (child.type === "group" && child.depth <= baseDepth) break;
-      if (child.type === "row") rowIndices.push(j);
+      if (child.type === "row" && child.data?.__idx) rowIds.push(child.data.__idx);
     }
-    if (rowIndices.length === 0) return;
-    const allSelected = rowIndices.every((idx) => selectedRows.has(idx));
+    if (rowIds.length === 0) return;
+    setSelectionTabId(ct.id);
+    const allSelected = rowIds.every((rowId) =>
+      isRowSelected(selectedRows, allRowsSelected, rowId));
     setSelectedRows((prev) => {
       const next = new Set(prev);
-      for (const idx of rowIndices) {
-        if (allSelected) next.delete(idx);
-        else next.add(idx);
+      for (const value of rowIds) {
+        const rowId = Number(value);
+        if (allRowsSelected) {
+          if (allSelected) next.add(rowId);
+          else next.delete(rowId);
+        } else if (allSelected) {
+          next.delete(rowId);
+        } else {
+          next.add(rowId);
+        }
       }
       return next;
     });
@@ -1715,7 +2168,7 @@ export default function App() {
       if (c.type === "group" && c.depth <= depth) break;
       if (c.type === "row") {
         total++;
-        if (selectedRows.has(j)) selected++;
+        if (isRowSelected(selectedRows, allRowsSelected, c.data?.__idx)) selected++;
       }
     }
     return { total, selected };
@@ -1723,10 +2176,46 @@ export default function App() {
 
   const detailVisible = detailPanelOpen && selectedRowData !== null;
   const totalCount = isGrouped ? displayRows.length : (ct?.totalFiltered || 0);
+  const selectionCount = selectionBelongsToCurrentTab
+    ? getSelectedRowCount(
+      selectedRows,
+      allRowsSelected,
+      ct?.totalFiltered || 0,
+    )
+    : 0;
+  const allFilteredRowsSelected = (ct?.totalFiltered || 0) > 0
+    && selectionBelongsToCurrentTab
+    && allRowsSelected
+    && selectedRows.size === 0;
+  const handleSelectAllRows = () => {
+    if (isGrouped || !ct?.totalFiltered) return;
+    const everyRowSelected = allFilteredRowsSelected;
+    setAllRowsSelected(!everyRowSelected);
+    setSelectionTabId(everyRowSelected ? null : ct.id);
+    setSelectAllScopeSignature(everyRowSelected ? null : currentFilterScopeSignature);
+    setSelectedRows(new Set());
+    if (everyRowSelected) setLastClickedRow(null);
+  };
+  const selectionFilterOptions = useMemo(() => {
+    if (selectionCount === 0 || !currentFilterOptions) return null;
+    if (allRowsSelected) {
+      return {
+        ...currentFilterOptions,
+        excludedRowIds: [...selectedRows],
+      };
+    }
+    return { rowIdFilter: [...selectedRows] };
+  }, [selectionCount, currentFilterOptions, allRowsSelected, selectedRows]);
   const rowOffset = ct?.rowOffset || 0;
   const totalH = totalCount * ROW_HEIGHT;
-  // Use actual scroll container height when available (adapts to zoom/resize), fall back to estimate
-  const vh = (scrollRef.current?.clientHeight || (viewportH - 190)) - (detailVisible ? detailPanelHeight : 0);
+  // The scroll container has already shrunk around the detail panel. Only remove
+  // the sticky header/filter rows to get the usable data-row viewport.
+  const gridViewportH = scrollRef.current?.clientHeight || (viewportH - 190);
+  const vh = getGridBodyViewportHeight(
+    gridViewportH,
+    HEADER_HEIGHT + FILTER_HEIGHT,
+    ROW_HEIGHT,
+  );
   // Physical container is clamped at MAX_PHYSICAL_H to stay below Chromium's ~16.7M LayoutUnit ceiling.
   // When totalH exceeds the cap, scaleFactor maps physical scrollTop -> logical scrollTop linearly.
   // pageOffset shifts each rendered row's `top` so it lands at the correct visual position
@@ -1738,6 +2227,12 @@ export default function App() {
   const logicalScrollTop = scaleFactor === 1 ? scrollTop : Math.min(logMaxScroll, scrollTop * scaleFactor);
   const pageOffset = logicalScrollTop - scrollTop;
   scrollMapRef.current = { scaleFactor, logicalScrollTop, pageOffset, physicalH, totalH };
+  const { start: visibleRowStart, end: visibleRowEnd } = getVisibleRowRange({
+    totalCount,
+    logicalScrollTop,
+    viewportHeight: vh,
+    rowHeight: ROW_HEIGHT,
+  });
   const si = Math.max(0, Math.floor(logicalScrollTop / ROW_HEIGHT) - OVERSCAN);
   const ei = Math.min(totalCount, Math.ceil((logicalScrollTop + vh) / ROW_HEIGHT) + OVERSCAN);
   // For grouped mode: direct slice. For flat mode: map to windowed cache via rowOffset.
@@ -1761,7 +2256,13 @@ export default function App() {
   const compiledColors = useMemo(() => compileColorRules(ct?.colorRules || []), [ct?.colorRules]);
   const gw = (col) => ct?.columnWidths[col] || 150;
   const fmtCell = (h, val) => (dateTimeFormat && ct?.tsColumns?.has(h)) ? formatDateTime(val, dateTimeFormat, timezone) : (val || "");
-  const hlTerm = ct?.searchHighlight && ct?.searchTerm?.trim() ? ct.searchTerm.trim() : null;
+  const copyCell = useCallback((val, colName) => {
+    const text = colName != null && colName !== "" ? fmtCell(colName, val) : (val || "");
+    navigator.clipboard?.writeText(text);
+    setCopiedMsg(true);
+    setTimeout(() => setCopiedMsg(false), 1200);
+  }, [dateTimeFormat, timezone, ct?.tsColumns]);
+  const hlTerm = ct?.searchHighlight ? (effectiveSearchTerm(ct?.searchTerm).trim() || null) : null;
   const hlRegex = useMemo(() => {
     if (!hlTerm) return null;
     try {
@@ -1830,81 +2331,210 @@ export default function App() {
     if (lastIndex < text.length) parts.push(text.slice(lastIndex));
     return <>{parts}</>;
   };
-  const tw = useMemo(
-    () => { const vw = ct?.columnWidths?.["__vt__"] || VT_COL_WIDTH; return allVisH.reduce((s, h) => s + (ct?.columnWidths?.[h] || 150), 0) + (isGrouped ? (16 + 26 + CHECKBOX_COL_WIDTH) : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH)) + tagColWidth + (ct?.vtEnrichment ? vw : 0); },
-    [allVisH, ct?.columnWidths, tagColWidth, isGrouped, ct?.vtEnrichment]
-  );
+  const tw = useMemo(() => getGridContentWidth({
+    visibleColumns: allVisH,
+    columnWidths: ct?.columnWidths,
+    leadingWidth: isGrouped
+      ? (16 + 26 + CHECKBOX_COL_WIDTH)
+      : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH),
+    tagWidth: tagColWidth,
+    vtWidth: ct?.vtEnrichment
+      ? (ct?.columnWidths?.["__vt__"] || VT_COL_WIDTH)
+      : 0,
+    evidenceWidth: hasEvidencePills
+      ? (ct?.columnWidths?.["__evidence__"] || EVIDENCE_COL_WIDTH)
+      : 0,
+  }), [
+    allVisH,
+    ct?.columnWidths,
+    tagColWidth,
+    isGrouped,
+    ct?.vtEnrichment,
+    hasEvidencePills,
+  ]);
 
-  // Reset search match index when search term or results change
-  useEffect(() => { setSearchMatchIdx(-1); }, [ct?.searchTerm, ct?.totalFiltered, ct?.searchHighlight]);
+  // Reset search navigation whenever its result population changes.
+  useEffect(() => {
+    searchMatchIdxRef.current = -1;
+    setSearchMatchIdx(-1);
+    setSearchMatchPosition(-1);
+  }, [
+    ct?.searchTerm,
+    ct?.totalFiltered,
+    ct?.searchHighlight,
+    ct?.searchMode,
+    ct?.searchCondition,
+    ct?.sortCol,
+    ct?.sortDir,
+    currentFilterScopeSignature,
+  ]);
 
-  // In highlight mode, compute which visible rows match the search term (client-side on cached window)
-  const hlMatchIndices = useMemo(() => {
-    if (!ct?.searchHighlight || !ct?.searchTerm?.trim() || isGrouped) return null;
-    const term = ct.searchTerm.trim();
-    let re;
-    try {
-      if (ct.searchMode === "regex") { re = new RegExp(term, "i"); }
-      else {
-        const words = term.split(/\s+/).filter(Boolean).map((w) =>
-          w.replace(/^[+\-"]|"$/g, "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-        ).filter(Boolean);
-        if (words.length === 0) return null;
-        re = new RegExp(words.join("|"), "i");
-      }
-    } catch { return null; }
-    const offset = ct?.rowOffset || 0;
-    const indices = [];
-    for (let i = 0; i < rows.length; i++) {
-      const row = rows[i];
-      if (!row || !row.__idx) continue;
-      const match = allVisH.some((h) => re.test(row[h] || ""));
-      if (match) indices.push(i + offset);
-    }
-    return indices;
-  }, [ct?.searchHighlight, ct?.searchTerm, ct?.searchMode, rows, ct?.rowOffset, isGrouped, allVisH]);
-
-  const scrollToRow = (idx) => {
-    if (!scrollRef.current) return;
-    // Map logical row position -> physical scrollTop. When scaleFactor === 1 this is a no-op.
-    const sf = scrollMapRef.current.scaleFactor || 1;
-    const logicalTop = idx * ROW_HEIGHT;
-    const logicalBot = logicalTop + ROW_HEIGHT;
-    const physicalTop = logicalTop / sf;
-    const physicalBot = logicalBot / sf;
-    const curTop = scrollRef.current.scrollTop;
-    const viewH = scrollRef.current.clientHeight;
-    if (physicalTop < curTop) scrollRef.current.scrollTop = physicalTop;
-    else if (physicalBot > curTop + viewH) scrollRef.current.scrollTop = physicalBot - viewH;
-  };
-
-  const navigateSearch = (dir) => {
-    const total = ct?.totalFiltered || 0;
-    if (!ct?.searchTerm || isGrouped || total === 0) return;
-    if (ct.searchHighlight && hlMatchIndices) {
-      // Highlight mode: navigate only through matching rows in cached window
-      if (hlMatchIndices.length === 0) return;
-      let curPos = hlMatchIndices.indexOf(searchMatchIdx);
-      if (curPos === -1) curPos = dir === 1 ? -1 : hlMatchIndices.length;
-      let nextPos = dir === 1 ? curPos + 1 : curPos - 1;
-      if (nextPos >= hlMatchIndices.length) nextPos = 0;
-      if (nextPos < 0) nextPos = hlMatchIndices.length - 1;
-      const next = hlMatchIndices[nextPos];
-      setSearchMatchIdx(next);
-      setSelectedRows(new Set([next]));
-      setLastClickedRow(next);
-      setDetailPanelOpen(true);
-      scrollToRow(next);
+  // Highlight mode leaves the grid unfiltered, so its match total must be
+  // counted separately. LIMIT 0 keeps all row data in SQLite.
+  useEffect(() => {
+    if (!tle || !ct?.searchHighlight || !effectiveSearchTerm(ct?.searchTerm) || isGrouped || !currentFilterOptions) {
+      setHighlightMatchCount(0);
       return;
     }
-    let next;
-    if (dir === 1) next = searchMatchIdx < total - 1 ? searchMatchIdx + 1 : 0;
-    else next = searchMatchIdx > 0 ? searchMatchIdx - 1 : total - 1;
-    setSearchMatchIdx(next);
-    setSelectedRows(new Set([next]));
-    setLastClickedRow(next);
+    let cancelled = false;
+    setHighlightMatchCount(-1);
+    const timer = setTimeout(async () => {
+      try {
+        const result = await tle.queryRows(ct.id, {
+          ...currentFilterOptions,
+          offset: 0,
+          limit: 0,
+          searchTerm: ct.searchTerm,
+          searchMode: ct.searchMode,
+          searchCondition: ct.searchCondition || "contains",
+        });
+        if (!cancelled) {
+          setHighlightMatchCount(
+            isIpcError(result) ? 0 : Math.max(0, Number(result?.totalFiltered) || 0),
+          );
+        }
+      } catch {
+        if (!cancelled) setHighlightMatchCount(0);
+      }
+    }, QUERY_DEBOUNCE);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [
+    tle,
+    ct?.id,
+    ct?.searchHighlight,
+    ct?.searchTerm,
+    ct?.searchMode,
+    ct?.searchCondition,
+    isGrouped,
+    currentFilterOptions,
+    currentFilterScopeSignature,
+  ]);
+
+  const scrollToRow = useCallback((idx) => {
+    if (!scrollRef.current) return;
+    const sf = scrollMapRef.current.scaleFactor || 1;
+    const target = getRowScrollTarget({
+      rowIndex: idx,
+      rowHeight: ROW_HEIGHT,
+      logicalScrollTop: scrollMapRef.current.logicalScrollTop || 0,
+      viewportHeight: scrollRef.current.clientHeight,
+      stickyHeight: HEADER_HEIGHT + FILTER_HEIGHT,
+    });
+    // Map the logical row target back to the capped physical scroll range.
+    if (target !== null) scrollRef.current.scrollTop = target / sf;
+
+    // Prefetch SQL window when jumping via keyboard/search (same margin as scroll-driven fetch).
+    if (!isGrouped && ct?.dataReady) {
+      const offset = ct.rowOffset || 0;
+      const loadedRows = ct.rows?.length || 0;
+      const windowEnd = offset + loadedRows;
+      const visibleRows = Math.max(60, Math.ceil((scrollRef.current?.clientHeight || 0) / ROW_HEIGHT) + OVERSCAN);
+      const ahead = fetchAheadForLimit(Math.max(loadedRows, fetchLimitForTab(ct)));
+      const cacheCoversViewport = rowWindowCovers(offset, loadedRows, idx, visibleRows);
+      const fullZeroBasedCache = offset === 0 && loadedRows >= (ct.totalFiltered || 0);
+      const needsFetch = !cacheCoversViewport
+        || idx < offset + ahead
+        || idx + visibleRows > windowEnd - ahead;
+      if (needsFetch && !fullZeroBasedCache) {
+        fetchData(ct, idx);
+      }
+    }
+  }, [ct, isGrouped, fetchData]);
+
+  // Process Inspector grid pivot: after filters land, scroll/select the source create event.
+  useEffect(() => {
+    const focusId = ct?.pendingFocusRowId;
+    if (!ct?.dataReady || !focusId || isGrouped) return;
+    const rows = ct.rows || [];
+    const local = rows.findIndex((r) => Number(r?.__idx) === Number(focusId));
+    if (local < 0) return; // not in current window yet — wait for next fetch
+    const absIdx = (ct.rowOffset || 0) + local;
+    up("pendingFocusRowId", null);
+    setSelectedRows(new Set([Number(focusId)]));
+    setLastClickedRow(absIdx);
+    requestAnimationFrame(() => scrollToRow(absIdx));
+  }, [ct?.pendingFocusRowId, ct?.rows, ct?.rowOffset, ct?.dataReady, isGrouped]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const selectSingleRowAt = async (idx, knownRowId = null) => {
+    let rowId = Number(knownRowId);
+    if (!Number.isSafeInteger(rowId) || rowId <= 0) rowId = getRowIdAt(idx);
+    const rowWasCached = getRowIdAt(idx) !== null;
+    if (rowId === null) {
+      try {
+        const result = await tle.getRowIdsInRange(ct.id, {
+          ...currentFilterOptions,
+          sortCol: ct.sortCol,
+          sortDir: ct.sortDir,
+          offset: idx,
+          limit: 1,
+        });
+        if (isIpcError(result) || !Array.isArray(result?.rowIds)) {
+          throw new Error(ipcErrorMessage(result, "Could not resolve the row"));
+        }
+        rowId = Number(result.rowIds[0]);
+      } catch (err) {
+        toast.error("Row navigation failed", { detail: String(err?.message || err) });
+        return false;
+      }
+    }
+    if (!Number.isSafeInteger(rowId) || rowId <= 0) return false;
+    if (!rowWasCached) await fetchData(ct, idx);
+    setAllRowsSelected(false);
+    setSelectionTabId(ct.id);
+    setSelectAllScopeSignature(null);
+    setSelectedRows(new Set([rowId]));
+    setLastClickedRow(idx);
     setDetailPanelOpen(true);
-    scrollToRow(next);
+    return true;
+  };
+
+  const navigateSearch = async (dir) => {
+    const total = ct?.totalFiltered || 0;
+    if (!effectiveSearchTerm(ct?.searchTerm) || isGrouped || searchNavigationPendingRef.current) return;
+    searchNavigationPendingRef.current = true;
+    try {
+      if (ct.searchHighlight) {
+        const result = await tle.findSearchMatch(ct.id, {
+          ...currentFilterOptions,
+          sortCol: ct.sortCol,
+          sortDir: ct.sortDir,
+          currentIndex: searchMatchIdxRef.current,
+          direction: dir,
+          matchSearchTerm: ct.searchTerm,
+          matchSearchMode: ct.searchMode,
+          matchSearchCondition: ct.searchCondition || "contains",
+        });
+        if (isIpcError(result)) throw new Error(ipcErrorMessage(result));
+        if (!Number.isSafeInteger(result?.index) || result.index < 0) {
+          setHighlightMatchCount(0);
+          return;
+        }
+        searchMatchIdxRef.current = result.index;
+        setSearchMatchIdx(result.index);
+        setSearchMatchPosition(result.position);
+        setHighlightMatchCount(result.totalMatches);
+        if (!await selectSingleRowAt(result.index, result.rowId)) return;
+        requestAnimationFrame(() => scrollToRow(result.index));
+        return;
+      }
+      if (total === 0) return;
+      let next;
+      const currentIndex = searchMatchIdxRef.current;
+      if (dir === 1) next = currentIndex < total - 1 ? currentIndex + 1 : 0;
+      else next = currentIndex > 0 ? currentIndex - 1 : total - 1;
+      searchMatchIdxRef.current = next;
+      setSearchMatchIdx(next);
+      setSearchMatchPosition(next);
+      if (!await selectSingleRowAt(next)) return;
+      requestAnimationFrame(() => scrollToRow(next));
+    } catch (err) {
+      toast.error("Search navigation failed", { detail: String(err?.message || err) });
+    } finally {
+      searchNavigationPendingRef.current = false;
+    }
   };
 
   // ── Column resize ────────────────────────────────────────────────
@@ -1983,18 +2613,36 @@ export default function App() {
   const loadFilterValues = useCallback(async (colName, searchText, preselectAll, useRegex = false) => {
     const tab = ctRef.current;
     if (!tle || !tab) return;
+    if (tab.isLargeFile && !tab.indexesReady) {
+      toast.warning("Indexes still building", {
+        detail: "Column filter lists on large timelines are safest after the toolbar shows indexes ready. Showing values may use a row sample.",
+        ttl: 8000,
+      });
+    }
     setFdLoading(true);
+    setFdSampled(false);
     try {
       const af = activeFilters(tab);
       const result = await tle.getColumnUniqueValues(tab.id, colName, {
-        searchTerm: tab.searchHighlight ? "" : tab.searchTerm, searchMode: tab.searchMode, searchCondition: tab.searchCondition || "contains",
+        searchTerm: effectiveSearchTerm(tab.searchHighlight ? "" : tab.searchTerm), searchMode: tab.searchMode, searchCondition: tab.searchCondition || "contains",
         columnFilters: af.columnFilters, checkboxFilters: af.checkboxFilters,
         bookmarkedOnly: tab.showBookmarkedOnly, filterText: searchText, filterRegex: useRegex,
         tagFilter: (tab.disabledFilters || new Set()).has("__tags__") ? null : (tab.tagFilter || null),
         rowIdFilter: tab.rowIdFilter || null,
         dateRangeFilters: tab.dateRangeFilters || {}, advancedFilters: tab.advancedFilters || [],
       });
-      const vals = isIpcError(result) || !Array.isArray(result) ? [] : result;
+      if (isIpcCancelled(result)) {
+        setFdLoading(false);
+        return;
+      }
+      const vals = isIpcError(result)
+        ? []
+        : Array.isArray(result) ? result : Array.isArray(result?.values) ? result.values : [];
+      setFdSampled(Boolean(result?.sampled || vals.sampled));
+      setFdValueMeta({
+        totalDistinct: Array.isArray(result) ? vals.length : Number(result?.totalDistinct || vals.length),
+        truncated: !Array.isArray(result) && Boolean(result?.truncated),
+      });
       setFdValues(vals);
       // Pre-select all values when no existing filter (so user unchecks to exclude)
       if (preselectAll) {
@@ -2004,12 +2652,25 @@ export default function App() {
         const visible = new Set(vals.map((v) => v.val));
         setFdSelected((prev) => new Set([...prev].filter((v) => visible.has(v))));
       }
-    } catch { setFdValues([]); }
+    } catch {
+      setFdValues([]);
+      setFdSampled(false);
+      setFdValueMeta({ totalDistinct: 0, truncated: false });
+    }
     setFdLoading(false);
   }, [tle]);
 
   useEffect(() => {
-    if (!filterDropdown) { setFdValues([]); setFdSearch(""); setFdSelected(new Set()); setFdRegex(false); return; }
+    if (!filterDropdown) {
+      setFdValues([]);
+      setFdSearch("");
+      setFdSelected(new Set());
+      setFdRegex(false);
+      setFdSampled(false);
+      setFdValueMeta({ totalDistinct: 0, truncated: false });
+      return;
+    }
+    setFdSampled(false);
     if (filterDropdown.colName === "__tags__") {
       // Tags filter — load tags from DB
       const existing = ct?.tagFilter;
@@ -2026,6 +2687,7 @@ export default function App() {
         const tags = await tle.getAllTags(ct.id);
         const vals = (tags || []).map((t) => ({ val: t.tag, cnt: t.cnt }));
         setFdValues(vals);
+        setFdValueMeta({ totalDistinct: vals.length, truncated: false });
         setFdLoading(false);
       })().catch(() => { setFdLoading(false); });
       return;
@@ -2042,13 +2704,14 @@ export default function App() {
         const tags = await tle.getAllTags(ct.id);
         const vals = (tags || []).filter((t) => t.tag.startsWith("VT:")).map((t) => ({ val: t.tag, cnt: t.cnt }));
         setFdValues(vals);
+        setFdValueMeta({ totalDistinct: vals.length, truncated: false });
         setFdLoading(false);
       })().catch(() => { setFdLoading(false); });
       return;
     }
     const existing = ct?.checkboxFilters?.[filterDropdown.colName];
-    const hasExisting = existing?.length > 0;
-    setFdSelected(hasExisting ? new Set(existing) : new Set());
+    const hasExisting = checkboxFilterActive(existing);
+    setFdSelected(hasExisting ? new Set(normalizeCheckboxFilterValues(existing)) : new Set());
     setFdSearch("");
     setFdRegex(false);
     loadFilterValues(filterDropdown.colName, "", !hasExisting, false);
@@ -2109,35 +2772,129 @@ export default function App() {
     try {
       const af = activeFilters(ct);
       const res = await tle.getColumnValues(ct.id, colName, {
-        searchTerm: ct.searchHighlight ? "" : ct.searchTerm, searchMode: ct.searchMode, searchCondition: ct.searchCondition || "contains",
+        searchTerm: effectiveSearchTerm(ct.searchHighlight ? "" : ct.searchTerm), searchMode: ct.searchMode, searchCondition: ct.searchCondition || "contains",
         columnFilters: af.columnFilters, checkboxFilters: af.checkboxFilters,
         bookmarkedOnly: ct.showBookmarkedOnly,
         tagFilter: (ct.disabledFilters || new Set()).has("__tags__") ? null : (ct.tagFilter || null),
         rowIdFilter: ct.rowIdFilter || null,
         dateRangeFilters: ct.dateRangeFilters || {}, advancedFilters: ct.advancedFilters || [],
+        sortCol: ct.sortCol || null,
+        sortDir: ct.sortDir || "asc",
         distinct,
       });
       if (isIpcError(res)) throw new Error(ipcErrorMessage(res));
       const values = res?.values || [];
       if (values.length === 0) { toast.info("No values to copy in that column for the current view."); return; }
-      await navigator.clipboard?.writeText(values.join("\n"));
+      let copyValues = (dateTimeFormat && ct.tsColumns?.has(colName))
+        ? values.map((v) => formatDateTime(v, dateTimeFormat, timezone))
+        : values;
+      if (distinct) {
+        const seen = new Set();
+        copyValues = copyValues.filter((v) => {
+          const key = String(v ?? "");
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      }
+      await navigator.clipboard?.writeText(copyValues.join("\n"));
       setCopiedMsg(true);
       setTimeout(() => setCopiedMsg(false), 1200);
       const label = distinct ? "unique value" : "value";
-      toast.success(`Copied ${formatNumber(values.length)} ${label}${values.length === 1 ? "" : "s"} from "${colName}"${res?.truncated ? " (truncated at 1,000,000)" : ""}`);
+      toast.success(`Copied ${formatNumber(copyValues.length)} ${label}${copyValues.length === 1 ? "" : "s"} from "${colName}"${res?.truncated ? " (truncated at 1,000,000)" : ""}`);
     } catch (err) {
       toast.error("Couldn't copy column", { detail: String(err?.message || err) });
     }
-  }, [tle, ct, activeFilters, setCopiedMsg]);
+  }, [tle, ct, activeFilters, setCopiedMsg, dateTimeFormat, timezone]);
+
+  const copySelectedRows = useCallback(async () => {
+    if (!tle || !ct || selectionCount === 0) return;
+    const hdrs = ct.headers.filter((h) => !ct.hiddenColumns?.has(h));
+    const maxClipboardRows = 100_000;
+    let selectedData = [];
+    let truncated = false;
+
+    try {
+      if (!allRowsSelected) {
+        const requestedIds = [...selectedRows].slice(0, maxClipboardRows);
+        selectedData = await tle.getRowsByIds(ct.id, requestedIds);
+        if (isIpcError(selectedData) || !Array.isArray(selectedData)) {
+          throw new Error(ipcErrorMessage(selectedData, "Could not load selected rows"));
+        }
+        truncated = selectionCount > selectedData.length;
+      } else {
+        const { columnFilters, checkboxFilters } = activeFilters(ct);
+        const rawSearch = ct.searchHighlight ? "" : ct.searchTerm;
+        const effectiveSearch = rawSearch && rawSearch.trim().length < 2 ? "" : rawSearch;
+        const batchSize = 10_000;
+        let offset = 0;
+
+        while (offset < (ct.totalFiltered || 0) && selectedData.length < maxClipboardRows) {
+          const result = await tle.queryRows(ct.id, {
+            offset,
+            limit: batchSize,
+            sortCol: ct.sortCol,
+            sortDir: ct.sortDir,
+            searchTerm: effectiveSearch,
+            searchMode: ct.searchMode,
+            searchCondition: ct.searchCondition || "contains",
+            columnFilters,
+            checkboxFilters,
+            bookmarkedOnly: ct.showBookmarkedOnly,
+            tagFilter: (ct.disabledFilters || new Set()).has("__tags__")
+              ? null
+              : (ct.tagFilter || null),
+            rowIdFilter: ct.rowIdFilter || null,
+            dateRangeFilters: ct.dateRangeFilters || {},
+            advancedFilters: ct.advancedFilters || [],
+          });
+          if (isIpcError(result) || !Array.isArray(result?.rows)) {
+            throw new Error(ipcErrorMessage(result, "Could not load selected rows"));
+          }
+          if (result.rows.length === 0) break;
+          for (const row of result.rows) {
+            if (!selectedRows.has(Number(row.__idx))) selectedData.push(row);
+            if (selectedData.length >= maxClipboardRows) break;
+          }
+          offset += result.rows.length;
+        }
+        truncated = selectionCount > selectedData.length;
+      }
+
+      const lines = [hdrs.join("\t")];
+      for (const row of selectedData) {
+        lines.push(hdrs.map((h) =>
+          String(row[h] || "").replace(/\t/g, " ").replace(/\r?\n/g, " ")
+        ).join("\t"));
+      }
+      await navigator.clipboard?.writeText(lines.join("\n"));
+      setCopiedMsg(true);
+      setTimeout(() => setCopiedMsg(false), 1200);
+      toast.success(`Copied ${formatNumber(selectedData.length)} selected row${selectedData.length === 1 ? "" : "s"}${truncated ? " (clipboard limit: 100,000; use Export for the full view)" : ""}`);
+    } catch (err) {
+      toast.error("Couldn't copy selected rows", { detail: String(err?.message || err) });
+    }
+  }, [
+    tle,
+    ct,
+    selectionCount,
+    allRowsSelected,
+    selectedRows,
+    activeFilters,
+    setCopiedMsg,
+  ]);
 
   // ── Keyboard shortcuts ───────────────────────────────────────────
   useEffect(() => {
     const h = (e) => {
       const mod = e.metaKey || e.ctrlKey;
+      const target = e.target;
+      const isTextControl = target instanceof HTMLElement
+        && (target.matches("input, textarea, select") || target.isContentEditable);
       if (mod && e.key === "w") { e.preventDefault(); const cur = ctRef.current; if (cur) closeTabRef.current?.(cur.id); return; }
       if (mod && e.key === "s") { e.preventDefault(); handleSaveSessionRef.current?.(); }
       if (mod && e.shiftKey && e.key === "O") { e.preventDefault(); handleLoadSessionRef.current?.(); }
-      if (mod && e.key === "o") { e.preventDefault(); tle?.openFileDialog(); }
+      if (mod && e.key === "o") { e.preventDefault(); runOpenFileDialog(); }
       if (mod && e.key === "f" && !e.shiftKey) { e.preventDefault(); document.getElementById("gs")?.focus(); }
       if (mod && e.shiftKey && e.key === "f") { e.preventDefault(); setModal(openSimpleModal("crossfind")); }
       if (mod && e.key === "e") { e.preventDefault(); handleExport(); }
@@ -2156,32 +2913,27 @@ export default function App() {
         return;
       }
       // ⌘C with a selected column but no selected rows → copy that whole column's values.
-      if (mod && e.key === "c" && selectedColumn && selectedRows.size === 0 && ct) {
+      if (mod && e.key === "c" && selectedColumn && selectionCount === 0 && ct) {
         const sel = window.getSelection();
         if (sel && sel.toString().trim().length > 0) return;
         e.preventDefault();
         copyColumnValues(selectedColumn, { distinct: false });
         return;
       }
-      if (mod && e.key === "c" && selectedRows.size > 0 && ct) {
+      if (mod && e.key === "c" && selectionCount > 0 && ct) {
         // If user has text selected in the DOM (e.g., detail panel cell), let native copy handle it
         const sel = window.getSelection();
         if (sel && sel.toString().trim().length > 0) return;
         e.preventDefault();
-        const hdrs = ct.headers.filter((h) => !ct.hiddenColumns?.has(h));
-        const sortedIndices = [...selectedRows].sort((a, b) => a - b);
-        const lines = [hdrs.join("\t")];
-        for (const idx of sortedIndices) {
-          const item = getRowAt(idx);
-          const r = isGrouped ? (item?.type === "row" ? item.data : null) : item;
-          if (r) lines.push(hdrs.map((h) => (r[h] || "").replace(/\t/g, " ")).join("\t"));
-        }
-        navigator.clipboard?.writeText(lines.join("\n"));
-        setCopiedMsg(true);
-        setTimeout(() => setCopiedMsg(false), 1200);
+        copySelectedRows();
+        return;
       }
       if (e.key === "Escape") {
         if (cellPopup) { setCellPopup(null); return; }
+        if (modal?.type === "aiSecrets") {
+          if (modal.tagMenuGroup) setModal((prev) => (prev?.type === "aiSecrets" ? { ...prev, tagMenuGroup: null, tagDraft: "" } : prev));
+          return;
+        }
         if (modal) { setModal(null); return; }
         if (filterDropdown) { setFilterDropdown(null); return; }
         if (dateRangeDropdown) { setDateRangeDropdown(null); return; }
@@ -2193,9 +2945,12 @@ export default function App() {
         if (toolsOpen) { setToolsOpen(false); return; }
         if (actionsMenuOpen) { setActionsMenuOpen(false); return; }
         if (helpMenuOpen) { setHelpMenuOpen(false); return; }
-        if (detailPanelOpen && selectedRows.size > 0) { setDetailPanelOpen(false); return; }
+        if (detailPanelOpen && selectionCount > 0) { setDetailPanelOpen(false); return; }
         if (selectedColumn) { setSelectedColumn(null); return; }
-        if (selectedRows.size > 0) { setSelectedRows(new Set()); setLastClickedRow(null); return; }
+        if (selectionCount > 0) {
+          clearRowSelection();
+          return;
+        }
       }
       // Open context menu for selected row (Shift+F10 = standard context menu key)
       if (e.key === "F10" && e.shiftKey && lastClickedRow !== null && ct) {
@@ -2214,23 +2969,31 @@ export default function App() {
       // Find next/prev: Ctrl+Right/Left or F3/Shift+F3
       if ((mod && e.key === "ArrowRight") || (e.key === "F3" && !e.shiftKey)) { e.preventDefault(); navigateSearch(1); }
       if ((mod && e.key === "ArrowLeft") || (e.key === "F3" && e.shiftKey)) { e.preventDefault(); navigateSearch(-1); }
-      if (!isGrouped && e.key === "ArrowDown" && lastClickedRow !== null && !mod) {
+      if (!isGrouped && !isTextControl && e.key === "ArrowDown" && lastClickedRow !== null && !mod) {
         e.preventDefault();
         const total = ct?.totalFiltered || rows.length;
         const next = Math.min(total - 1, lastClickedRow + 1);
-        setSelectedRows(new Set([next])); setLastClickedRow(next); setDetailPanelOpen(true);
-        scrollToRow(next);
+        void selectSingleRowAt(next).then((selected) => {
+          if (selected) requestAnimationFrame(() => {
+            scrollToRow(next);
+            requestAnimationFrame(() => scrollRef.current?.querySelector(`[data-row-index="${next}"]`)?.focus({ preventScroll: true }));
+          });
+        });
       }
-      if (!isGrouped && e.key === "ArrowUp" && lastClickedRow !== null && !mod) {
+      if (!isGrouped && !isTextControl && e.key === "ArrowUp" && lastClickedRow !== null && !mod) {
         e.preventDefault();
         const next = Math.max(0, lastClickedRow - 1);
-        setSelectedRows(new Set([next])); setLastClickedRow(next); setDetailPanelOpen(true);
-        scrollToRow(next);
+        void selectSingleRowAt(next).then((selected) => {
+          if (selected) requestAnimationFrame(() => {
+            scrollToRow(next);
+            requestAnimationFrame(() => scrollRef.current?.querySelector(`[data-row-index="${next}"]`)?.focus({ preventScroll: true }));
+          });
+        });
       }
     };
     window.addEventListener("keydown", h);
     return () => window.removeEventListener("keydown", h);
-  }, [ct, activeTab, selectedRows, lastClickedRow, ct?.totalFiltered, isGrouped, getRowAt, searchMatchIdx, navigateSearch, selectedColumn, setSelectedColumn, copyColumnValues, contextMenu]);
+  }, [ct, activeTab, selectedRows, allRowsSelected, selectionCount, lastClickedRow, ct?.totalFiltered, isGrouped, getRowAt, searchMatchIdx, navigateSearch, selectedColumn, setSelectedColumn, copyColumnValues, copySelectedRows, contextMenu, clearRowSelection]);
 
 
 
@@ -2258,7 +3021,7 @@ export default function App() {
       // consume it and fire the analyzer on the wrong tab.
       pendingCapabilityRef.current = { capability: capKey, tabId: null };
       try {
-        const res = await tle?.openFileDialog();
+        const res = await runOpenFileDialog();
         if (res == null) pendingCapabilityRef.current = null; // null === user canceled
       } catch {
         pendingCapabilityRef.current = null;
@@ -2279,20 +3042,20 @@ export default function App() {
         icon: <><path d="M12 21V9"/><circle cx="12" cy="6" r="3"/><path d="M5 13H3m4.5 5L6 19.5M18 13h2m-3.5 5l1.5 1.5"/></> },
       { title: "Sigma · Hayabusa", desc: "Sigma detection over raw EVTX — no import needed", color: th.accent, outcome: "Scan a directory →", ready: true, onClick: () => setModal(openSigmaModal({ scanMode: "evtx-dir" })),
         icon: <><circle cx="12" cy="12" r="9"/><path d="M12 4v8l5 3"/></> },
-      { title: "IOC Matching", desc: "17+ indicator types · VirusTotal enrichment", color: th.accent, capability: "ioc", chip: "Any timeline", outcome: "Open → match & tag", onClick: () => launchCapabilityFromHome("ioc"),
-        icon: <><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5"/><path d="M12 3v3m0 12v3M3 12h3m12 0h3"/></> },
+      { title: "Collect AI Artifacts", desc: "Claude, Codex, Cursor, ChatGPT & more — scan this Mac or a triage folder into one AI history timeline.", color: th.accent, chip: "Mac / folder", outcome: "Scan → AI timeline", onClick: () => setModal(openAiHistoryProfileScanModal()),
+        icon: <><path d="M11 3l1.7 4.4L17 9l-4.3 1.6L11 15l-1.7-4.4L5 9l4.3-1.6z"/><path d="M17.6 14l.7 1.8 1.7.7-1.7.7-.7 1.8-.7-1.8-1.7-.7 1.7-.7z"/></> },
       { title: "Master File Table", desc: "Ransomware mass-encryption, in-place rewrites & recovery-target deletion across the $MFT", color: th.accent, capability: "mft", chip: "Raw $MFT", outcome: "Open → ransomware scan", onClick: () => launchCapabilityFromHome("mft"),
         icon: <><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><rect x="10" y="11" width="4" height="4" rx="1"/><path d="M10.5 11V9.5a1.5 1.5 0 0 1 3 0V11"/></> },
       { title: "USN Journal", desc: "Renames, deletions, exfil staging & self-deletion from the $J journal", color: th.accent, capability: "usn", chip: "$J / USN", outcome: "Open → journal triage", onClick: () => launchCapabilityFromHome("usn"),
         icon: <><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M7 8h10M7 12h10M7 16h6"/></> },
-      { title: "Open & Explore", desc: "Just browse a large CSV / TSV / XLSX in a fast grid — filter, search & sort. No analyzer needed.", color: th.accent, chip: "Any file", outcome: "Open any file →", onClick: () => tle?.openFileDialog(),
+      { title: "Open & Explore", desc: "Just browse a large CSV / TSV / XLSX in a fast grid — filter, search & sort. No analyzer needed.", color: th.accent, chip: "Any file", outcome: "Open any file →", onClick: () => runOpenFileDialog(),
         icon: <><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M3 9h18M3 15h18M9 3v18M15 3v18"/></> },
     ];
     return (
       <div onContextMenu={(e) => e.preventDefault()} style={{ display: "flex", height: "100vh", background: th.bg, fontFamily: "'SF Mono',Menlo,monospace", WebkitAppRegion: "drag", overflow: "hidden", position: "relative" }}
         onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "copy"; setDragOver(true); }}
         onDragLeave={(e) => { if (!e.currentTarget.contains(e.relatedTarget)) setDragOver(false); }}
-        onDrop={(e) => { e.preventDefault(); setDragOver(false); pendingCapabilityRef.current = null; /* drag = "just open", not a tile launch → drop any armed capability so it can't fire on this import */ const files = [...e.dataTransfer.files]; if (files.length > 0 && tle) { const paths = files.map((f) => tle.getPathForFile(f)).filter(Boolean); if (paths.length > 0) tle.importFiles(paths); } }}>
+        onDrop={(e) => { e.preventDefault(); setDragOver(false); pendingCapabilityRef.current = null; /* drag = "just open", not a tile launch → drop any armed capability so it can't fire on this import */ const files = [...e.dataTransfer.files]; if (files.length > 0 && tle) { const paths = files.map((f) => tle.getPathForFile(f)).filter(Boolean); if (paths.length > 0) runImportPaths(paths); } }}>
         <div style={{ width: 360, flexShrink: 0, display: "flex", flexDirection: "column", alignItems: "stretch", padding: "26px 24px 18px", borderRight: `1px solid ${th.border}`, background: th.panelBg, overflowY: "auto", WebkitAppRegion: "no-drag", zIndex: 2 }}>
           {/* IRFlow Logo — shield with timeline pulse */}
           <svg width="52" height="59" viewBox="0 0 64 72" fill="none" style={{ marginBottom: 14 }}>
@@ -2313,7 +3076,7 @@ export default function App() {
           <h1 style={{ fontSize: 24, fontWeight: 700, color: th.text, margin: 0, fontFamily: "-apple-system, 'SF Pro Display', sans-serif", letterSpacing: "-0.01em" }}>IRFlow <span style={{ color: th.accent }}>Timeline</span></h1>
           <p style={{ color: th.textDim, fontSize: 14, letterSpacing: "0.14em", textTransform: "uppercase", margin: "10px 0 6px", fontWeight: 600 }}>DFIR Timeline Analysis for macOS</p>
           <div style={{ display: "flex", flexDirection: "column", gap: 10, alignItems: "stretch", width: "100%", marginTop: 26, WebkitAppRegion: "no-drag" }}>
-            <button onClick={() => tle?.openFileDialog()} style={{ padding: "14px 48px", background: th.primaryBtn, color: "#fff", border: "none", borderRadius: 8, fontSize: 16, fontWeight: 600, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}
+            <button onClick={() => runOpenFileDialog()} style={{ padding: "14px 48px", background: th.primaryBtn, color: "#fff", border: "none", borderRadius: 8, fontSize: 16, fontWeight: 600, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}
               onMouseEnter={(e) => { e.currentTarget.style.filter = "brightness(1.1)"; }}
               onMouseLeave={(e) => { e.currentTarget.style.filter = ""; }}>Open File</button>
 	          </div>
@@ -2346,7 +3109,7 @@ export default function App() {
                   const fileName = fp.split("/").pop();
                   const dirPath = fp.substring(0, fp.lastIndexOf("/"));
                   return (
-                    <button key={i} onClick={() => tle?.importFiles([fp])}
+                    <button key={i} onClick={() => runImportPaths([fp])}
                       style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 10px", background: "transparent", border: "none", borderRadius: 6, cursor: "pointer", textAlign: "left", transition: "background var(--m-fast)", width: "100%" }}
                       onMouseEnter={(e) => { e.currentTarget.style.background = th.textMuted + "12"; }}
                       onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
@@ -2451,16 +3214,25 @@ export default function App() {
             </div>
           </div>
         )}
-	        {/* Modal overlay — must render even in empty state for EVTX scanning */}
-	        {modal?.type === "sigma" && <SigmaRuleModal />}
-	        {modal?.type === "rdpBitmapCache" && <RdpBitmapCacheModal />}
+        {/* Modal overlay — must render even in empty state for EVTX scanning */}
+        <Suspense fallback={<ModalChunkFallback th={th} />}>
+          {modal?.type === "sigma" && <SigmaRuleModal />}
+          {modal?.type === "rdpBitmapCache" && <RdpBitmapCacheModal />}
+          {modal?.type === "aiHistoryProfileScan" && <AiHistoryProfileScanModal />}
+          {modal?.type === "aiHistoryExtract" && <AiHistoryExtractModal />}
+          {modal?.type === "aiWorkspaceCorrelate" && <AiWorkspaceCorrelateModal th={th} />}
+          {modal?.type === "aiHistoryScope" && <AiHistoryScopeModal />}
+          {modal?.type === "aiSecrets" && <AiSecretsModal th={th} />}
+        </Suspense>
 	      </div>
     );
   }
 
   // ── Main render ──────────────────────────────────────────────────
   const isImporting = ct?.importing && importingTabs[ct?.id];
-  const activeCheckboxCount = ct ? Object.keys(ct.checkboxFilters || {}).filter(k => ct.checkboxFilters[k]?.length > 0).length : 0;
+  const activeCheckboxCount = ct
+    ? Object.keys(ct.checkboxFilters || {}).filter((k) => checkboxFilterActive(ct.checkboxFilters[k])).length
+    : 0;
   const activeColumnFilterCount = ct ? Object.values(ct.columnFilters || {}).filter(Boolean).length : 0;
   const activeDateFilterCount = ct ? Object.keys(ct.dateRangeFilters || {}).length : 0;
   const activeAdvFilterCount = ct?.advancedFilters?.length || 0;
@@ -2482,7 +3254,7 @@ export default function App() {
     <div onContextMenu={(e) => e.preventDefault()}
       onDragOver={(e) => { if (!e.dataTransfer.types.includes("Files")) return; e.preventDefault(); e.dataTransfer.dropEffect = "copy"; setDragOver(true); }}
       onDragLeave={(e) => { if (e.currentTarget.contains(e.relatedTarget)) return; setDragOver(false); }}
-      onDrop={(e) => { if (!e.dataTransfer.types.includes("Files")) return; e.preventDefault(); setDragOver(false); const files = [...e.dataTransfer.files]; if (files.length > 0 && tle) { const paths = files.map((f) => tle.getPathForFile(f)).filter(Boolean); if (paths.length > 0) tle.importFiles(paths); } }}
+      onDrop={(e) => { if (!e.dataTransfer.types.includes("Files")) return; e.preventDefault(); setDragOver(false); const files = [...e.dataTransfer.files]; if (files.length > 0 && tle) { const paths = files.map((f) => tle.getPathForFile(f)).filter(Boolean); if (paths.length > 0) runImportPaths(paths); } }}
       style={{ display: "flex", flexDirection: "column", height: "100vh", background: th.bg, color: th.text, fontFamily: "'SF Mono','Fira Code',Menlo,monospace", fontSize: fontSize, overflow: "hidden" }}>
       <style>{`
         :root {
@@ -2522,6 +3294,58 @@ export default function App() {
         [role="tab"]:focus-visible,
         [role="checkbox"]:focus-visible,
         [tabindex]:not([tabindex="-1"]):focus-visible { box-shadow: 0 0 0 2px ${th.accent}cc; border-radius: 4px; }
+        .tle-settings-toggle,
+        .tle-status-toggle { display: none !important; }
+        @media (max-width: 1200px) {
+          .tle-menubar-shell { gap: 6px !important; }
+          .tle-menubar-left { min-width: 0; }
+          .tle-toolbar-settings { display: none !important; }
+          .tle-toolbar-settings[data-open="true"] {
+            display: flex !important;
+            position: absolute;
+            top: calc(100% + 4px);
+            right: 12px;
+            z-index: 170;
+            padding: 7px 8px !important;
+            box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+          }
+          .tle-settings-backdrop { display: block !important; }
+          .tle-settings-toggle { display: inline-flex !important; }
+          .tle-status-details { display: none !important; }
+          .tle-status-details[data-open="true"] {
+            display: flex !important;
+            position: absolute;
+            right: 8px;
+            bottom: calc(100% + 5px);
+            z-index: 170;
+            max-width: calc(100vw - 16px);
+            flex-wrap: wrap;
+            padding: 8px 10px;
+            background: ${th.modalBg}f2;
+            border: 1px solid ${th.glassBorder};
+            border-radius: 8px;
+            box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+          }
+          .tle-status-toggle { display: inline-flex !important; }
+          .tle-status-path { max-width: 260px !important; }
+        }
+        @media (max-width: 900px) {
+          .tle-menubar-shell { flex-wrap: wrap; }
+          .tle-search-slot {
+            order: 3;
+            flex: 1 0 100% !important;
+            max-width: none !important;
+          }
+          .tle-search-slot > * { max-width: none !important; }
+          .tle-indexing-indicator { margin-left: auto; }
+          .tle-status-path { max-width: 150px !important; }
+          .tle-search-options { gap: 6px 10px !important; }
+          .tle-search-condition-options {
+            flex: 1 1 100%;
+            overflow-x: auto;
+            padding-bottom: 2px;
+          }
+        }
         /* Respect the OS "reduce motion" setting — kill modal/toast/spin/pulse animations. */
         @media (prefers-reduced-motion: reduce) {
           *, *::before, *::after {
@@ -2545,24 +3369,28 @@ export default function App() {
       )}
 
       {/* ── MenuBar + FilterBar ──────────────────────────────────── */}
-      <MenuBar
-        th={th} ct={ct} tabs={tabs} tle={tle}
-        handleExport={handleExport} handleSaveSession={handleSaveSession} handleLoadSession={handleLoadSession}
-        handleCheckForUpdates={handleCheckForUpdates} handleExtractResident={handleExtractResident}
-        closeTab={closeTab} resetColumnWidths={resetColumnWidths} up={up} activeFilters={activeFilters}
-        selectedRows={selectedRows} selectedRowData={selectedRowData} isGrouped={isGrouped}
-        displayRows={displayRows} getRowAt={getRowAt}
-        proximityFilter={proximityFilter} setProximityFilter={setProximityFilter}
-        searchLoading={searchLoading} checkingForUpdates={checkingForUpdates} extracting={extracting}
-        recentFiles={recentFiles} setRecentFiles={setRecentFiles}
-        copiedMsg={copiedMsg} setCopiedMsg={setCopiedMsg}
-        setColMgrSearch={setColMgrSearch}
-        searchBar={
-          <FilterBar th={th} ct={ct} up={up} isGrouped={isGrouped}
-            searchLoading={searchLoading} searchMatchIdx={searchMatchIdx}
-            hlMatchIndices={hlMatchIndices} navigateSearch={navigateSearch} />
-        }
-      />
+      <Suspense fallback={<ShellChunkFallback th={th} />}>
+        <MenuBar
+          th={th} ct={ct} tabs={tabs} tle={tle}
+          handleExport={handleExport} handleSaveSession={handleSaveSession} handleLoadSession={handleLoadSession}
+          handleCheckForUpdates={handleCheckForUpdates} handleExtractResident={handleExtractResident}
+          closeTab={closeTab} resetColumnWidths={resetColumnWidths} up={up} activeFilters={activeFilters}
+          allFilteredRowsSelected={allFilteredRowsSelected} selectedRowData={selectedRowData} isGrouped={isGrouped}
+          handleSelectAllRows={handleSelectAllRows}
+          proximityFilter={proximityFilter} setProximityFilter={setProximityFilter}
+          searchLoading={searchLoading} checkingForUpdates={checkingForUpdates} extracting={extracting}
+          recentFiles={recentFiles} setRecentFiles={setRecentFiles}
+          copiedMsg={copiedMsg} setCopiedMsg={setCopiedMsg}
+          setColMgrSearch={setColMgrSearch}
+          searchBar={
+            <FilterBar th={th} ct={ct} up={up} isGrouped={isGrouped}
+              searchLoading={searchLoading} searchMatchIdx={searchMatchIdx}
+              searchMatchPosition={searchMatchPosition}
+              highlightMatchCount={highlightMatchCount}
+              navigateSearch={navigateSearch} />
+          }
+        />
+      </Suspense>
       <SearchOptionsBar th={th} ct={ct} up={up} />
 
 
@@ -2587,8 +3415,10 @@ export default function App() {
       {/* ── TabBar ────────────────────────────────────────────── */}
       <TabBar
         th={th}
-        scrollTop={scrollTop} selectedRows={selectedRows} lastClickedRow={lastClickedRow}
-        setScrollTop={setScrollTop} setSelectedRows={setSelectedRows} setLastClickedRow={setLastClickedRow}
+        scrollTop={scrollTop} selectedRows={selectedRows} allRowsSelected={allRowsSelected}
+        selectionTabId={selectionTabId} selectAllScopeSignature={selectAllScopeSignature} lastClickedRow={lastClickedRow}
+        setScrollTop={setScrollTop} setSelectedRows={setSelectedRows} setAllRowsSelected={setAllRowsSelected}
+        setSelectionTabId={setSelectionTabId} setSelectAllScopeSignature={setSelectAllScopeSignature} setLastClickedRow={setLastClickedRow}
         setProximityFilter={setProximityFilter} scrollRef={scrollRef} closeTab={closeTab}
       />
 
@@ -2652,65 +3482,86 @@ export default function App() {
         </div>
       )}
 
-      {/* ── VirtualGrid (histogram + grid + detail panel) ──────── */}
-      <VirtualGrid
-        th={th} ct={ct} tle={tle} up={up} tabs={tabs}
-        isGrouped={isGrouped} isImporting={isImporting} importingTabs={importingTabs} importQueue={importQueue}
-        displayRows={displayRows} rows={rows} visible={visible} skeletonIndices={skeletonIndices}
-        totalCount={totalCount} totalH={totalH} physicalH={physicalH} pageOffset={pageOffset} si={si} tw={tw} rowOffset={rowOffset}
-        allVisH={allVisH} pinnedH={pinnedH} scrollH={scrollH} pinnedOffsets={pinnedOffsets}
-        selectedRows={selectedRows} setSelectedRows={setSelectedRows}
-        lastClickedRow={lastClickedRow} setLastClickedRow={setLastClickedRow}
-        selectedColumn={selectedColumn} setSelectedColumn={setSelectedColumn}
-        selectedRow={selectedRow} selectedRowData={selectedRowData} detailVisible={detailVisible}
-        compiledColors={compiledColors}
-        handleScroll={handleScroll} scrollRef={scrollRef}
-        handleSort={handleSort} handleHeaderDblClick={handleHeaderDblClick}
-        handleBookmark={handleBookmark}
-        handleRowClick={handleRowClick} handleCheckboxToggle={handleCheckboxToggle}
-        openGridContextMenu={handleNativeRightClick}
-        handleGroupSelectAll={handleGroupSelectAll} getGroupCheckState={getGroupCheckState}
-        expandGroup={expandGroup} collapseGroup={collapseGroup}
-        loadMoreGroupRows={loadMoreGroupRows} getRowAt={getRowAt}
-        pinColumn={pinColumn} unpinColumn={unpinColumn}
-        addGroupBy={addGroupBy} removeGroupBy={removeGroupBy}
-        reorderColumn={reorderColumn} autoFitColumn={autoFitColumn}
-        onDetailResizeStart={onDetailResizeStart} onHistResizeStart={onHistResizeStart}
-        copyCell={copyCell}
-        renderCell={renderCell} fmtCell={fmtCell} gw={gw} getRowBg={getRowBg}
-        filterDropdown={filterDropdown} setFilterDropdown={setFilterDropdown}
-        dateRangeDropdown={dateRangeDropdown} setDateRangeDropdown={setDateRangeDropdown}
-        contextMenu={contextMenu} setContextMenu={setContextMenu}
-        cellContextMenu={cellContextMenu} setCellContextMenu={setCellContextMenu}
-        rowContextMenu={rowContextMenu} setRowContextMenu={setRowContextMenu}
-        cellPopup={cellPopup} setCellPopup={setCellPopup}
-        headerDragOver={headerDragOver} setHeaderDragOver={setHeaderDragOver}
-        resizingCol={resizingCol} setResizingCol={setResizingCol}
-        resizeX={resizeX} setResizeX={setResizeX}
-        resizeW={resizeW} setResizeW={setResizeW}
-        tagColWidth={tagColWidth} setTagColWidth={setTagColWidth}
-        searchMatchIdx={searchMatchIdx} hlMatchIndices={hlMatchIndices}
-        histogramVisible={histogramVisible} histogramCol={histogramCol} setHistogramCol={setHistogramCol}
-        histogramData={histogramData} histogramLoaded={histogramLoaded}
-        histContainerRef={histContainerRef} histContainerWidth={histContainerWidth}
-        histBrushRef={histBrushRef} histSvgRectRef={histSvgRectRef}
-        histBrushOverlayRef={histBrushOverlayRef} histBrushLabelRef={histBrushLabelRef}
-        histBarGeomRef={histBarGeomRef}
-        extracting={extracting} extractProgress={extractProgress}
-        detailPanelRef={detailPanelRef} detailPanelHeight={detailPanelHeight}
-        ImportProgress={ImportProgress}
-        sortTimerRef={sortTimerRef} justResizedRef={justResizedRef}
-        searchLoading={searchLoading} fontSize={fontSize}
+      <SelectionBar
+        th={th}
+        selectionCount={selectionCount}
+        hiddenSelectionCount={hiddenSelectionCount}
+        allRowsSelected={allRowsSelected}
+        onCopy={() => { void copySelectedRows(); }}
+        onBulkActions={() => setModal({
+          type: "bulkActions",
+          scope: "selection",
+          selectionFilterOptions,
+          selectionCount,
+        })}
+        onClear={clearRowSelection}
       />
+
+      {/* ── VirtualGrid (histogram + grid + detail panel) ──────── */}
+      <Suspense fallback={<Loading label="Loading grid…" size="md" />}>
+        <VirtualGrid
+          th={th} ct={ct} tle={tle} up={up} tabs={tabs}
+          isGrouped={isGrouped} isImporting={isImporting} importingTabs={importingTabs} importQueue={importQueue}
+          displayRows={displayRows} rows={rows} visible={visible} skeletonIndices={skeletonIndices}
+          totalCount={totalCount} totalH={totalH} physicalH={physicalH} pageOffset={pageOffset} si={si} tw={tw} rowOffset={rowOffset}
+          allVisH={allVisH} pinnedH={pinnedH} scrollH={scrollH} pinnedOffsets={pinnedOffsets}
+          selectedRows={selectedRows} allRowsSelected={allRowsSelected} selectionCount={selectionCount}
+          lastClickedRow={lastClickedRow} setLastClickedRow={setLastClickedRow}
+          selectedColumn={selectedColumn} setSelectedColumn={setSelectedColumn}
+          selectedRow={selectedRow} selectedRowData={selectedRowData} detailVisible={detailVisible}
+          compiledColors={compiledColors}
+          handleScroll={handleScroll} scrollRef={scrollRef}
+          handleSort={handleSort} handleHeaderDblClick={handleHeaderDblClick}
+          handleBookmark={handleBookmark}
+          handleRowClick={handleRowClick} handleCheckboxToggle={handleCheckboxToggle}
+          handleSelectAllRows={handleSelectAllRows}
+          openGridContextMenu={handleNativeRightClick}
+          handleGroupSelectAll={handleGroupSelectAll} getGroupCheckState={getGroupCheckState}
+          expandGroup={expandGroup} collapseGroup={collapseGroup}
+          loadMoreGroupRows={loadMoreGroupRows} getRowAt={getRowAt}
+          pinColumn={pinColumn} unpinColumn={unpinColumn}
+          addGroupBy={addGroupBy} removeGroupBy={removeGroupBy}
+          reorderColumn={reorderColumn} autoFitColumn={autoFitColumn}
+          onDetailResizeStart={onDetailResizeStart} onHistResizeStart={onHistResizeStart}
+          copyCell={copyCell}
+          renderCell={renderCell} fmtCell={fmtCell} gw={gw} getRowBg={getRowBg}
+          filterDropdown={filterDropdown} setFilterDropdown={setFilterDropdown}
+          dateRangeDropdown={dateRangeDropdown} setDateRangeDropdown={setDateRangeDropdown}
+          contextMenu={contextMenu} setContextMenu={setContextMenu}
+          cellContextMenu={cellContextMenu} setCellContextMenu={setCellContextMenu}
+          rowContextMenu={rowContextMenu} setRowContextMenu={setRowContextMenu}
+          cellPopup={cellPopup} setCellPopup={setCellPopup}
+          headerDragOver={headerDragOver} setHeaderDragOver={setHeaderDragOver}
+          resizingCol={resizingCol} setResizingCol={setResizingCol}
+          resizeX={resizeX} setResizeX={setResizeX}
+          resizeW={resizeW} setResizeW={setResizeW}
+          tagColWidth={tagColWidth} setTagColWidth={setTagColWidth}
+          histogramVisible={histogramVisible} histogramCol={histogramCol} setHistogramCol={setHistogramCol}
+          histogramData={histogramData} histogramLoaded={histogramLoaded}
+          histContainerRef={histContainerRef} histContainerWidth={histContainerWidth}
+          histBrushRef={histBrushRef} histSvgRectRef={histSvgRectRef}
+          histBrushOverlayRef={histBrushOverlayRef} histBrushLabelRef={histBrushLabelRef}
+          histBarGeomRef={histBarGeomRef}
+          extracting={extracting} extractProgress={extractProgress}
+          detailPanelRef={detailPanelRef} detailPanelHeight={detailPanelHeight}
+          onFilterToSession={isAiHistorySourceFormat(ct?.sourceFormat) ? filterToAiSession : undefined}
+          onCorrelateWorkspace={isAiHistorySourceFormat(ct?.sourceFormat) ? correlateAiWorkspace : undefined}
+          ImportProgress={ImportProgress}
+          sortTimerRef={sortTimerRef} justResizedRef={justResizedRef}
+          searchLoading={searchLoading} fontSize={fontSize}
+        />
+      </Suspense>
 
 
       {/* ── StatusBar ─────────────────────────────────────────── */}
       <StatusBar
         th={th} ct={ct} isGrouped={isGrouped}
-        selectedRows={selectedRows} lastClickedRow={lastClickedRow}
+        selectionCount={selectionCount}
         copiedMsg={copiedMsg} setCopiedMsg={setCopiedMsg}
         pinnedH={pinnedH} allVisH={allVisH}
-        searchLoading={searchLoading} searchElapsed={searchElapsed} activeCheckboxCount={activeCheckboxCount}
+        searchLoading={searchLoading} searchElapsed={searchElapsed}
+        visibleRowStart={visibleRowStart} visibleRowEnd={visibleRowEnd}
+        activeCheckboxCount={activeCheckboxCount}
         totalActiveFilters={totalActiveFilters} clearAllFilters={clearAllFilters} up={up}
       />
 
@@ -2821,16 +3672,18 @@ export default function App() {
       })()}
 
       {/* Modals */}
-      {/* Stacking / Value Frequency Analysis */}
-      {modal?.type === "stacking" && ct && <StackingModal />}
-      {/* Column Stats Modal */}
-      {modal?.type === "columnStats" && ct && <ColumnStatsModal />}
-      {/* Filter Presets Modal */}
-      {modal?.type === "presets" && ct && <PresetsModal />}
-      {modal?.type === "colors" && ct && <ColorModal th={th} ct={ct} up={up} ms={ms} />}
-      {modal?.type === "columns" && ct && <ColModal th={th} ct={ct} up={up} ms={ms} colMgrSearch={colMgrSearch} setColMgrSearch={setColMgrSearch} colMgrDragOver={colMgrDragOver} setColMgrDragOver={setColMgrDragOver} />}
-      {modal?.type === "shortcuts" && <ShortModal th={th} ms={ms} />}
-      {modal?.type === "quickHelp" && <QuickHelpModal />}
+      <Suspense fallback={<ModalChunkFallback th={th} />}>
+        {/* Stacking / Value Frequency Analysis */}
+        {modal?.type === "stacking" && ct && <StackingModal />}
+        {/* Column Stats Modal */}
+        {modal?.type === "columnStats" && ct && <ColumnStatsModal />}
+        {/* Filter Presets Modal */}
+        {modal?.type === "presets" && ct && <PresetsModal />}
+        {modal?.type === "colors" && ct && <ColorModal th={th} ct={ct} up={up} ms={ms} />}
+        {modal?.type === "columns" && ct && <ColModal th={th} ct={ct} up={up} ms={ms} colMgrSearch={colMgrSearch} setColMgrSearch={setColMgrSearch} colMgrDragOver={colMgrDragOver} setColMgrDragOver={setColMgrDragOver} />}
+        {modal?.type === "shortcuts" && <ShortModal th={th} ms={ms} />}
+        {modal?.type === "quickHelp" && <QuickHelpModal />}
+      </Suspense>
       {modal?.type === "about" && (
         <Overlay th={th}>
           <div style={{ textAlign: "center" }}>
@@ -2839,13 +3692,13 @@ export default function App() {
             <div style={{ fontSize: 12, color: th.textMuted, marginBottom: 16, fontFamily: "-apple-system, sans-serif" }}>Version {APP_VERSION}</div>
             <div style={{ textAlign: "left", background: th.bgAlt, borderRadius: 8, padding: 16, marginBottom: 16 }}>
               <p style={{ margin: "0 0 8px", fontSize: 12, color: th.text, lineHeight: 1.6, fontFamily: "-apple-system, sans-serif" }}>
-                A high-performance native macOS timeline tool for DFIR — ingests millions of rows from CSV, XLSX, EVTX, Plaso, raw $MFT, and $J ($UsnJrnl) on a SQLite engine.
+                {APP_DESCRIPTION}
               </p>
               <p style={{ margin: "0 0 8px", fontSize: 12, color: th.text, lineHeight: 1.6, fontFamily: "-apple-system, sans-serif" }}>
-                Built-in threat detection: dual-engine Sigma (Hayabusa + in-app JS), process tree analysis with 340+ MITRE ATT&CK rules, lateral movement tracking, persistence detection, and ransomware/NTFS analytics.
+                Native ingestion covers CSV, TSV, XLS/XLSX, EVTX, Plaso, raw $MFT and $UsnJrnl, plus prompts, responses, tool calls, shell commands, and bounded tool output from supported AI assistants.
               </p>
               <p style={{ margin: 0, fontSize: 12, color: th.text, lineHeight: 1.6, fontFamily: "-apple-system, sans-serif" }}>
-                A modern replacement for Windows-only forensic viewers — with IOC matching, VirusTotal enrichment, RDP bitmap cache recovery, tagging, and one-click HTML reports.
+                Built-in investigation includes Sigma and Hayabusa detection, process trees, lateral movement, persistence, ransomware and NTFS analytics, AI secret exposure hunting, IOC and VirusTotal enrichment, RDP bitmap recovery, tagging, and reporting.
               </p>
             </div>
             <div style={{ marginBottom: 16 }}>
@@ -3029,16 +3882,25 @@ export default function App() {
         const handleFindDuplicates = async () => {
           setModal((p) => ({ ...p, loading: true, result: null }));
           const af = activeFilters(ct);
-          const values = await tle.getColumnUniqueValues(ct.id, selCol, {
-            searchTerm: ct.searchHighlight ? "" : ct.searchTerm, searchMode: ct.searchMode, searchCondition: ct.searchCondition || "contains",
+          const uniqueResult = await tle.getColumnUniqueValues(ct.id, selCol, {
+            searchTerm: effectiveSearchTerm(ct.searchHighlight ? "" : ct.searchTerm), searchMode: ct.searchMode, searchCondition: ct.searchCondition || "contains",
             columnFilters: af.columnFilters, checkboxFilters: af.checkboxFilters,
             bookmarkedOnly: ct.showBookmarkedOnly, limit: 50000,
             tagFilter: (ct.disabledFilters || new Set()).has("__tags__") ? null : (ct.tagFilter || null),
             rowIdFilter: ct.rowIdFilter || null,
             dateRangeFilters: ct.dateRangeFilters || {}, advancedFilters: ct.advancedFilters || [],
           });
+          const values = Array.isArray(uniqueResult) ? uniqueResult : (uniqueResult?.values || []);
           const dupes = values.filter((v) => v.cnt > 1);
-          setModal((p) => ({ ...p, loading: false, result: { dupes, totalValues: values.length } }));
+          setModal((p) => ({
+            ...p,
+            loading: false,
+            result: {
+              dupes,
+              totalValues: Number(uniqueResult?.totalDistinct || values.length),
+              truncated: Boolean(uniqueResult?.truncated),
+            },
+          }));
         };
         return (
           <Overlay th={th}>
@@ -3056,6 +3918,11 @@ export default function App() {
             </div>
             {result && (
               <div style={{ background: th.bgAlt, border: `1px solid ${th.border}`, borderRadius: 6, padding: "10px 12px", marginBottom: 12 }}>
+                {result.truncated && (
+                  <div role="status" style={{ fontSize: 11, color: th.warning, marginBottom: 8 }}>
+                    Showing results from the top 50,000 of {formatNumber(result.totalValues)} distinct values. Narrow the timeline before treating this as exhaustive.
+                  </div>
+                )}
                 {result.dupes.length > 0 ? (<>
                   <div style={{ fontSize: 12, color: th.text, marginBottom: 6 }}>
                     Found <b style={{ color: th.accent }}>{result.dupes.length}</b> values with duplicates
@@ -3091,11 +3958,13 @@ export default function App() {
         );
       })()}
 
-      {/* Known-Bad IOC Matching Modal */}
-      {modal?.type === "ioc" && ct && <IocModal />}
+      <Suspense fallback={<ModalChunkFallback th={th} />}>
+        {/* Known-Bad IOC Matching Modal */}
+        {modal?.type === "ioc" && ct && <IocModal />}
 
-      {/* Gap Analysis Modal */}
-      {modal?.type === "gapAnalysis" && ct && <GapAnalysisModal />}
+        {/* Gap Analysis Modal */}
+        {modal?.type === "gapAnalysis" && ct && <GapAnalysisModal />}
+      </Suspense>
 
       {/* Cell Detail Popup */}
       {cellPopup && (() => {
@@ -3122,7 +3991,7 @@ export default function App() {
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "12px 16px", borderBottom: `1px solid ${th.border}` }}>
               <span style={{ color: th.textDim, fontSize: 12, fontWeight: 600 }}>{cellPopup.column}</span>
               <div style={{ display: "flex", gap: 6 }}>
-                <button onClick={() => copyCell(cellPopup.value)} style={{ background: th.btnBg, border: `1px solid ${th.btnBorder}`, borderRadius: 6, color: th.text, fontSize: 11, padding: "4px 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
+                <button onClick={() => copyCell(cellPopup.value, cellPopup.column)} style={{ background: th.btnBg, border: `1px solid ${th.btnBorder}`, borderRadius: 6, color: th.text, fontSize: 11, padding: "4px 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 4 }}>
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
                   Copy
                 </button>
@@ -3130,7 +3999,7 @@ export default function App() {
               </div>
             </div>
             <div style={{ padding: "16px", overflow: "auto", maxHeight: "calc(80vh - 50px)" }}>
-              <pre style={{ color: th.text, fontSize: 12, fontFamily: "'SF Mono', Menlo, monospace", whiteSpace: "pre-wrap", wordBreak: "break-all", margin: 0, lineHeight: 1.5 }}>{cpVal || <span style={{ color: th.textMuted, fontStyle: "italic" }}>(empty)</span>}</pre>
+              <pre style={{ color: th.text, fontSize: 12, fontFamily: "'SF Mono', Menlo, monospace", whiteSpace: "pre-wrap", wordBreak: "break-all", margin: 0, lineHeight: 1.5 }}>{fmtCell(cellPopup.column, cpVal) || <span style={{ color: th.textMuted, fontStyle: "italic" }}>(empty)</span>}</pre>
               {/* Timestamp Converter */}
               {cpIsTs && (() => {
                 const epoch = Math.floor(cpDate.getTime() / 1000);
@@ -3205,8 +4074,8 @@ export default function App() {
       {/* Filter Dropdown */}
       {filterDropdown && (
         <>
-          <div onClick={() => setFilterDropdown(null)} style={{ position: "fixed", inset: 0, zIndex: 199 }} />
-          <div onClick={(e) => e.stopPropagation()} style={{ WebkitAppRegion: "no-drag", position: "fixed", left: filterDropdown.dx ?? Math.min(filterDropdown.x, window.innerWidth - 400), top: filterDropdown.dy ?? Math.min(filterDropdown.y, window.innerHeight - 440), width: 380, height: 420, minWidth: 260, minHeight: 200, maxWidth: "90vw", maxHeight: "90vh", background: th.modalBg + "f2", border: `1px solid ${th.glassBorder}`, borderRadius: 10, backdropFilter: "blur(20px) saturate(180%)", WebkitBackdropFilter: "blur(20px) saturate(180%)", boxShadow: "0 12px 40px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.04) inset", zIndex: 200, display: "flex", flexDirection: "column", overflow: "hidden", resize: "both", animation: "tle-modal-in var(--m-modal) var(--ease-out)" }}>
+          <div aria-hidden="true" onClick={() => setFilterDropdown(null)} style={{ position: "fixed", inset: 0, zIndex: 199 }} />
+          <div role="dialog" aria-modal="true" aria-label={`Filter values for ${filterDropdown.colName}`} onClick={(e) => e.stopPropagation()} style={{ WebkitAppRegion: "no-drag", position: "fixed", left: filterDropdown.dx ?? Math.min(filterDropdown.x, window.innerWidth - 400), top: filterDropdown.dy ?? Math.min(filterDropdown.y, window.innerHeight - 440), width: 380, height: 420, minWidth: 260, minHeight: 200, maxWidth: "90vw", maxHeight: "90vh", background: th.modalBg + "f2", border: `1px solid ${th.glassBorder}`, borderRadius: 10, backdropFilter: "blur(20px) saturate(180%)", WebkitBackdropFilter: "blur(20px) saturate(180%)", boxShadow: "0 12px 40px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.04) inset", zIndex: 200, display: "flex", flexDirection: "column", overflow: "hidden", resize: "both", animation: "tle-modal-in var(--m-modal) var(--ease-out)" }}>
             <div style={{ padding: "4px 8px", flexShrink: 0, display: "flex", alignItems: "center", gap: 6, borderBottom: `1px solid ${th.border}`, cursor: "grab", userSelect: "none" }}
               onMouseDown={(e) => {
                 if (e.button !== 0) return;
@@ -3224,8 +4093,8 @@ export default function App() {
                 document.addEventListener("mousemove", onMove);
                 document.addEventListener("mouseup", onUp, true);
               }}>
-              <span style={{ color: th.textDim, fontSize: 10, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "-apple-system, sans-serif", flex: 1 }}>Filter — {filterDropdown.colName === "__tags__" ? "Tags" : filterDropdown.colName === "__vt__" ? "VT Verdict" : filterDropdown.colName}</span>
-              <button onClick={() => setFilterDropdown(null)} style={{ background: "none", border: "none", color: th.textMuted, cursor: "pointer", fontSize: 13, padding: "0 2px", lineHeight: 1 }}>✕</button>
+              <span style={{ color: th.textDim, fontSize: 11, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "-apple-system, sans-serif", flex: 1 }}>Filter — {filterDropdown.colName === "__tags__" ? "Tags" : filterDropdown.colName === "__vt__" ? "VT Verdict" : filterDropdown.colName}</span>
+              <button aria-label="Close value filter" onClick={() => setFilterDropdown(null)} style={{ background: "none", border: "none", color: th.textMuted, cursor: "pointer", fontSize: 13, width: 26, height: 26, padding: 0, lineHeight: 1 }}>✕</button>
             </div>
             <div style={{ padding: "8px 8px 4px", flexShrink: 0, display: "flex", gap: 4 }}>
               <input value={fdSearch} onChange={(e) => setFdSearch(e.target.value)} placeholder={fdRegex ? "Regex pattern..." : "Search values..."} autoFocus
@@ -3237,7 +4106,13 @@ export default function App() {
               <button onClick={() => setFdSelected(new Set(fdValues.map((v) => v.val)))} style={ms.bsm}>Select All</button>
               <button onClick={() => setFdSelected(new Set())} style={ms.bsm}>Clear</button>
               <span style={{ flex: 1 }} />
-              <span style={{ color: th.textMuted, fontSize: 10, alignSelf: "center" }}>{fdValues.length} values</span>
+              <span role="status" style={{ color: fdValueMeta.truncated ? th.warning : th.textMuted, fontSize: 11, alignSelf: "center" }}>
+                {fdSampled
+                  ? `${formatNumber(fdValues.length)} sampled values`
+                  : fdValueMeta.truncated
+                  ? `Top ${formatNumber(fdValues.length)} of ${formatNumber(fdValueMeta.totalDistinct)}${fdSearch ? " — refine search" : " — search for more"}`
+                  : `${formatNumber(fdValueMeta.totalDistinct)} values`}
+              </span>
             </div>
             <div style={{ flex: 1, overflow: "auto", padding: "0 4px" }}>
               {fdLoading ? (
@@ -3248,7 +4123,7 @@ export default function App() {
                 fdValues.map((v) => (
                   <label key={v.val ?? "__empty"} style={{ display: "flex", alignItems: "center", gap: 6, padding: "3px 4px", cursor: "pointer", borderRadius: 3, fontSize: 11, color: th.text }}>
                     <input type="checkbox" checked={fdSelected.has(v.val)} onChange={() => { const s = new Set(fdSelected); s.has(v.val) ? s.delete(v.val) : s.add(v.val); setFdSelected(s); }}
-                      style={{ accentColor: th.borderAccent, flexShrink: 0 }} />
+                      style={{ accentColor: th.borderAccent, width: 18, height: 18, flexShrink: 0 }} />
                     <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{v.val || "(empty)"}</span>
                     <span style={{ color: th.textMuted, fontSize: 10, flexShrink: 0 }}>{formatNumber(v.cnt)}</span>
                   </label>
@@ -3261,7 +4136,7 @@ export default function App() {
                 const newCbf = { ...ct.checkboxFilters }; delete newCbf[filterDropdown.colName]; up("checkboxFilters", newCbf); setFilterDropdown(null);
               }} style={ms.bsm}>Reset</button>
               <button onClick={() => setFilterDropdown(null)} style={ms.bsm}>Cancel</button>
-              <button onClick={applyCheckboxFilter} style={{ padding: "3px 10px", background: th.primaryBtn, color: "#fff", border: "none", borderRadius: 4, fontSize: 10, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}>Apply</button>
+              <button onClick={applyCheckboxFilter} style={{ padding: "4px 11px", minHeight: 26, background: th.primaryBtn, color: "#fff", border: "none", borderRadius: 4, fontSize: 11, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}>Apply</button>
             </div>
           </div>
         </>
@@ -3270,16 +4145,16 @@ export default function App() {
       {/* Date Range Dropdown */}
       {dateRangeDropdown && (
         <>
-          <div onClick={() => setDateRangeDropdown(null)} style={{ position: "fixed", inset: 0, zIndex: 199 }} />
-          <div onClick={(e) => e.stopPropagation()} style={{ WebkitAppRegion: "no-drag", position: "fixed", left: Math.min(dateRangeDropdown.x, window.innerWidth - 300), top: Math.min(dateRangeDropdown.y, window.innerHeight - 220), width: 290, background: th.modalBg + "f2", border: `1px solid ${th.glassBorder}`, borderRadius: 10, backdropFilter: "blur(20px) saturate(180%)", WebkitBackdropFilter: "blur(20px) saturate(180%)", boxShadow: "0 12px 40px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.04) inset", zIndex: 200, padding: 12, animation: "tle-modal-in var(--m-modal) var(--ease-out)" }}>
-            <div style={{ color: th.textDim, fontSize: 10, marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "-apple-system, sans-serif" }}>Date Range — {dateRangeDropdown.colName}</div>
+          <div aria-hidden="true" onClick={() => setDateRangeDropdown(null)} style={{ position: "fixed", inset: 0, zIndex: 199 }} />
+          <div role="dialog" aria-modal="true" aria-label={`Date range for ${dateRangeDropdown.colName}`} onClick={(e) => e.stopPropagation()} style={{ WebkitAppRegion: "no-drag", position: "fixed", left: Math.min(dateRangeDropdown.x, window.innerWidth - 300), top: Math.min(dateRangeDropdown.y, window.innerHeight - 220), width: 290, background: th.modalBg + "f2", border: `1px solid ${th.glassBorder}`, borderRadius: 10, backdropFilter: "blur(20px) saturate(180%)", WebkitBackdropFilter: "blur(20px) saturate(180%)", boxShadow: "0 12px 40px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.04) inset", zIndex: 200, padding: 12, animation: "tle-modal-in var(--m-modal) var(--ease-out)" }}>
+            <div style={{ color: th.textDim, fontSize: 11, marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "-apple-system, sans-serif" }}>Date Range — {dateRangeDropdown.colName}</div>
             <div style={{ marginBottom: 8 }}>
-              <label style={{ display: "block", color: th.textMuted, fontSize: 10, marginBottom: 2, fontFamily: "-apple-system, sans-serif" }}>From</label>
+              <label style={{ display: "block", color: th.textMuted, fontSize: 11, marginBottom: 2, fontFamily: "-apple-system, sans-serif" }}>From</label>
               <input type="datetime-local" value={dateRangeDropdown.from} onChange={(e) => setDateRangeDropdown({ ...dateRangeDropdown, from: e.target.value })}
                 style={{ width: "100%", background: th.bgInput, border: `1px solid ${th.btnBorder}`, borderRadius: 4, color: th.text, fontSize: 11, padding: "4px 6px", outline: "none", fontFamily: "inherit", boxSizing: "border-box", colorScheme: themeName }} />
             </div>
             <div style={{ marginBottom: 10 }}>
-              <label style={{ display: "block", color: th.textMuted, fontSize: 10, marginBottom: 2, fontFamily: "-apple-system, sans-serif" }}>To</label>
+              <label style={{ display: "block", color: th.textMuted, fontSize: 11, marginBottom: 2, fontFamily: "-apple-system, sans-serif" }}>To</label>
               <input type="datetime-local" value={dateRangeDropdown.to} onChange={(e) => setDateRangeDropdown({ ...dateRangeDropdown, to: e.target.value })}
                 style={{ width: "100%", background: th.bgInput, border: `1px solid ${th.btnBorder}`, borderRadius: 4, color: th.text, fontSize: 11, padding: "4px 6px", outline: "none", fontFamily: "inherit", boxSizing: "border-box", colorScheme: themeName }} />
             </div>
@@ -3302,17 +4177,19 @@ export default function App() {
                 }
                 up("dateRangeFilters", newDrf);
                 setDateRangeDropdown(null);
-              }} style={{ padding: "3px 10px", background: th.primaryBtn, color: "#fff", border: "none", borderRadius: 4, fontSize: 10, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}>Apply</button>
+              }} style={{ padding: "4px 11px", minHeight: 26, background: th.primaryBtn, color: "#fff", border: "none", borderRadius: 4, fontSize: 11, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}>Apply</button>
             </div>
           </div>
         </>
       )}
 
-      {/* Log Source Coverage Map Modal */}
-      {modal?.type === "logSourceCoverage" && ct && <LogSourceCoverageModal />}
+      <Suspense fallback={<ModalChunkFallback th={th} />}>
+        {/* Log Source Coverage Map Modal */}
+        {modal?.type === "logSourceCoverage" && ct && <LogSourceCoverageModal />}
 
-      {/* Burst Detection Modal */}
-      {modal?.type === "burstAnalysis" && ct && <BurstAnalysisModal />}
+        {/* Burst Detection Modal */}
+        {modal?.type === "burstAnalysis" && ct && <BurstAnalysisModal />}
+      </Suspense>
 
       {/* Merge Tabs Modal */}
       {modal?.type === "mergeTabs" && (() => {
@@ -3385,11 +4262,19 @@ export default function App() {
         );
       })()}
 
-      {/* Edit Filter Modal */}
-      {modal?.type === "editFilter" && ct && <EditFilterModal />}
+      <Suspense fallback={<ModalChunkFallback th={th} />}>
+        {/* Edit Filter Modal */}
+        {modal?.type === "editFilter" && ct && <EditFilterModal />}
 
-      {/* Bulk Actions Modal */}
-      {modal?.type === "bulkActions" && ct && <BulkActionsModal fetchData={fetchData} />}
+        {/* Bulk Actions Modal */}
+        {modal?.type === "bulkActions" && ct && (
+          <BulkActionsModal
+            fetchData={fetchData}
+            selectionFilterOptions={selectionFilterOptions}
+            selectionCount={selectionCount}
+          />
+        )}
+      </Suspense>
 
       {/* Process Analyzer (provider + modal) */}
       <ProcessAnalyzerRoot activeFilters={activeFilters} />
@@ -3400,28 +4285,36 @@ export default function App() {
       {/* Themed toast notifications (replaces alert() and inline message flashes) */}
       <ToastContainer />
 
-      {/* Lateral Movement Modal */}
-      {modal?.type === "lateralMovement" && ct && <LateralMovementModal />}
+      <Suspense fallback={<ModalChunkFallback th={th} />}>
+        {/* Lateral Movement Modal */}
+        {modal?.type === "lateralMovement" && ct && <LateralMovementModal />}
+        {modal?.type === "triageCollection" && <TriageCollectionModal />}
 
-      {/* Persistence Analyzer Modal */}
-      {modal?.type === "persistence" && ct && <PersistenceModal />}
+        {/* Persistence Analyzer Modal */}
+        {modal?.type === "persistence" && ct && <PersistenceModal />}
 
-      {/* Ransomware MFT Analysis Modal */}
-      {modal?.type === "ransomware" && ct && <RansomwareModal />}
+        {/* Ransomware MFT Analysis Modal */}
+        {modal?.type === "ransomware" && ct && <RansomwareModal />}
 
-      {/* Timestomping Detector Modal */}
-      {modal?.type === "timestomping" && ct && <TimestompingModal />}
+        {/* Timestomping Detector Modal */}
+        {modal?.type === "timestomping" && ct && <TimestompingModal />}
 
-      {/* File Activity Heatmap Modal */}
-      {modal?.type === "heatmap" && ct && <HeatmapModal />}
-	      {modal?.type === "sigma" && <SigmaRuleModal />}
-	      {modal?.type === "rdpBitmapCache" && <RdpBitmapCacheModal />}
+        {/* File Activity Heatmap Modal */}
+        {modal?.type === "heatmap" && ct && <HeatmapModal />}
+        {modal?.type === "sigma" && <SigmaRuleModal />}
+        {modal?.type === "rdpBitmapCache" && <RdpBitmapCacheModal />}
+        {modal?.type === "aiHistoryProfileScan" && <AiHistoryProfileScanModal />}
+        {modal?.type === "aiHistoryExtract" && <AiHistoryExtractModal />}
+        {modal?.type === "aiWorkspaceCorrelate" && <AiWorkspaceCorrelateModal th={th} />}
+        {modal?.type === "aiHistoryScope" && <AiHistoryScopeModal />}
+        {modal?.type === "aiSecrets" && <AiSecretsModal th={th} />}
 
-      {/* ADS Analyzer Modal */}
-      {modal?.type === "ads" && ct && <AdsModal />}
+        {/* ADS Analyzer Modal */}
+        {modal?.type === "ads" && ct && <AdsModal />}
 
-      {/* USN Journal Analysis Modal */}
-      {modal?.type === "usnAnalysis" && ct && <UsnAnalysisModal />}
+        {/* USN Journal Analysis Modal */}
+        {modal?.type === "usnAnalysis" && ct && <UsnAnalysisModal />}
+      </Suspense>
 
       {/* Context Menu */}
       {contextMenu && renderContextPortal(
@@ -3469,7 +4362,7 @@ export default function App() {
                 setModal(openStackingModal(contextMenu.colName));
                 const af = activeFilters(ct);
                 tle.getStackingData(ct.id, contextMenu.colName, {
-                  searchTerm: ct.searchHighlight ? "" : ct.searchTerm, searchMode: ct.searchMode, searchCondition: ct.searchCondition || "contains",
+                  searchTerm: effectiveSearchTerm(ct.searchHighlight ? "" : ct.searchTerm), searchMode: ct.searchMode, searchCondition: ct.searchCondition || "contains",
                   columnFilters: af.columnFilters, checkboxFilters: af.checkboxFilters,
                   bookmarkedOnly: ct.showBookmarkedOnly,
                   tagFilter: (ct.disabledFilters || new Set()).has("__tags__") ? null : (ct.tagFilter || null),
@@ -3487,7 +4380,7 @@ export default function App() {
                 setModal(openColumnStatsModal(contextMenu.colName));
                 const af = activeFilters(ct);
                 tle.getColumnStats(ct.id, contextMenu.colName, {
-                  searchTerm: ct.searchHighlight ? "" : ct.searchTerm, searchMode: ct.searchMode, searchCondition: ct.searchCondition || "contains",
+                  searchTerm: effectiveSearchTerm(ct.searchHighlight ? "" : ct.searchTerm), searchMode: ct.searchMode, searchCondition: ct.searchCondition || "contains",
                   columnFilters: af.columnFilters, checkboxFilters: af.checkboxFilters,
                   bookmarkedOnly: ct.showBookmarkedOnly,
                   tagFilter: (ct.disabledFilters || new Set()).has("__tags__") ? null : (ct.tagFilter || null),
@@ -3522,7 +4415,7 @@ export default function App() {
           <div onMouseDown={(e) => { if (shouldCloseContextBackdrop(e)) setRowContextMenu(null); }} onContextMenu={(e) => { e.preventDefault(); }} style={{ position: "fixed", inset: 0, zIndex: 99998 }} />
           <div onMouseDown={(e) => e.stopPropagation()} onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }} style={{ position: "fixed", left: Math.min(rowContextMenu.x, window.innerWidth - 220), top: Math.min(rowContextMenu.y, window.innerHeight - 300), background: themeName === "dark" ? "rgba(28,31,36,0.97)" : "rgba(252,252,254,0.97)", backdropFilter: "blur(20px) saturate(180%)", WebkitBackdropFilter: "blur(20px) saturate(180%)", border: `1px solid ${themeName === "dark" ? "rgba(255,255,255,0.12)" : "rgba(0,0,0,0.12)"}`, borderRadius: 10, padding: "5px 0", zIndex: 99999, boxShadow: themeName === "dark" ? "0 12px 40px rgba(0,0,0,0.55), 0 0 0 0.5px rgba(255,255,255,0.06) inset" : "0 12px 40px rgba(0,0,0,0.18), 0 0 0 0.5px rgba(255,255,255,0.5) inset", minWidth: 200, animation: "tle-modal-in var(--m-fast) var(--ease-out)" }}>
             {rowContextMenu.cellColumn && (
-              <button onClick={() => { copyCell(rowContextMenu.cellValue); setRowContextMenu(null); }}
+              <button onClick={() => { copyCell(rowContextMenu.cellValue, rowContextMenu.cellColumn); setRowContextMenu(null); }}
                 onMouseEnter={(e) => { e.currentTarget.style.background = `${th.accent}22`; }}
                 onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
                 style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "6px 14px", background: "none", border: "none", color: th.text, fontSize: 12, cursor: "pointer", textAlign: "left", fontFamily: "-apple-system, BlinkMacSystemFont, sans-serif", borderRadius: 6, margin: "0 4px", maxWidth: "calc(100% - 8px)" }}>
@@ -3530,10 +4423,23 @@ export default function App() {
                 Copy Cell <span style={{ color: th.textMuted, fontSize: 10, marginLeft: "auto", maxWidth: 80, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{rowContextMenu.cellColumn}</span>
               </button>
             )}
+            {selectionCount > 1 && (
+              <button onClick={() => {
+                setRowContextMenu(null);
+                void copySelectedRows();
+              }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = `${th.accent}22`; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
+                style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "6px 14px", background: "none", border: "none", color: th.text, fontSize: 12, cursor: "pointer", textAlign: "left", fontFamily: "-apple-system, BlinkMacSystemFont, sans-serif", borderRadius: 6, margin: "0 4px", maxWidth: "calc(100% - 8px)" }}>
+                <span style={{ width: 16, textAlign: "center", fontSize: 11 }}>📑</span>
+                Copy Selected Rows
+                <span style={{ color: th.textMuted, fontSize: 10, marginLeft: "auto" }}>{formatNumber(selectionCount)}</span>
+              </button>
+            )}
             <button onClick={() => {
               if (rowContextMenu.row && ct) {
                 const hdrs = ct.headers.filter((h) => !ct.hiddenColumns?.has(h));
-                const line = hdrs.map((h) => (rowContextMenu.row[h] || "").replace(/\t/g, " ")).join("\t");
+                const line = hdrs.map((h) => fmtCell(h, rowContextMenu.row[h] || "").replace(/\t/g, " ")).join("\t");
                 navigator.clipboard?.writeText(hdrs.join("\t") + "\n" + line);
                 setCopiedMsg(true); setTimeout(() => setCopiedMsg(false), 1200);
               }
@@ -3543,7 +4449,7 @@ export default function App() {
               onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
               style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "6px 14px", background: "none", border: "none", color: th.text, fontSize: 12, cursor: "pointer", textAlign: "left", fontFamily: "-apple-system, BlinkMacSystemFont, sans-serif", borderRadius: 6, margin: "0 4px", maxWidth: "calc(100% - 8px)" }}>
               <span style={{ width: 16, textAlign: "center", fontSize: 11 }}>📄</span>
-              Copy Row
+              {selectionCount > 1 ? "Copy This Row" : "Copy Row"}
             </button>
             {/* Filter in / Filter out */}
             {rowContextMenu.cellColumn && (
@@ -3586,6 +4492,9 @@ export default function App() {
             {/* Tags — collapsible submenu */}
             {(() => {
               const tagEntries = Object.entries(ct?.tagColors || {});
+              const hasExplicitMultiSelection = !allRowsSelected
+                && selectionCount > 1
+                && selectedRows.has(Number(rowContextMenu.rowId));
               return (
                 <div style={{ position: "relative" }}
                   onMouseEnter={(e) => { const sub = e.currentTarget.querySelector("[data-tag-sub]"); if (sub) sub.style.display = "block"; }}
@@ -3595,7 +4504,7 @@ export default function App() {
                     onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
                     style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "6px 14px", background: "none", border: "none", color: th.text, fontSize: 12, cursor: "pointer", textAlign: "left", fontFamily: "-apple-system, BlinkMacSystemFont, sans-serif", borderRadius: 6, margin: "0 4px", maxWidth: "calc(100% - 8px)" }}>
                     <span style={{ width: 16, textAlign: "center", fontSize: 11 }}>🏷</span>
-                    Tags{selectedRows.size > 1 && selectedRows.has(rowContextMenu.rowIndex) ? ` (${selectedRows.size} rows)` : ""}
+                    Tags{hasExplicitMultiSelection ? ` (${selectionCount} rows)` : ""}
                     <span style={{ marginLeft: "auto", color: th.textMuted, fontSize: 11 }}>▸</span>
                   </button>
                   {/* Tags submenu */}
@@ -3606,12 +4515,8 @@ export default function App() {
                         <button key={tag} onClick={async () => {
                           // Collect target row IDs — all selected rows if multi-selected, otherwise just the clicked row
                           const targetIds = [];
-                          if (selectedRows.size > 1 && selectedRows.has(rowContextMenu.rowIndex)) {
-                            for (const ai of selectedRows) {
-                              const item = getRowAt(ai);
-                              const r = isGrouped ? (item?.type === "row" ? item.data : null) : item;
-                              if (r && r.__idx) targetIds.push(r.__idx);
-                            }
+                          if (hasExplicitMultiSelection) {
+                            targetIds.push(...selectedRows);
                           } else {
                             targetIds.push(rowContextMenu.rowId);
                           }

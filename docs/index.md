@@ -20,7 +20,7 @@ features:
     details: SQLite engine with sub-100ms queries on 10M+ rows. Streams 30GB+ files with zero-copy CSV parsing, memory-capped background indexing, and single-query analytics — no loading into memory.
   - icon: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#E85D2A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4"/><path d="M12 17v4"/><path d="M3 12h4"/><path d="M17 12h4"/><rect x="7" y="7" width="10" height="10" rx="2" fill="rgba(232,93,42,0.18)"/><path d="M10 11h4M10 14h2"/></svg>'
     title: AI Artifacts
-    details: Scan local AI history from ChatGPT Desktop, Claude Code, Codex, Cursor, Copilot, Gemini CLI, Windsurf, and Continue. Preserve prompts, responses, tool calls, workspaces, and secret exposure evidence.
+    details: Scan local AI history from ChatGPT Desktop, Claude Code, Codex, Grok Build, Cursor, Copilot, Gemini CLI, Windsurf, and Continue. Preserve prompts, responses, tool calls, workspaces, and secret exposure evidence.
   - icon: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#E85D2A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/><line x1="11" y1="8" x2="11" y2="14"/></svg>'
     title: 5 Search Modes
     details: Mixed, FTS, LIKE, Fuzzy, and Regex. Full-text search, substring matching, typo-tolerant fuzzy, and pattern matching across millions of rows.

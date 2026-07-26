@@ -3,7 +3,7 @@ import useTheme from "../hooks/useTheme.js";
 export const BkmkIcon = ({ filled }) => {
   const { th } = useTheme();
   return (
-    <svg width="12" height="12" viewBox="0 0 24 24" fill={filled ? th.sev.med : "none"} stroke={filled ? th.sev.med : th.textMuted} strokeWidth="2">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill={filled ? th.sev.med : "none"} stroke={filled ? th.sev.med : th.textMuted} strokeWidth="2">
       <path d="M19 21l-7-5-7 5V5a2 2 0 0 1 2-2h10a2 2 0 0 1 2 2z" />
     </svg>
   );
@@ -12,7 +12,7 @@ export const BkmkIcon = ({ filled }) => {
 export const CheckboxIcon = ({ checked, indeterminate }) => {
   const { th } = useTheme();
   return (
-    <svg width="13" height="13" viewBox="0 0 16 16" style={{ verticalAlign: "middle" }}>
+    <svg width="18" height="18" viewBox="0 0 16 16" style={{ verticalAlign: "middle" }}>
       <rect x="1" y="1" width="14" height="14" rx="2"
         fill={checked || indeterminate ? th.accent : "none"}
         stroke={checked || indeterminate ? th.accent : th.textMuted} strokeWidth="1.5" />

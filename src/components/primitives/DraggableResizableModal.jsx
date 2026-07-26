@@ -26,6 +26,7 @@ import Modal from "./Modal.jsx";
  *   minHeight      minimum height while resizing
  *   onClose        ESC / close-button handler
  *   closeOnOverlay default false (matches prior behaviour for analysis modals)
+ *   closeOnEscape  default true; set false for result modals that should not be lost on Esc
  *   zIndex         default 100
  *   children       function `({ startDrag }) => JSX` — or plain JSX (no drag handle)
  */
@@ -36,6 +37,7 @@ export default function DraggableResizableModal({
   minHeight = 280,
   onClose,
   closeOnOverlay = false,
+  closeOnEscape = true,
   zIndex = 100,
   ariaLabel = "Analysis dialog",
   ariaLabelledBy,
@@ -53,7 +55,8 @@ export default function DraggableResizableModal({
   });
 
   const startDrag = (e) => {
-    if (e.target.closest("button")) return;
+    if (e.button !== 0) return;
+    if (e.target?.closest?.("button,input,select,textarea,a,label,[role='button'],[data-no-drag='true']")) return;
     e.preventDefault();
     const sx = e.clientX - rect.x, sy = e.clientY - rect.y;
     const onMove = (ev) => setRect((r) => ({
@@ -61,7 +64,14 @@ export default function DraggableResizableModal({
       x: Math.max(0, Math.min(window.innerWidth - 100, ev.clientX - sx)),
       y: Math.max(0, Math.min(window.innerHeight - 40, ev.clientY - sy)),
     }));
-    const onUp = () => { window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
+    const onUp = () => {
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+    };
+    document.body.style.cursor = "grabbing";
+    document.body.style.userSelect = "none";
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
   };
@@ -88,7 +98,7 @@ export default function DraggableResizableModal({
   const edgeStyle = (cursor, pos) => ({ position: "absolute", ...pos, zIndex: 2, cursor });
 
   return (
-    <Modal bare onClose={onClose} closeOnOverlay={closeOnOverlay} zIndex={zIndex}>
+    <Modal bare onClose={onClose} closeOnOverlay={closeOnOverlay} closeOnEscape={closeOnEscape} zIndex={zIndex}>
       <div
         role="dialog"
         aria-modal="true"

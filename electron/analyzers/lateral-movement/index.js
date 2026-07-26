@@ -4,13 +4,15 @@ const { buildGraphAndChains } = require("./build-graph");
 const { detectCredentialAttacks } = require("./detectors/credential-attacks");
 const { createEvidenceHelpers } = require("./evidence");
 const { createTelemetryTracker } = require("./telemetry");
-const { correlateTriageAndCluster } = require("./processing/triage-and-clustering");
-const { clusterCampaignsAndEnrich } = require("./processing/campaign-clustering");
+const { correlateTriageAndCluster, buildFindingPairs, buildChainEdges } = require("./processing/triage-and-clustering");
+const { clusterCampaigns, enrichEdgesAndChains } = require("./processing/campaign-clustering");
 const { scoreRdpSessions } = require("./processing/rdp-scoring");
 const { aggregateAccounts } = require("./assemble/accounts");
 const { computeSysmonRdpAndCoverage } = require("./processing/sysmon-rdp-coverage");
 const { detectAdminShareAndExecution } = require("./detectors/admin-share-and-execution");
 const { runProcessServiceScan } = require("./detectors/process-service-scan");
+const { dbg } = require("../../logger");
+const { resolveSpineEventIds } = require("./detector-registry");
 const {
   EXCLUDED_IPS,
   SERVICE_RE,
@@ -44,7 +46,8 @@ function getLateralMovement(meta, options = {}, ctx) {
       userCol: userUserCol, logonTypeCol: userLogonTypeCol,
       eventIdCol: userEventIdCol, tsCol: userTsCol, domainCol: userDomainCol,
       syntheticTargetHost = "",
-      eventIds = ["4624","4625","4634","4647","4648","4672","4769","4771","4776","4778","4779","5140","5145","1149","20","21","22","23","24","25","32","33","34","35","39","40"],
+      eventIds: userEventIds,
+      extraEventIds = [],
       excludeLocalLogons = true,
       excludeServiceAccounts = true,
       maxRows = 500000,
@@ -55,6 +58,24 @@ function getLateralMovement(meta, options = {}, ctx) {
       requireMicrosoftSignature = false,
     } = options;
     const _disabledSet = new Set(disabledDetectors);
+
+    // Callers may still pin an explicit list (tests, restored sessions, power users).
+    // Otherwise the set is derived from which detectors are actually enabled, so a
+    // detector can never be starved of the events it needs — the renderer used to send
+    // a hand-maintained list that silently omitted 5140/5145/4776/4771/20/32-35.
+    const eventIds = Array.isArray(userEventIds) && userEventIds.length > 0
+      ? [...new Set([...userEventIds.map(String), ...extraEventIds.map(String)])]
+      : resolveSpineEventIds(disabledDetectors, extraEventIds);
+
+    // maxRows is interpolated into the LIMIT clause (it cannot be a bound parameter in the
+    // prepared-statement shape used below), so it must never reach SQL unvalidated. Mirrors
+    // the sanitising already done for scan limits in detectors/process-service-scan.js.
+    const MAX_ROWS_CEILING = 2000000;
+    const _maxRows = (() => {
+      const n = Math.floor(Number(maxRows));
+      if (!Number.isFinite(n) || n <= 0) return 500000;
+      return Math.min(Math.max(n, 1000), MAX_ROWS_CEILING);
+    })();
 
     const detect = (patterns) => {
       for (const pat of patterns) {
@@ -110,8 +131,27 @@ function getLateralMovement(meta, options = {}, ctx) {
       _payloadData4: isEvtxECmd ? detect([/^PayloadData4$/i]) : null,
       _payloadData5: isEvtxECmd ? detect([/^PayloadData5$/i]) : null,
       _channel: detect([/^Channel$/i, /^SourceName$/i, /^Provider$/i]),
+      // Raw-EVTX TerminalServices leaves. EvtxECmd packs these into PayloadData1-3, but a
+      // raw .evtx import keeps them as separate UserData/EventXML columns:
+      //   LocalSessionManager 21/22/24/25 -> User, SessionID, Address
+      //   RemoteConnectionManager 1149    -> Param1 (user), Param2 (domain), Param3 (source)
+      // These are mapped individually rather than relying on `columns.source`, because
+      // detect() returns the FIRST matching header — on a tab holding both channels the
+      // single source column can only ever serve one of the two record shapes.
+      _rawAddress:   isTermSvcEvtx ? detect([/^Address$/i]) : null,
+      _rawParam1:    isTermSvcEvtx ? detect([/^Param1$/i]) : null,
+      _rawParam2:    isTermSvcEvtx ? detect([/^Param2$/i]) : null,
+      _rawParam3:    isTermSvcEvtx ? detect([/^Param3$/i]) : null,
+      _rawSessionId: isTermSvcEvtx ? detect([/^SessionID$/i, /^Session_ID$/i]) : null,
+      _rawUser:      isTermSvcEvtx ? detect([/^User$/i]) : null,
+      // EID 39/40 carry the disconnect reason in a <Reason> leaf (reason 5 =
+      // "replaced by another connection", which feeds RDP suspicion scoring).
+      _rawReason:    isTermSvcEvtx ? detect([/^Reason$/i, /^ReasonCode$/i]) : null,
       // SubStatus for 4625 failure reason (may be in dedicated column or PayloadData)
       subStatus: detect([/^SubStatus$/i, /^Sub_Status$/i]),
+      // 4771 carries its failure code in Status, not SubStatus. Kept separate so the
+      // 4625 path (different semantics) is unaffected.
+      _statusCol: detect([/^Status$/i]),
       ticketEncryptionType: detect([/^TicketEncryptionType$/i, /^Ticket_Encryption_Type$/i]),
       serviceName: detect([/^ServiceName$/i, /^Service_Name$/i, /^TargetServiceName$/i]),
       ticketOptions: detect([/^TicketOptions$/i, /^Ticket_Options$/i]),
@@ -149,8 +189,15 @@ function getLateralMovement(meta, options = {}, ctx) {
       if (colName && meta.colMap[colName]) selectParts.push(`${meta.colMap[colName]} as [${key}]`);
     }
 
+    // A bare `ORDER BY <col>` is a BINARY text sort, which is only chronological for
+    // ISO-like timestamps — a US-style "3/10/2026 8:00:00 AM" column comes back in the
+    // wrong order, corrupting session reconstruction, chain gaps and every first/last-seen
+    // value. It also could not use the sort_datetime() expression index that ensureIndex
+    // builds, so it materialised a full sort for nothing. Match db/query-store.js:290.
     const orderCol = columns.ts ? meta.colMap[columns.ts] : null;
-    const orderClause = orderCol ? `ORDER BY ${orderCol} ASC` : "ORDER BY data.rowid ASC";
+    const orderClause = orderCol
+      ? (meta.tsColumns?.has?.(columns.ts) ? `ORDER BY sort_datetime(${orderCol}) ASC, data.rowid ASC` : `ORDER BY ${orderCol} ASC`)
+      : "ORDER BY data.rowid ASC";
 
     try {
       // Multi-source mode: rows are pre-queried and normalized by multi-source.js
@@ -168,7 +215,7 @@ function getLateralMovement(meta, options = {}, ctx) {
           for (const k of ctx.lmPreviewCache.keys()) { if (k.startsWith("[" + prefix)) ctx.lmPreviewCache.delete(k); }
         }
 
-        const sql = `SELECT ${selectParts.join(", ")} FROM data ${whereClause} ${orderClause} LIMIT ${maxRows}`;
+        const sql = `SELECT ${selectParts.join(", ")} FROM data ${whereClause} ${orderClause} LIMIT ${_maxRows}`;
         rows = db.prepare(sql).all(...params);
       }
 
@@ -187,8 +234,50 @@ function getLateralMovement(meta, options = {}, ctx) {
       // IP-to-hostname resolution map — populated when EvtxECmd "WorkstationName (IpAddress)" provides both
       const _ipToHostname = new Map(); // IP -> hostname (from events where both are present)
 
+      // Stage isolation. The pipeline used to sit under one try/catch, so a single bad
+      // timestamp anywhere discarded every finding the earlier stages had already
+      // produced. Each stage now degrades to an empty result of its own shape and
+      // records a warning, so one broken stage costs one results tab, not the analysis.
+      const _stageWarnings = [];
+      // Stage boundaries double as the progress signal. The renderer previously animated
+      // an eased curve on a timer with no connection to the analysis, so a stalled scan
+      // still looked like it was advancing.
+      const _progressCb = typeof options.progressCb === "function" ? options.progressCb : null;
+      const _stageOrder = [
+        "Event graph", "Process/service scan", "Admin share / remote execution",
+        "Credential attacks", "RDP scoring", "Edge and chain enrichment",
+        "Telemetry coverage", "Evidence refs", "Triage and clustering",
+        "Campaign clustering", "Accounts",
+      ];
+      let _stageDone = 0;
+      const runStage = (label, fn, fallback) => {
+        if (_progressCb) {
+          try {
+            _progressCb({
+              stage: label,
+              progress: Math.round((_stageDone / _stageOrder.length) * 100),
+              stageIndex: _stageDone,
+              stageCount: _stageOrder.length,
+            });
+          } catch { /* progress is advisory */ }
+        }
+        _stageDone++;
+        try {
+          return fn();
+        } catch (e) {
+          const msg = e && e.message ? e.message : String(e);
+          _stageWarnings.push(`${label} failed: ${msg}`);
+          dbg("LM", `stage failed: ${label}`, { error: msg });
+          return typeof fallback === "function" ? fallback() : fallback;
+        }
+      };
+
       // === Parse events -> graph + RDP sessions + chains + convention outliers -> ./build-graph.js ===
-      const _spine = buildGraphAndChains({ rows, columns, meta, options, db, edgeMap, hostSet, timeOrdered, rdpEvents, _ipToHostname, isEvtxECmd, isHayabusa, _dedupeEvidenceRefs, _rowEvidenceRef, _refsFromEvents, _rowidsFromRefs, _bumpHostTelemetry, _bumpUserEvent, _bumpUserEventScoped, _bumpDatasetEvent, _normLmHost, excludeLocalLogons, excludeServiceAccounts, privLogonEvents });
+      const _spine = runStage(
+        "Event graph",
+        () => buildGraphAndChains({ rows, columns, meta, options, db, edgeMap, hostSet, timeOrdered, rdpEvents, _ipToHostname, isEvtxECmd, isHayabusa, _dedupeEvidenceRefs, _rowEvidenceRef, _refsFromEvents, _rowidsFromRefs, _bumpHostTelemetry, _bumpUserEvent, _bumpUserEventScoped, _bumpDatasetEvent, _normLmHost, excludeLocalLogons, excludeServiceAccounts, privLogonEvents }),
+        () => ({ rdpSessions: [], chains: [], findings: [], fid: 0, _outlierHosts: new Set(), _computerHosts: new Set(), _conventionOutliers: new Map(), detectOutlier: () => "", chainWarnings: [] }),
+      );
       const rdpSessions = _spine.rdpSessions;
       const chains = _spine.chains;
       const findings = _spine.findings;
@@ -199,7 +288,13 @@ function getLateralMovement(meta, options = {}, ctx) {
       const detectOutlier = _spine.detectOutlier;
 
       // === Process/service/task scan + per-detector emitters (incl. Cobalt Strike) → detectors/process-service-scan.js ===
-      const _scanResult = runProcessServiceScan({ columns, meta, db, isHayabusa, timeOrdered, scanLimits, scanPageSize, _bumpDatasetEvent, _normLmHost, _bumpHostTelemetry, requireMicrosoftSignature, findings, _disabledSet, rmmMode, _outlierHosts, hostSet, fid });
+      const _scanResult = runStage(
+        "Process/service scan",
+        () => runProcessServiceScan({ columns, meta, db, isHayabusa, timeOrdered, scanLimits, scanPageSize, _bumpDatasetEvent, _normLmHost, _bumpHostTelemetry, requireMicrosoftSignature, findings, _disabledSet, rmmMode, _outlierHosts, hostSet, fid }),
+        // _usersFromCorrelation / _sourcesFromCorrelation are hit-mapping FUNCTIONS, not
+        // collections — the downstream detector calls them per finding.
+        () => ({ fid, warnings: [], scanStats: {}, _scanEidCol: null, _usersFromCorrelation: () => [], _sourcesFromCorrelation: () => [], _lsassAccessHits: [], _credTheftCmdHits: [] }),
+      );
       fid = _scanResult.fid;
       const warnings = _scanResult.warnings;
       const scanStats = _scanResult.scanStats;
@@ -210,7 +305,11 @@ function getLateralMovement(meta, options = {}, ctx) {
       const _credTheftCmdHits = _scanResult._credTheftCmdHits;
 
       // === Admin-share / remote-exec-sequence / service-exec / LSASS / cred-theft detectors → detectors/admin-share-and-execution.js ===
-      fid = detectAdminShareAndExecution({ timeOrdered, findings, edgeMap, columns, warnings, chains, meta, _outlierHosts, _dedupeEvidenceRefs, _refsFromHits, _rowidsFromRefs, _attachEvidenceRefs, _usersFromCorrelation, _sourcesFromCorrelation, _disabledSet, _lsassAccessHits, _credTheftCmdHits, fid }).fid;
+      fid = runStage(
+        "Admin share / remote execution",
+        () => detectAdminShareAndExecution({ timeOrdered, findings, edgeMap, columns, warnings, chains, meta, _outlierHosts, _dedupeEvidenceRefs, _refsFromHits, _rowidsFromRefs, _attachEvidenceRefs, _usersFromCorrelation, _sourcesFromCorrelation, _disabledSet, _lsassAccessHits, _credTheftCmdHits, fid }),
+        () => ({ fid }),
+      ).fid;
 
       const _splitEntityList = (value) => String(value || "")
         .split(",")
@@ -220,6 +319,24 @@ function getLateralMovement(meta, options = {}, ctx) {
         if (!value) return null;
         const d = new Date(String(value).replace("T", " ").replace("Z", ""));
         return isNaN(d) ? null : d.getTime();
+      };
+      // This runs once per finding over the whole event array. Parsing each event's
+      // timestamp and upper-casing its hosts inside that loop meant the same work was
+      // redone for every finding — on a 500K-row tab with a few hundred findings that
+      // is O(10^8) Date constructions. Derive each event's comparison keys once and
+      // cache them on the event.
+      const _evtKeys = (evt) => {
+        let k = evt._lmKeys;
+        if (k === undefined) {
+          k = {
+            ms: _parseLmTs(evt.ts),
+            eid: String(evt.eventId),
+            src: String(evt.source || "").trim().toUpperCase(),
+            tgt: String(evt.target || "").trim().toUpperCase(),
+          };
+          evt._lmKeys = k;
+        }
+        return k;
       };
       const _refsForFindingWindow = (finding) => {
         const fromMs = _parseLmTs(finding?.timeRange?.from);
@@ -231,15 +348,13 @@ function getLateralMovement(meta, options = {}, ctx) {
         const refs = [];
         for (const evt of timeOrdered) {
           if (refs.length >= 5000) break;
-          if (filterEids.size > 0 && !filterEids.has(String(evt.eventId))) continue;
-          const evtMs = _parseLmTs(evt.ts);
-          if (fromMs != null && evtMs != null && evtMs < fromMs) continue;
-          if (toMs != null && evtMs != null && evtMs > toMs) continue;
-          const evtSource = String(evt.source || "").trim().toUpperCase();
-          const evtTarget = String(evt.target || "").trim().toUpperCase();
-          if (sources.size > 0 && !sources.has(evtSource)) continue;
-          if (targets.size > 0 && !targets.has(evtTarget)) continue;
-          if (sources.size === 0 && targets.size === 0 && filterHosts.size > 0 && !filterHosts.has(evtSource) && !filterHosts.has(evtTarget)) continue;
+          const k = _evtKeys(evt);
+          if (filterEids.size > 0 && !filterEids.has(k.eid)) continue;
+          if (fromMs != null && k.ms != null && k.ms < fromMs) continue;
+          if (toMs != null && k.ms != null && k.ms > toMs) continue;
+          if (sources.size > 0 && !sources.has(k.src)) continue;
+          if (targets.size > 0 && !targets.has(k.tgt)) continue;
+          if (sources.size === 0 && targets.size === 0 && filterHosts.size > 0 && !filterHosts.has(k.src) && !filterHosts.has(k.tgt)) continue;
           refs.push(...(evt.evidenceRefs || []));
         }
         return _dedupeEvidenceRefs(refs);
@@ -255,23 +370,65 @@ function getLateralMovement(meta, options = {}, ctx) {
           _attachEvidenceRefs(f, refs);
         }
       };
-      _normalizeFindingEvidenceRefs();
-
-      // === Finding correlation + triage + execution-session/incident clustering → processing/triage-and-clustering.js ===
-      const { _findingPairs, _chainEdges, executionSessions, incidents } = correlateTriageAndCluster({ findings, chains, timeOrdered, _outlierHosts, _dedupeEvidenceRefs, _rowidsFromRefs });
-      // === Campaign clustering + edge/chain enrichment + pivot/operator/anomalous-hostname findings → processing/campaign-clustering.js ===
-      const _ccResult = clusterCampaignsAndEnrich({ incidents, findings, chains, edgeMap, timeOrdered, hostSet, _chainEdges, _findingPairs, _outlierHosts, _conventionOutliers, _computerHosts, detectOutlier, _dedupeEvidenceRefs, _rowidsFromRefs, fid });
-      const campaigns = _ccResult.campaigns;
-      fid = _ccResult.fid;
-      // === RDP scoring: episode clustering + session suspicion + concurrent-RDP detection → processing/rdp-scoring.js ===
-      fid = scoreRdpSessions({ timeOrdered, edgeMap, rdpSessions, _findingPairs, _outlierHosts, findings, fid }).fid;
+      // ── Every finding-emitting stage runs BEFORE triage scoring ──────────────────
+      // These used to run after it, so the findings they emit (Kerberoasting, AS-REP,
+      // DCSync, Concurrent RDP, Lateral Pivot, Operator Host, Anomalous Hostname, the
+      // Sysmon RDP-client findings) never got a triageScore or relatedFindingIds — the
+      // UI rendered them as 0 and sorted a critical DCSync below a low First-Seen. They
+      // were also invisible to incident clustering.
 
       // === Credential-attack detectors (Kerberoasting / AS-REP / DCSync) → detectors/credential-attacks.js ===
-      fid = detectCredentialAttacks({ db, meta, columns, isEvtxECmd, disabledSet: _disabledSet, findings, warnings, fid });
+      // Fully independent: issues its own queries, reads no cross-stage state.
+      fid = runStage(
+        "Credential attacks",
+        () => detectCredentialAttacks({ db, meta, columns, isEvtxECmd, disabledSet: _disabledSet, findings, warnings, fid }),
+        fid,
+      );
+
+      // === RDP scoring: episode clustering + session suspicion + concurrent-RDP detection → processing/rdp-scoring.js ===
+      // Builds its own finding-pair index now that it precedes triage.
+      fid = runStage(
+        "RDP scoring",
+        () => scoreRdpSessions({ timeOrdered, edgeMap, rdpSessions, _outlierHosts, findings, fid }),
+        () => ({ fid }),
+      ).fid;
+
+      // === Edge risk + chain confidence + pivot/operator/anomalous-hostname findings → processing/campaign-clustering.js ===
+      // The campaign half needs `incidents` and stays after triage; this half does not.
+      fid = runStage(
+        "Edge and chain enrichment",
+        () => enrichEdgesAndChains({ findings, chains, edgeMap, timeOrdered, hostSet, _chainEdges: buildChainEdges(chains), _findingPairs: buildFindingPairs(findings), _outlierHosts, _conventionOutliers, _computerHosts, detectOutlier, _dedupeEvidenceRefs, _rowidsFromRefs, fid }),
+        () => ({ fid }),
+      ).fid;
 
       // === Sysmon EID13 CLIENTNAME + session grouping + telemetry coverage → processing/sysmon-rdp-coverage.js ===
-      const _r14 = computeSysmonRdpAndCoverage({ db, meta, columns, options, hostSet, _outlierHosts, findings, warnings, isHayabusa, _scanEidCol, _dedupeEvidenceRefs, _rowEvidenceRef, _rowidsFromRefs, _normalizeFindingEvidenceRefs, rdpSessions, hostTelemetry, datasetEventCounts, _conventionOutliers, fid });
+      // Emits the RDP-client findings, so it must also precede triage. Its coverage math
+      // reads rdpSessions, which RDP scoring has already enriched above.
+      const _r14 = runStage(
+        "Telemetry coverage",
+        () => computeSysmonRdpAndCoverage({ db, meta, columns, options, hostSet, _outlierHosts, findings, warnings, isHayabusa, _scanEidCol, _dedupeEvidenceRefs, _rowEvidenceRef, _rowidsFromRefs, _normalizeFindingEvidenceRefs, rdpSessions, hostTelemetry, datasetEventCounts, _conventionOutliers, fid }),
+        () => ({ groupedSessions: [], hostCoverage: new Map(), datasetCoverage: null, datasetEventCountsObj: {}, coverageWarnings: [], fid }),
+      );
       fid = _r14.fid;
+
+      // ── All findings exist from here on ──────────────────────────────────────────
+      runStage("Evidence refs", () => _normalizeFindingEvidenceRefs(), null);
+
+      // === Finding correlation + triage + execution-session/incident clustering → processing/triage-and-clustering.js ===
+      // Scores and sorts the COMPLETE findings array. Nothing may push findings after
+      // this point, or it would be unscored and would break the sort.
+      const { executionSessions, incidents } = runStage(
+        "Triage and clustering",
+        () => correlateTriageAndCluster({ findings, chains, timeOrdered, _outlierHosts, _dedupeEvidenceRefs, _rowidsFromRefs }),
+        () => ({ executionSessions: [], incidents: [] }),
+      );
+
+      // === Campaign / storyline clustering (needs incidents) → processing/campaign-clustering.js ===
+      const campaigns = runStage(
+        "Campaign clustering",
+        () => clusterCampaigns({ incidents, findings, _dedupeEvidenceRefs, _rowidsFromRefs }),
+        () => ({ campaigns: [] }),
+      ).campaigns;
       const groupedSessions = _r14.groupedSessions;
       const hostCoverage = _r14.hostCoverage;
       const datasetEventCountsObj = _r14.datasetEventCountsObj;
@@ -279,7 +436,16 @@ function getLateralMovement(meta, options = {}, ctx) {
       const coverageWarnings = _r14.coverageWarnings;
 
       // === Accounts Aggregation → assemble/accounts.js ===
-      const accounts = aggregateAccounts({ timeOrdered, rdpSessions, findings, userEventCounts, userEventCountsScoped, userEventOriginalName, _outlierHosts, privLogonEvents, userFirstSuccessTs });
+      const accounts = runStage(
+        "Accounts",
+        () => aggregateAccounts({ timeOrdered, rdpSessions, findings, userEventCounts, userEventCountsScoped, userEventOriginalName, _outlierHosts, privLogonEvents, userFirstSuccessTs }),
+        () => [],
+      );
+
+      // Surface stage failures alongside the detectors' own warnings so a partial result
+      // is visibly partial rather than quietly thin.
+      if (_spine.chainWarnings?.length) warnings.push(..._spine.chainWarnings);
+      if (_stageWarnings.length) warnings.push(..._stageWarnings);
 
       return {
         nodes: [

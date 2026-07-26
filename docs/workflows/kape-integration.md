@@ -11,7 +11,6 @@ IRFlow Timeline automatically detects and pre-configures display settings for ou
 When you open a CSV or XLSX file, IRFlow Timeline analyzes the column headers to identify the source tool. If a known profile matches, it automatically applies:
 
 - **Column ordering** — most relevant columns first
-- **Pinned columns** — key columns stay visible during horizontal scrolling
 - **Hidden columns** — noise columns are hidden by default
 - **Auto-color column** — a column is selected for automatic palette coloring
 

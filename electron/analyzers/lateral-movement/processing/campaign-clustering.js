@@ -15,13 +15,55 @@
 const { DC_PAT: _DC_PAT, SRV_PAT: _SRV_PAT, MGMT_SRC_PAT: _MGMT_SRC_PAT, SEV_ORDER: sevOrder } = require("../constants");
 const { generateConventionFindings } = require("../convention-detector");
 
-function clusterCampaignsAndEnrich(state) {
+/**
+ * Roll pair-based incidents up into multi-hop storylines.
+ *
+ * Split out of clusterCampaignsAndEnrich because it is the only half that depends on
+ * `incidents` — and therefore the only half that must run AFTER triage. The enrichment
+ * and finding-emitting half now runs before triage so its findings get scored.
+ *
+ * @param {object} state - { incidents, findings, _rowidsFromRefs }
+ * @returns {{campaigns: Array}}
+ */
+function clusterCampaigns(state) {
+  const { incidents, findings, _dedupeEvidenceRefs, _rowidsFromRefs } = state;
+  const campaigns = _buildCampaigns({ incidents, findings, _dedupeEvidenceRefs, _rowidsFromRefs });
+  return { campaigns };
+}
+
+/**
+ * Edge-risk scoring, chain-hop technique enrichment + confidence scoring, and the
+ * Lateral Pivot / Operator Host / Anomalous Hostname emitters. None of this needs
+ * `incidents`, so it runs before triage scoring.
+ *
+ * @returns {{fid: number}}
+ */
+function enrichEdgesAndChains(state) {
   const {
-    incidents, findings, chains, edgeMap, timeOrdered, hostSet,
+    findings, chains, edgeMap, timeOrdered, hostSet,
     _chainEdges, _findingPairs, _outlierHosts, _conventionOutliers, _computerHosts,
     detectOutlier, _dedupeEvidenceRefs, _rowidsFromRefs,
   } = state;
   let fid = state.fid;
+  return _enrichAndEmit({
+    findings, chains, edgeMap, timeOrdered, hostSet,
+    _chainEdges, _findingPairs, _outlierHosts, _conventionOutliers, _computerHosts,
+    detectOutlier, _dedupeEvidenceRefs, _rowidsFromRefs, fid,
+  });
+}
+
+/** Backwards-compatible wrapper: enrich + emit, then cluster campaigns, in one call. */
+function clusterCampaignsAndEnrich(state) {
+  const { campaigns } = clusterCampaigns(state);
+  const { fid } = enrichEdgesAndChains(state);
+  return { campaigns, fid };
+}
+
+function _buildCampaigns(state) {
+  const {
+    incidents, findings,
+    _dedupeEvidenceRefs, _rowidsFromRefs,
+  } = state;
 
       // === Campaign / Storyline Clustering ===
       // Rolls up pair-based incidents into multi-hop storylines so analysts can see
@@ -142,6 +184,17 @@ function clusterCampaignsAndEnrich(state) {
         }
         campaigns.sort((a, b) => (b.triageScore - a.triageScore) || ((sevOrder[a.severity] ?? 4) - (sevOrder[b.severity] ?? 4)));
       }
+
+  return campaigns;
+}
+
+function _enrichAndEmit(state) {
+  const {
+    findings, chains, edgeMap, timeOrdered, hostSet,
+    _chainEdges, _findingPairs, _outlierHosts, _conventionOutliers, _computerHosts,
+    detectOutlier, _dedupeEvidenceRefs, _rowidsFromRefs,
+  } = state;
+  let fid = state.fid;
 
       // === Edge Risk Scoring ===
       // Dampener patterns: known management/jump hosts, service accounts, high-frequency routine edges
@@ -404,7 +457,7 @@ function clusterCampaignsAndEnrich(state) {
       }
 
 
-  return { campaigns, fid };
+  return { fid };
 }
 
-module.exports = { clusterCampaignsAndEnrich };
+module.exports = { clusterCampaignsAndEnrich, clusterCampaigns, enrichEdgesAndChains };

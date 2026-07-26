@@ -70,7 +70,7 @@ description: Keyboard shortcuts reference for IRFlow Timeline — file operation
 | `Cmd+Plus` / `Cmd+-` | Increase / decrease font size (macOS **Tools → Font Size**) |
 | Toolbar **☀ / 🌙** | Toggle dark / light theme |
 
-Analysis tools in the **in-app Tools** menu are grouped in four sections: **Analysis** (Stack Values, Gap Analysis, Log Sources, Burst Detection, **AI Artifacts** with Collect AI Artifacts and per-app **AI Apps**), **Detection** (Sigma Scan and **AI Secret Hunt** on AI history tabs), **Platforms** (Windows, Linux, macOS, and Cloud — Windows tools are active; other OS groups are placeholders), and **Export** (Generate Report, **Export AI History Package**, **Export Source Manifest** on AI tabs).
+Analysis tools in the **in-app Tools** menu are grouped in four sections: **Analysis** (Stack Values, Gap Analysis, Log Sources, Burst Detection), **Detection** (Sigma Scan), **Platforms** (active Windows tools plus one collapsed **Coming soon** group for planned Linux, macOS, and cloud analyzers), and **Export** (Generate Report).
 
 ![Tools → Analysis → AI Artifacts with Collect AI Artifacts and AI Apps](/dfir-tips/Tools-Menu-AI-Artifacts.png)
 
@@ -80,9 +80,10 @@ Windows platform tools include Process Inspector, Lateral Movement Tracker, Pers
 
 | Shortcut | Action |
 |----------|--------|
+| `Cmd+K` | Open the searchable command palette |
 | `Cmd+/` | Open Keyboard Shortcuts |
 
-The **Help** menu also includes Quick Help, **Check for Updates…**, Website, and About IRFlow Timeline.
+The **Help** menu also includes Command Palette, Quick Help, **Check for Updates…**, Website, and About IRFlow Timeline.
 
 ## General
 
@@ -102,7 +103,7 @@ Display preferences (datetime format, timezone, theme, font size, temp storage f
 | `-word` | EXCLUDE |
 | `"exact phrase"` | Phrase match |
 | `Column:value` | Column-specific filter |
-| `FL` / `HL` | Toggle filter / highlight mode |
+| Toolbar **Filter / Highlight** | Hide non-matches or keep all rows visible and highlight matches |
 
 ## Context Menu Shortcuts
 
@@ -114,7 +115,8 @@ Display preferences (datetime format, timezone, theme, font size, temp storage f
 
 **Right-click any cell** opens the full context menu:
 
-- Copy cell / Copy row
+- Copy cell / Copy this row
+- Copy selected rows (when rows are checked)
 - Filter in / Filter out
 - Tags ▸ (hover submenu — supports multi-row tagging)
 - VirusTotal lookup (for IPs, hashes, domains)

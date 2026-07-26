@@ -1,4 +1,5 @@
 const { dialog, shell } = require("electron");
+const { openDialogOptions } = require("../../utils/open-dialog");
 
 module.exports = function registerSigmaRuleSettingsHandlers(ctx) {
   const {
@@ -83,11 +84,11 @@ module.exports = function registerSigmaRuleSettingsHandlers(ctx) {
     let targetPath = filePath;
     if (!targetPath) {
       const win = typeof _activeWindow === "function" ? _activeWindow() : null;
-      const result = await dialog.showOpenDialog(win, {
+      const result = await dialog.showOpenDialog(win, openDialogOptions({
         properties: ["openFile"],
         title: "Import Sigma Rule",
         filters: [{ name: "YAML Files", extensions: ["yml", "yaml"] }],
-      });
+      }));
       if (result.canceled || !result.filePaths?.length) return { success: false, canceled: true };
       targetPath = result.filePaths[0];
       pathAuthorizer.authorize("custom-rule-file", targetPath, {

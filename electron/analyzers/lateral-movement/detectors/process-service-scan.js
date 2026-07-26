@@ -33,9 +33,20 @@ function runProcessServiceScan(state) {
       const _scanTsCol = columns.ts ? meta.colMap[columns.ts] : null;
       const _scanChanCol = columns._channel ? meta.colMap[columns._channel] : null;
       const _scanDetect = (pats) => { for (const p of pats) { const f = meta.headers.find(h => p.test(h)); if (f) return meta.colMap[f]; } return null; };
-      const _scanColImage = _scanDetect([/^Image$/i, /^NewProcessName$/i, /^process_name$/i, /^FileName$/i, /^ImagePath$/i]) || (isHayabusa ? _scanDetect([/^Details$/i]) : null);
-      const _scanColParent = _scanDetect([/^ParentImage$/i, /^ParentProcessName$/i, /^ParentCommandLine$/i]) || (isHayabusa ? _scanDetect([/^ExtraFieldInfo$/i]) : null);
-      const _scanColCmd = _scanDetect([/^CommandLine$/i, /^command_line$/i, /^ProcessCommandLine$/i, /^cmdline$/i]) || (isHayabusa ? _scanDetect([/^Details$/i]) : null);
+      // Structured (real) process columns, before any Hayabusa blob fallback.
+      const _structColImage = _scanDetect([/^Image$/i, /^NewProcessName$/i, /^process_name$/i, /^FileName$/i, /^ImagePath$/i]);
+      const _structColParent = _scanDetect([/^ParentImage$/i, /^ParentProcessName$/i, /^ParentCommandLine$/i]);
+      const _structColCmd = _scanDetect([/^CommandLine$/i, /^command_line$/i, /^ProcessCommandLine$/i, /^cmdline$/i]);
+      const _scanColImage = _structColImage || (isHayabusa ? _scanDetect([/^Details$/i]) : null);
+      const _scanColParent = _structColParent || (isHayabusa ? _scanDetect([/^ExtraFieldInfo$/i]) : null);
+      const _scanColCmd = _structColCmd || (isHayabusa ? _scanDetect([/^CommandLine$/i]) : null) || (isHayabusa ? _scanDetect([/^Details$/i]) : null);
+      // Detectors that compare a parent/child BINARY NAME must only take the structured
+      // path when the columns really are parent/image fields. On Hayabusa they fall back
+      // to the Details / ExtraFieldInfo blobs, so `_parent.split("\\").pop()` compares a
+      // whole blob against "wmiprvse.exe" and never matches — which silently disabled
+      // dest-side WMI, dest-side WinRM, DCOM and sshd→shell detection on Hayabusa data,
+      // because the (correct) blob fallbacks below sat in an unreachable `else`.
+      const _hasStructuredProcCols = !!(_structColParent && _structColImage);
       const _scanCols = [
         _scanColCmd, _scanColImage, _scanColParent,
         _scanDetect([/^ExecutableInfo$/i]),
@@ -307,7 +318,16 @@ function runProcessServiceScan(state) {
             // lateral artifact. Known benign vendor/built-in consumers are suppressed ONLY when they
             // carry no script/LOLBin payload — a benign-NAMED consumer that still runs a script/LOLBin
             // is NOT suppressed (defeats name-spoofing evasion).
-            if (eid === "19" || eid === "20" || eid === "21") {
+            // EIDs 19/20/21 are only WMI-subscription events on the Sysmon channel. They
+            // collide with TerminalServices-LocalSessionManager 20/21 (session
+            // reconnect / logon), so on a dataset with no channel column — where the
+            // channel pre-filter is empty and every row reaches this loop — RDP session
+            // events were being reported as "WMI Event Subscription". Require WMI-ish
+            // corroboration in the row itself when the channel cannot vouch for it.
+            const _wmiSubChannelOk = _scanChanCol
+              ? true
+              : /\b(wmi|wbem|consumer|filtertoconsumerbinding|eventfilter|__instancecreationevent|activescript|commandlineeventconsumer)\b/i.test(text);
+            if (_wmiSubChannelOk && (eid === "19" || eid === "20" || eid === "21")) {
               const _wmiSubLol = /(powershell|pwsh|cmd\.exe|cmd\s+\/c|wscript|cscript|mshta|rundll32|regsvr32|certutil|bitsadmin|perl|python|ruby|\bbash\b|calc\.exe|schtasks|tasklist|netstat|ipconfig|whoami|systeminfo|net\s+(?:user|group|localgroup)|scrcons|activescripteventconsumer|commandlineeventconsumer|\.ps1|\.vbs|\.js\b|\.hta\b|\.bat\b|-enc|encodedcommand|\\temp\\|\\appdata\\|http)/i.test(text);
               // Known benign vendor / built-in WMI consumers (SCCM, BITS, Splunk, Defender, Dell, HP, VMware…)
               const _wmiSubBenign = /scm event(\s?log|\s?provider)?\s*consumer|bvtconsumer|wsceaa|raevent|tpvcgateway|forfilesconsumer|neteventconsumer|ccmeventconsumer|ccmexec|configmgr|sccm|bits.{0,20}(?:transfer|completion)|splunk|defender|\bsense\b|vmware|dell.{0,10}(?:idrac|openmanage|command)|hp.{0,10}(?:insight|proliant)|veeam|nsclient/i;
@@ -488,7 +508,7 @@ function runProcessServiceScan(state) {
               // so the detector fires on actual command execution rather than mere COM activation.
               const _dcomExecPat = /(?:\bcmd(?:\.exe)?\s+\/[ck]\b|%comspec%|-enc\b|-encodedcommand\b|-e\s+[A-Za-z0-9+/=]{16,}|-c(?:ommand)?\s|\biex\b|downloadstring|invoke-expression|frombase64string|\/c\s|\/k\s)/i;
               if (_dcomActivated) {
-                if (_parent && _image) {
+                if (_hasStructuredProcCols && _parent && _image) {
                   const parentBin = _parent.split("\\").pop();
                   const imageBin = _image.split("\\").pop();
                   // dllhost.exe is a COM surrogate for many legitimate objects — require an explicit
@@ -515,8 +535,10 @@ function runProcessServiceScan(state) {
               _sshHits.push({ ts, eid, rid, host, side: "dest", category: "sshd_install", d: "OpenSSH sshd service installed (inbound SSH server)" });
             }
             if (eid === "4688" || eid === "1") {
-              const _sshParentBin = _parent ? _parent.split("\\").pop() : null;
-              const _sshImageBin = _image ? _image.split("\\").pop() : null;
+              // Only treat these as binary names when they really are parent/image
+              // columns; otherwise leave them null so the blob fallback below can run.
+              const _sshParentBin = (_hasStructuredProcCols && _parent) ? _parent.split("\\").pop() : null;
+              const _sshImageBin = (_hasStructuredProcCols && _image) ? _image.split("\\").pop() : null;
               const _sshChildBins = ["cmd.exe", "powershell.exe", "pwsh.exe", "bash.exe", "wsl.exe"];
               // (b) sshd.exe spawning a shell = inbound remote command execution over SSH.
               if (_sshParentBin === "sshd.exe" && _sshImageBin && _sshChildBins.includes(_sshImageBin)) {
@@ -552,7 +574,7 @@ function runProcessServiceScan(state) {
               // Destination-side: wmiprvse.exe spawning shell/LOLBin — requires directional parent-child evidence
               const _wmiChildBins = ["cmd.exe", "powershell.exe", "pwsh.exe", "rundll32.exe", "mshta.exe", "regsvr32.exe", "cscript.exe", "wscript.exe"];
               if (text.includes("wmiprvse.exe")) {
-                if (_parent && _image) {
+                if (_hasStructuredProcCols && _parent && _image) {
                   // Structured fields: require ParentImage = wmiprvse.exe, Image = child binary
                   const parentBin = _parent.split("\\").pop();
                   const imageBin = _image.split("\\").pop();
@@ -618,7 +640,7 @@ function runProcessServiceScan(state) {
               if (text.includes("wsmprovhost.exe")) {
                 const _winrmChildBins = ["cmd.exe", "powershell.exe", "pwsh.exe", "whoami.exe", "net.exe", "net1.exe", "ipconfig.exe", "systeminfo.exe", "tasklist.exe"];
                 let childDesc = null;
-                if (_parent && _image) {
+                if (_hasStructuredProcCols && _parent && _image) {
                   // Structured fields: require ParentImage = wsmprovhost.exe, Image = child
                   const parentBin = _parent.split("\\").pop();
                   const imageBin = _image.split("\\").pop();

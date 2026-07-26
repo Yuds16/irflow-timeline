@@ -332,6 +332,11 @@ function getProcessTree(meta, options = {}, ctx) {
         // Privilege use — populated by EID 4673 / 4674 matching below. Null when
         // the dataset carries no sensitive-privilege audit events for this process.
         privilegeUse: null,
+        // Adjacent Sysmon telemetry summaries (EID 3/22/7/11) — populated below.
+        networkActivity: null,
+        dnsActivity: null,
+        imageLoads: null,
+        fileCreates: null,
         link: null,
         linkSource: "",
         linkConfidence: "",
@@ -969,6 +974,257 @@ function getProcessTree(meta, options = {}, ctx) {
       }
     }
 
+    // --- Adjacent Sysmon telemetry: EID 3 (Network), 22 (DNS), 7 (ImageLoad), 11 (FileCreate) ---
+    // Attach compact per-process summaries for detection rules + detail panel.
+    // Matching is GUID-first, then PID+host. Counts only — samples capped for IPC size.
+    let networkMatched = 0;
+    let dnsMatched = 0;
+    let imageLoadMatched = 0;
+    let fileCreateMatched = 0;
+    if (columns.eventId && processes.length > 0) {
+      try {
+        const safeEid = meta.colMap[columns.eventId];
+        if (safeEid) {
+          const guidToNode = new Map();
+          const pidHostToNodes = new Map();
+          for (const node of processes) {
+            if (node.guid) guidToNode.set(node.guid, node);
+            const pidHostKey = `${node.pid}|${node.normHost || "__nohost__"}`;
+            if (!pidHostToNodes.has(pidHostKey)) pidHostToNodes.set(pidHostKey, []);
+            pidHostToNodes.get(pidHostKey).push(node);
+          }
+          const resolveTarget = (guidRaw, pidRaw, hostRaw, tsMs) => {
+            const g = normalizeGuid(guidRaw);
+            if (g && guidToNode.has(g)) return guidToNode.get(g);
+            const p = normalizePid(pidRaw);
+            if (!p) return null;
+            const key = `${p}|${normalizeHost(hostRaw) || "__nohost__"}`;
+            const cands = pidHostToNodes.get(key);
+            if (!cands || !cands.length) return null;
+            if (!Number.isFinite(tsMs)) return cands[cands.length - 1];
+            let best = null;
+            for (const c of cands) {
+              if (Number.isFinite(c.tsMs) && c.tsMs <= tsMs && (!best || c.tsMs > best.tsMs)) best = c;
+            }
+            return best || cands[cands.length - 1];
+          };
+          const isPrivateIp = (ip) => {
+            const s = String(ip || "").trim();
+            if (!s) return true;
+            if (/^(10\.|192\.168\.|127\.|0\.|255\.)/.test(s)) return true;
+            if (/^172\.(1[6-9]|2\d|3[01])\./.test(s)) return true;
+            if (/^(::1|fe80:|fc|fd)/i.test(s)) return true;
+            return false;
+          };
+          const isWritablePath = (p) => /\\(users|temp|tmp|appdata|downloads|public|recycle|perflogs)\\/i.test(String(p || ""));
+          const isPe = (p) => /\.(exe|dll|sys|scr|cpl|ocx)$/i.test(String(p || ""));
+          const isScript = (p) => /\.(ps1|psm1|psd1|vbs|js|jse|wsf|wsh|hta|bat|cmd|vbe)$/i.test(String(p || ""));
+
+          const enrichSelect = () => {
+            const parts = ["data.rowid as _rowid"];
+            const seen = new Set();
+            for (const [key, colName] of Object.entries(columns)) {
+              if (key.startsWith("_")) continue;
+              if (colName && meta.colMap[colName] && !seen.has(colName)) {
+                parts.push(`${meta.colMap[colName]} as [${key}]`);
+                seen.add(colName);
+              }
+            }
+            return parts.join(", ");
+          };
+          const orderCol = columns.ts ? meta.colMap[columns.ts] : null;
+          const orderClause = orderCol ? `ORDER BY sort_datetime(${orderCol}) ASC` : "ORDER BY data.rowid ASC";
+          const sel = enrichSelect();
+
+          // Probe which EIDs exist before querying
+          const eidPresent = {};
+          for (const eid of ["3", "22", "7", "11"]) {
+            try {
+              const r = db.prepare(`SELECT COUNT(*) as n FROM data WHERE ${safeEid} = ? LIMIT 1`).get(eid);
+              eidPresent[eid] = !!(r && r.n > 0);
+            } catch { eidPresent[eid] = false; }
+          }
+
+          // EID 3 — NetworkConnect
+          if (eidPresent["3"]) {
+            const rows3 = db.prepare(`SELECT ${sel} FROM data WHERE ${safeEid} = ? ${orderClause} LIMIT ${maxRows}`).all("3");
+            for (const r of rows3) {
+              let srcGuid = "", srcPid = "", destIp = "", destPort = "";
+              const host = r.hostname || "";
+              const tsMs = normalizeTimestamp(cleanWrappedField(r.ts || ""));
+              if (isEvtxECmdPT) {
+                const blob = [r.pid, r.ppid, r.cmdLine, r.image, r.guid, r.parentGuid].filter(Boolean).join(" ");
+                srcGuid = (blob.match(/SourceProcessGUID:\s*([0-9a-f-{}]+)/i) || [])[1] || "";
+                srcPid = (blob.match(/SourceProcessId:\s*(\d+)/i) || [])[1] || "";
+                destIp = (blob.match(/DestinationIp:\s*([^\s,]+)/i) || [])[1] || "";
+                destPort = (blob.match(/DestinationPort:\s*(\d+)/i) || [])[1] || "";
+              } else if (isHayabusaPT) {
+                const compact = parseCompactKeyValues(r.details, r.extra);
+                srcGuid = compactGet(compact, "SourceProcessGuid", "SourceProcessGUID", "PGUID", "ProcessGuid");
+                srcPid = compactGetInt(compact, "SourceProcessId", "SourcePID", "PID", "ProcessId");
+                destIp = compactGet(compact, "DestinationIp", "DestIp", "DstIP", "RemoteAddress");
+                destPort = compactGet(compact, "DestinationPort", "DestPort", "DstPort");
+              } else {
+                srcGuid = r.guid || r.srcGuid || "";
+                srcPid = r.pid || r.srcPid || "";
+                destIp = compactGet(parseCompactKeyValues(r.details, r.extra), "DestinationIp", "DestIp") || r.destIp || "";
+                // Destination often only in details for some exports
+                if (!destIp && r.cmdLine) destIp = (String(r.cmdLine).match(/\b(?:\d{1,3}\.){3}\d{1,3}\b/) || [])[0] || "";
+              }
+              const target = resolveTarget(srcGuid, srcPid, host, tsMs);
+              if (!target) continue;
+              if (!target.networkActivity) {
+                target.networkActivity = { eventCount: 0, destCount: 0, rareDestCount: 0, destinations: [], samples: [] };
+              }
+              const na = target.networkActivity;
+              na.eventCount++;
+              const dip = String(destIp || "").trim();
+              if (dip && !na.destinations.includes(dip) && na.destinations.length < 12) {
+                na.destinations.push(dip);
+                na.destCount = na.destinations.length;
+                if (!isPrivateIp(dip)) na.rareDestCount++;
+              }
+              if (na.samples.length < 4) {
+                na.samples.push({ destIp: dip, destPort: String(destPort || ""), ts: cleanWrappedField(r.ts || "") });
+              }
+              networkMatched++;
+            }
+          }
+
+          // EID 22 — DNS query
+          if (eidPresent["22"]) {
+            const rows22 = db.prepare(`SELECT ${sel} FROM data WHERE ${safeEid} = ? ${orderClause} LIMIT ${maxRows}`).all("22");
+            for (const r of rows22) {
+              let srcGuid = "", srcPid = "", query = "";
+              const host = r.hostname || "";
+              const tsMs = normalizeTimestamp(cleanWrappedField(r.ts || ""));
+              if (isEvtxECmdPT) {
+                const blob = [r.pid, r.ppid, r.cmdLine, r.image, r.guid].filter(Boolean).join(" ");
+                srcGuid = (blob.match(/(?:SourceProcessGUID|ProcessGuid):\s*([0-9a-f-{}]+)/i) || [])[1] || "";
+                srcPid = (blob.match(/(?:SourceProcessId|ProcessId):\s*(\d+)/i) || [])[1] || "";
+                query = (blob.match(/QueryName:\s*([^\s,]+)/i) || [])[1] || "";
+              } else if (isHayabusaPT) {
+                const compact = parseCompactKeyValues(r.details, r.extra);
+                srcGuid = compactGet(compact, "ProcessGuid", "ProcessGUID", "PGUID", "SourceProcessGuid");
+                srcPid = compactGetInt(compact, "ProcessId", "PID", "SourceProcessId");
+                query = compactGet(compact, "QueryName", "DnsQuery", "Query");
+              } else {
+                srcGuid = r.guid || "";
+                srcPid = r.pid || "";
+                query = compactGet(parseCompactKeyValues(r.details, r.extra), "QueryName", "Query") || r.queryName || "";
+              }
+              const target = resolveTarget(srcGuid, srcPid, host, tsMs);
+              if (!target) continue;
+              if (!target.dnsActivity) {
+                target.dnsActivity = { eventCount: 0, queryCount: 0, queries: [], samples: [] };
+              }
+              const da = target.dnsActivity;
+              da.eventCount++;
+              const qn = String(query || "").trim().toLowerCase();
+              if (qn && !da.queries.includes(qn) && da.queries.length < 16) {
+                da.queries.push(qn);
+                da.queryCount = da.queries.length;
+              }
+              if (da.samples.length < 4) {
+                da.samples.push({ query: qn, ts: cleanWrappedField(r.ts || "") });
+              }
+              dnsMatched++;
+            }
+          }
+
+          // EID 7 — ImageLoad
+          if (eidPresent["7"]) {
+            const rows7 = db.prepare(`SELECT ${sel} FROM data WHERE ${safeEid} = ? ${orderClause} LIMIT ${maxRows}`).all("7");
+            for (const r of rows7) {
+              let srcGuid = "", srcPid = "", loaded = "", signed = "", sigStatus = "";
+              const host = r.hostname || "";
+              const tsMs = normalizeTimestamp(cleanWrappedField(r.ts || ""));
+              if (isEvtxECmdPT) {
+                const blob = [r.pid, r.ppid, r.cmdLine, r.image, r.guid].filter(Boolean).join(" ");
+                srcGuid = (blob.match(/ProcessGuid:\s*([0-9a-f-{}]+)/i) || [])[1] || "";
+                srcPid = (blob.match(/ProcessId:\s*(\d+)/i) || [])[1] || "";
+                loaded = (blob.match(/ImageLoaded:\s*([^\r\n]+)/i) || [])[1] || r.image || "";
+                signed = (blob.match(/Signed:\s*(\w+)/i) || [])[1] || "";
+                sigStatus = (blob.match(/SignatureStatus:\s*([^\s,]+)/i) || [])[1] || "";
+              } else if (isHayabusaPT) {
+                const compact = parseCompactKeyValues(r.details, r.extra);
+                srcGuid = compactGet(compact, "ProcessGuid", "ProcessGUID", "PGUID");
+                srcPid = compactGetInt(compact, "ProcessId", "PID");
+                loaded = compactGet(compact, "ImageLoaded", "Image", "Module");
+                signed = compactGet(compact, "Signed");
+                sigStatus = compactGet(compact, "SignatureStatus", "SigStatus");
+              } else {
+                srcGuid = r.guid || "";
+                srcPid = r.pid || "";
+                loaded = r.image || compactGet(parseCompactKeyValues(r.details, r.extra), "ImageLoaded") || "";
+                signed = r.signed || "";
+                sigStatus = r.signatureStatus || "";
+              }
+              const target = resolveTarget(srcGuid, srcPid, host, tsMs);
+              if (!target) continue;
+              if (!target.imageLoads) {
+                target.imageLoads = { eventCount: 0, unsignedCount: 0, writablePathCount: 0, samples: [] };
+              }
+              const il = target.imageLoads;
+              il.eventCount++;
+              const path = String(loaded || "").trim();
+              const signedL = String(signed || "").toLowerCase();
+              const statusL = String(sigStatus || "").toLowerCase();
+              const unsigned = signedL === "false" || /invalid|expired|revoked|error|untrusted/.test(statusL);
+              if (unsigned) il.unsignedCount++;
+              if (isWritablePath(path)) il.writablePathCount++;
+              if (il.samples.length < 4) {
+                il.samples.push({ path, signed: signedL, sigStatus: statusL, ts: cleanWrappedField(r.ts || "") });
+              }
+              imageLoadMatched++;
+            }
+          }
+
+          // EID 11 — FileCreate
+          if (eidPresent["11"]) {
+            const rows11 = db.prepare(`SELECT ${sel} FROM data WHERE ${safeEid} = ? ${orderClause} LIMIT ${maxRows}`).all("11");
+            for (const r of rows11) {
+              let srcGuid = "", srcPid = "", targetFile = "";
+              const host = r.hostname || "";
+              const tsMs = normalizeTimestamp(cleanWrappedField(r.ts || ""));
+              if (isEvtxECmdPT) {
+                const blob = [r.pid, r.ppid, r.cmdLine, r.image, r.guid].filter(Boolean).join(" ");
+                srcGuid = (blob.match(/ProcessGuid:\s*([0-9a-f-{}]+)/i) || [])[1] || "";
+                srcPid = (blob.match(/ProcessId:\s*(\d+)/i) || [])[1] || "";
+                targetFile = (blob.match(/TargetFilename:\s*([^\r\n]+)/i) || [])[1] || r.cmdLine || "";
+              } else if (isHayabusaPT) {
+                const compact = parseCompactKeyValues(r.details, r.extra);
+                srcGuid = compactGet(compact, "ProcessGuid", "ProcessGUID", "PGUID");
+                srcPid = compactGetInt(compact, "ProcessId", "PID");
+                targetFile = compactGet(compact, "TargetFilename", "TargetFile", "FileName", "Path");
+              } else {
+                srcGuid = r.guid || "";
+                srcPid = r.pid || "";
+                targetFile = compactGet(parseCompactKeyValues(r.details, r.extra), "TargetFilename", "FileName") || r.image || r.cmdLine || "";
+              }
+              const target = resolveTarget(srcGuid, srcPid, host, tsMs);
+              if (!target) continue;
+              if (!target.fileCreates) {
+                target.fileCreates = { eventCount: 0, peCount: 0, scriptCount: 0, writablePathCount: 0, samples: [] };
+              }
+              const fc = target.fileCreates;
+              fc.eventCount++;
+              const path = String(targetFile || "").trim();
+              if (isPe(path)) fc.peCount++;
+              if (isScript(path)) fc.scriptCount++;
+              if (isWritablePath(path)) fc.writablePathCount++;
+              if (fc.samples.length < 4) {
+                fc.samples.push({ path, ts: cleanWrappedField(r.ts || "") });
+              }
+              fileCreateMatched++;
+            }
+          }
+        }
+      } catch (_adjErr) {
+        // Non-fatal — adjacent telemetry is best-effort.
+      }
+    }
+
     const linkCounts = {};
     for (const node of processes) linkCounts[node.linkSource || "unknown"] = (linkCounts[node.linkSource || "unknown"] || 0) + 1;
 
@@ -982,6 +1238,10 @@ function getProcessTree(meta, options = {}, ctx) {
         terminateMatched,
         accessMatched,
         privilegeMatched,
+        networkMatched,
+        dnsMatched,
+        imageLoadMatched,
+        fileCreateMatched,
         linkCounts,
       },
     };

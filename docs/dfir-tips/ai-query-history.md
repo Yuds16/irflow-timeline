@@ -14,12 +14,13 @@ Supported today:
 
 | Tool | Status |
 |------|--------|
-| **Claude Code** | CLI `~/.claude/` + Claude Desktop `claude-code-sessions/` (separate stores) |
+| **Claude Code** | CLI `~/.claude/` + Claude Desktop/Cowork session stores |
 | **OpenAI Codex** | `$CODEX_HOME` or `~/.codex/` — `history.jsonl`, `sessions/**/rollout-*.jsonl`, `archived_sessions/` |
-| **ChatGPT Desktop** | LevelDB + SQLite under app data dirs (see paths below); encrypted `conversations-v2-*` on newer macOS builds are not decrypted |
-| **Gemini CLI** | `~/.gemini/tmp/<hash>/chats/session-*.json`, `tmp/<hash>/logs.json` (legacy), and `checkpoint-*.json` |
-| **Cursor** | `$CURSOR_AGENT_HOME` or `~/.cursor/projects/.../agent-transcripts/*.jsonl` (and some `.txt` logs) |
-| **GitHub Copilot** | VS Code / VSCodium `workspaceStorage/*/chatSessions/` + `globalStorage/emptyWindowChatSessions/` |
+| **Grok Build** | `$GROK_HOME` or `~/.grok/` — workspace prompt history plus timestamped session updates, normalized chat fallback, and file-hunk records |
+| **ChatGPT Desktop** | LevelDB + SQLite under app data dirs (see paths below); `conversations-v2-*` and `conversations-v3-*` bundles are inventoried but not decoded |
+| **Gemini CLI** | `~/.gemini/tmp/<hash>/chats/**/*.jsonl`, `~/.gemini/shell_history`, plus legacy `session-*.json`, `logs.json`, and checkpoints |
+| **Cursor** | `$CURSOR_AGENT_HOME` or `~/.cursor/projects/.../agent-transcripts/*.jsonl`, composer databases, and Cursor `User/globalStorage/conversation-search.db` |
+| **GitHub Copilot** | Copilot CLI `$COPILOT_HOME` or `~/.copilot/`, plus VS Code / VSCodium `workspaceStorage/*/chatSessions/` and `globalStorage/emptyWindowChatSessions/` |
 | **Windsurf** | `Windsurf/User/workspaceStorage/*/state.vscdb` (VS Code–family chat keys) |
 | **Continue** | `~/.continue/sessions/*.json` |
 
@@ -32,18 +33,20 @@ IRFlow’s **Collect AI Artifacts**, triage detection, and **File → Open** def
 | **Claude Code (CLI)** | all | `~/.claude/history.jsonl`, `~/.claude/projects/**/*.jsonl` |
 | **Claude Desktop** | macOS | `~/Library/Application Support/Claude/claude-code-sessions/` (`local_*.json` index linked to `~/.claude/projects/<slug>/<cliSessionId>.jsonl`) |
 | **Claude Desktop** | Windows | `%APPDATA%\Claude\claude-code-sessions\` |
-| **Claude Desktop (legacy)** | all | `.../Claude/local-agent-mode-sessions/` (pre-2026 rename; IRFlow scans both) |
+| **Claude Desktop / Cowork** | all | `.../Claude/local-agent-mode-sessions/` (`local_*.json`, isolated `.claude/projects/**/*.jsonl`, `audit*.jsonl`, `.audit-key`) |
 | **OpenAI Codex** | all | `$CODEX_HOME` or `~/.codex/` |
+| **Grok Build** | all | `$GROK_HOME` or `~/.grok/` |
 | **ChatGPT** | macOS | `~/Library/Application Support/com.openai.chat/`, `~/Library/Application Support/OpenAI/Atlas/` |
 | **ChatGPT** | Windows | `%APPDATA%\OpenAI\ChatGPT\`, MS Store `%LOCALAPPDATA%\Packages\OpenAI.ChatGPT-*\LocalCache\Roaming\ChatGPT\` |
 | **ChatGPT** | Linux | `~/.config/com.openai.chat/` (and related variants) |
-| **Gemini CLI** | all | `~/.gemini/tmp/<project_hash>/chats/`, `checkpoint-*.json` |
-| **Cursor** | all | `~/.cursor/projects/<slug>/agent-transcripts/` |
-| **GitHub Copilot** | all | `%APPDATA%` or `~/Library/Application Support` → `Code`, `Code - Insiders`, `VSCodium` (+ Insiders) → `User/workspaceStorage/<hash>/chatSessions/` |
+| **Gemini CLI** | all | `~/.gemini/tmp/<project_hash>/chats/`, including nested subagent sessions; `~/.gemini/shell_history`; legacy checkpoints |
+| **Cursor** | all | `~/.cursor/projects/<slug>/agent-transcripts/`; Cursor `User/globalStorage/conversation-search.db` under `%APPDATA%`, `~/Library/Application Support`, or `~/.config` |
+| **GitHub Copilot CLI** | all | `$COPILOT_HOME` or `~/.copilot/` — `session-state/`, `command-history-state/`, `session-store.db`, and `logs/` |
+| **GitHub Copilot (VS Code)** | all | `%APPDATA%` or `~/Library/Application Support` → `Code`, `Code - Insiders`, `VSCodium` (+ Insiders) → `User/workspaceStorage/<hash>/chatSessions/` |
 | **Windsurf** | all | `~/Library/Application Support/Windsurf/User/` (or `~/.config/Windsurf/User/`) — `workspaceStorage/*/state.vscdb` |
 | **Continue** | all | `~/.continue/sessions/*.json` |
 
-> **Composer DBs:** IRFlow reads Cursor `globalStorage/state.vscdb`, workspace `state.vscdb`, and `~/.cursor/chats/**/store.db` (SQLite `cursorDiskKV` bubble messages). **ChatGPT** encrypted `conversations-v2-*` bundles appear as inventory rows (not decrypted — Keychain-gated on macOS). **Codex** `state.sqlite` contributes thread-index metadata rows when present (full text remains in rollout JSONL). **Windsurf** Cascade `.pb` files are inventoried but protobuf bodies are not decoded. **Browser-only** AI usage may only appear under Chrome, Edge, Firefox, and Safari profiles — profile scan empty reports list likely browser paths when found.
+> **SQLite and sensitive stores:** IRFlow reads Cursor `conversation-search.db`, `globalStorage/state.vscdb`, workspace `state.vscdb`, and `~/.cursor/chats/**/store.db` using snapshots that preserve available WAL/SHM companions. Copilot CLI `config.json`, MCP OAuth/secret stores, tracked-file contents, and process-log contents are not copied into timeline text; tracked files and logs are inventory-only. **ChatGPT** `conversations-v2-*` and `conversations-v3-*` bundles appear as inventory rows; their message bodies are not decoded. **Codex** versioned `state*.sqlite` stores are snapshotted with their WAL/SHM companions and contribute thread, spawn-edge, and dynamic-tool metadata (full transcripts remain in rollout JSONL). **Grok Build** credentials (`auth.json`, `mcp_credentials.json`) are never added to timeline rows. **Windsurf** Cascade `.pb` files are inventoried but protobuf bodies are not decoded. **Browser-only** AI usage may only appear under Chrome, Edge, Firefox, and Safari profiles — profile scan empty reports list likely browser paths when found.
 
 ## Artifact coverage and IR value
 
@@ -59,22 +62,33 @@ IRFlow separates AI evidence into three categories:
 |-----|----------|--------|-------------------------------------|
 | **Claude Code** | `~/.claude/history.jsonl` | Parsed | Fast prompt history for user intent, suspicious questions, credential pasting, and session pivots. |
 | **Claude Code** | `~/.claude/projects/**/*.jsonl` | Parsed | Full prompts, responses, tool-use records, attachments, file-history snapshots, model data, token counts, sidechain flags, and workspace context. |
-| **Claude Desktop** | `claude-code-sessions/**/local_*.json` and legacy `local-agent-mode-sessions/` | Parsed metadata + linked transcript rows | Proves Desktop "Code" usage and links local Desktop session metadata to `.claude/projects` transcripts when collected. |
+| **Claude Desktop / Cowork** | `claude-code-sessions/**/local_*.json`; `local-agent-mode-sessions/**/{.claude/projects/**/*.jsonl,audit*.jsonl,.audit-key}` | Parsed metadata, recursive transcripts, and audit rows | Reconstructs isolated Cowork sessions instead of assuming every transcript lives in the host `~/.claude/projects`; audit-key presence is reported so collection tooling can preserve it for later integrity validation. |
 | **OpenAI Codex** | `history.jsonl`, `sessions/**/rollout-*.jsonl`, `archived_sessions/**/rollout-*.jsonl` | Parsed | Shows AI-assisted actions, shell command intent, file edits, tool calls, workspace paths, and possible disclosure of sensitive data. |
-| **OpenAI Codex** | `session_index.jsonl`, `state.sqlite`, VS Code-family `agentSessions.model.cache` entries | Metadata supplement | Adds thread titles, session index context, and embedded Codex provider evidence when full rollout files are sparse or absent. |
+| **OpenAI Codex** | `session_index.jsonl`, `state*.sqlite` plus WAL/SHM, VS Code-family `agentSessions.model.cache` entries | Metadata supplement | Adds thread titles, workspace/model/git context, parent-child spawn edges, dynamic tools, and embedded Codex provider evidence when full rollout files are sparse or absent. |
+| **Grok Build** | `sessions/<encoded-cwd>/prompt_history.jsonl` | Parsed | Provides timestamped user prompts and direct shell entries (`is_bash`), including the exact command in **ToolCommand**. |
+| **Grok Build** | `<session-id>/summary.json`, `updates.jsonl`, `chat_history.jsonl`, `hunk_records.jsonl` | Parsed | Reconstructs sessions, responses/reasoning, tool calls and completion output, token usage, model/workspace context, and files changed by the agent. |
+| **Grok Build** | `<session-id>/terminal/call-*.log` | Preserved source artifact | Captured terminal output is normally present in `updates.jsonl`; `rawOutput.output_file` records the corresponding terminal-log path for provenance. |
+| **Grok Build** | `auth.json`, `mcp_credentials.json`, `config.toml`, `trusted_folders.toml` | Deliberately not parsed | These files can expose authorization/configuration state. Preserve and examine them only when in scope; IRFlow does not copy credential values into timeline fixtures or rows. |
 | **ChatGPT Desktop / Atlas** | LevelDB and SQLite stores under app data directories | Parsed when local stores contain data | LevelDB often proves conversation existence and titles; SQLite stores can contain full user/assistant message bodies on supported app versions. |
-| **ChatGPT Desktop / Atlas** | `conversations-v2-*` | Inventory-only | Newer encrypted local bundles are Keychain-gated on macOS. IRFlow reports their presence but does not decrypt them. |
-| **Gemini CLI** | `~/.gemini/tmp/<hash>/chats/session-*.json`, `checkpoint-*.json`, `logs.json` | Parsed | Captures local Gemini CLI prompts, responses, system/error records, and project-scoped CLI activity. |
+| **ChatGPT Desktop / Atlas** | `conversations-v2-*`, `conversations-v3-*/*.data`, including `project-*` stores | Inventory-only | IRFlow reports bundle UUID, generation, project/store context, size, and source path. It does not decode message bodies. |
+| **Gemini CLI** | `~/.gemini/tmp/<hash>/chats/**/*.jsonl`, `~/.gemini/shell_history`, and legacy `session-*.json`, checkpoints, and logs | Parsed | Replays current append-only sessions, including `$set` checkpoints and `$rewindTo`, exact tool inputs and shell commands, tool results, nested subagents, and exact shell-history entries. |
 | **Cursor** | `~/.cursor/projects/<slug>/agent-transcripts/**/*.{jsonl,txt}` | Parsed | High-value Cursor agent evidence: instructions, responses, tool-use text, sidechain flags, and workspace attribution. |
 | **Cursor** | `globalStorage/state.vscdb`, `workspaceStorage/*/state.vscdb`, `~/.cursor/chats/**/store.db` | Parsed when SQLite support is available | Recovers composer/global/workspace chats that are not present in agent-transcript files. |
+| **Cursor** | `Cursor/User/globalStorage/conversation-search.db` plus WAL/SHM when present | Parsed | Recovers the local full-text conversation index: title, indexed body, conversation ID, source/scope, archive state, and update time. |
 | **GitHub Copilot** | VS Code-family `workspaceStorage/*/chatSessions/*.{json,jsonl}` and `globalStorage/emptyWindowChatSessions/*` | Parsed | Reconstructs Copilot Chat tied to workspaces and captures chats created without a folder open. |
 | **GitHub Copilot** | VS Code-family `state.vscdb` chat/session keys | Metadata/message supplement | Recovers chat session indexes, prompt arrays, or cached messages when chat session files are sparse. |
+| **GitHub Copilot CLI** | `~/.copilot/session-state/<session-id>/events.jsonl`, `workspace.yaml`, `plan.md`, and `checkpoints/` | Parsed | Reconstructs prompts, responses, exact tool inputs and shell commands, results, session/workspace/model context, plans, and checkpoints. |
+| **GitHub Copilot CLI** | `~/.copilot/command-history-state/` and `session-store.db` plus WAL/SHM | Parsed / metadata supplement | Preserves exact recorded command history and safe session/checkpoint metadata that can bridge sparse session files. |
+| **GitHub Copilot CLI** | `~/.copilot/session-state/*/files/` and `~/.copilot/logs/` | Inventory-only | Records path, size, and modification time without ingesting tracked-file or process-log contents. |
+| **GitHub Copilot CLI** | `config.json`, `mcp-oauth-config/`, `mcp-secrets/`, permission/config stores | Deliberately excluded | Avoids importing authentication, OAuth, MCP secret, or permission values into timeline rows. Preserve separately only when authorized and in scope. |
 | **Windsurf** | `Windsurf/User/globalStorage/state.vscdb` and `workspaceStorage/*/state.vscdb` | Parsed when SQLite support is available | Captures global and workspace Windsurf chat/session evidence. |
 | **Windsurf** | `globalStorage/windsurf.cascade/**/*.pb` | Inventory-only | Flags proprietary Cascade protobuf bundles for preservation. Message bodies are not decoded. |
 | **Continue** | `~/.continue/sessions/*.json` | Parsed | Captures Continue.dev local prompts/responses and maps them to the workspace directory. |
-| **Browser AI usage** | Chrome, Edge, Firefox, and Safari profile storage paths | Hint-only | Browser-only ChatGPT, Claude, Copilot, and Gemini usage may require browser profile collection or vendor export. |
+| **Browser AI usage** | Chrome, Edge, Firefox, and Safari profile storage paths | Hint-only | Browser-only ChatGPT, Claude, Grok, Copilot, and Gemini usage may require browser profile collection or vendor export. |
 
-`Tool` identifies the AI app family, such as **OpenAI Codex** or **Claude Code**. `InvokedTool` is reserved for an invoked function/tool inside that app, such as a shell command, editor operation, or model tool call. Provider names should not appear in `InvokedTool`; older saved tabs may still show the legacy `ToolName` header.
+`Tool` identifies the AI app family, such as **OpenAI Codex**, **Grok Build**, or **Claude Code**. `InvokedTool` is reserved for an invoked function/tool inside that app, such as a shell command, editor operation, or model tool call. Provider names should not appear in `InvokedTool`; older saved tabs may still show the legacy `ToolName` header.
+
+For Cursor and Claude-style `tool_use` records, Codex `function_call` records, and Copilot CLI tool-execution events, IRFlow also preserves **ToolCommand**, **ToolInput**, and **ToolDescription**. `ToolCommand` is the exact recorded command value. When the source stores an argument vector instead of a command string, the value stays in JSON array form so quoting and argument boundaries are not invented. `ToolInput` keeps the original structured arguments; a message containing multiple tool calls stores a JSON array keyed by tool name.
 
 `Summary` is the grid-friendly preview. `FullText` preserves the richer message body for long prompts, responses, tool output, secret scanning, and export.
 
@@ -92,7 +106,7 @@ From a triage image, look under user profiles, for example:
 - `C:\Users\<user>\.claude\`
 - `/Users/<user>/.claude/` (when collected from macOS endpoints)
 
-Each message becomes a timeline row with **Timestamp**, **Role**, **RecordType**, **Summary**, **FullText**, **InvokedTool**, **SessionId**, **Model**, token counts (when present), **IsSidechain**, **GitBranch**, **SourceFile**, and a **Description** column for search and review. Claude session files also surface non-chat events (file snapshots, system/compaction markers, attachments, and similar).
+Each message becomes a timeline row with **Timestamp**, **Role**, **RecordType**, **Summary**, **FullText**, **InvokedTool**, **ToolCommand**, **ToolInput**, **ToolDescription**, **SessionId**, **Model**, token counts (when present), **IsSidechain**, **GitBranch**, **SourceFile**, and a **Description** column for search and review. Claude session files also surface non-chat events (file snapshots, system/compaction markers, attachments, and similar).
 
 When both `history.jsonl` and session JSONL contain the same prompt, the session copy is kept and the history duplicate is dropped.
 
@@ -109,6 +123,7 @@ ChatGPT stores vary by version:
 
 - **LevelDB** (`Local Storage/leveldb/*.ldb`) — conversation titles and timestamps (role `conversation`).
 - **SQLite** — full user/assistant message bodies when the app version writes them locally.
+- **Conversation bundles** — `conversations-v2-*` and `conversations-v3-*/*.data`, including project stores, become metadata inventory rows. IRFlow records their UUID, generation, project/store context, size, and path without claiming to decode their bodies.
 
 ### OpenAI Codex (CLI / Desktop)
 
@@ -126,14 +141,33 @@ ChatGPT stores vary by version:
 
 The macOS **Codex** app in `~/Library/Application Support/Codex` is UI cache only; forensic content is under **`~/.codex`**.
 
+### Grok Build (official terminal agent)
+
+[Grok Build](https://github.com/xai-org/grok-build) is xAI's official terminal coding agent. Its default data root is `~/.grok`; `GROK_HOME` can override that location. The official [authentication guide](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md) documents `~/.grok/auth.json` and `~/.grok/mcp_credentials.json`, both of which should be treated as credential-bearing evidence.
+
+| Artifact | Forensic value |
+|----------|----------------|
+| `sessions/<encoded-cwd>/prompt_history.jsonl` | Timestamp, session ID, prompt, and `is_bash`; direct bash entries populate **ToolCommand** exactly. |
+| `<session-id>/summary.json` | Session ID/title, created/updated time, cwd, model, Git branch/commit context, agent mode, sandbox profile, and reasoning effort. |
+| `<session-id>/updates.jsonl` | Timestamped user/assistant/reasoning chunks, tool calls (`rawInput`), completion output (`rawOutput`), stop reason, and token usage. |
+| `<session-id>/chat_history.jsonl` | Normalized conversation fallback when timestamped updates are absent. |
+| `<session-id>/hunk_records.jsonl` | File path, added/removed line counts, prompt index, hunk ID, author, and event timestamp. |
+| `<session-id>/terminal/call-*.log` | Captured output for terminal commands; the related updates record can reference the log through `output_file`. |
+| `<session-id>/events.jsonl`, `signals.json`, `prompt_context.json` | Additional lifecycle, performance, environment, and context evidence; preserve even when not yet projected into timeline rows. |
+| `trusted_folders.toml`, `slash-mru.json`, `version.json`, `agent_id` | Trust decisions, recent slash-command state, installed-version metadata, and installation identity. |
+
+For a `run_terminal_command` event, IRFlow places the exact recorded `rawInput.command` in **ToolCommand**, retains all structured input in **ToolInput**, and creates a related `tool_result` row containing working directory, exit code, timeout/truncation flags, captured output, and terminal-log path when present. Failed calls use `tool_result_failed`.
+
+The consumer Grok product is separate. IRFlow does not currently claim a native parser for consumer Grok web/mobile chats. Investigate ordinary browser history, downloads, cache, cookies, local/IndexedDB storage, and vendor exports for `grok.com` or X/Grok use; do not attribute a generic browser profile to Grok without origin-level evidence.
+
 ### Gemini CLI
 
 | Platform | Typical path |
 |----------|----------------|
-| macOS / Linux | `~/.gemini/tmp/<hash>/chats/session-*.json` or `tmp/<hash>/logs.json` |
-| Windows | `C:\Users\<user>\.gemini\tmp\<hash>\chats\session-*.json` |
+| macOS / Linux | `~/.gemini/tmp/<hash>/chats/**/*.jsonl`, `~/.gemini/shell_history` |
+| Windows | `C:\Users\<user>\.gemini\tmp\<hash>\chats\**\*.jsonl`, `C:\Users\<user>\.gemini\shell_history` |
 
-Each `session-*.json` file holds a `messages` array. Entries with `type: "user"` and `type: "gemini"` become timeline rows. Optional `thoughts` are noted as `[Reasoning present]` without dumping full reasoning text into the grid.
+Current Gemini CLI sessions are append-only JSONL. IRFlow replays message records, `$set` checkpoints, and `$rewindTo` operations to reconstruct the retained session state. It emits separate tool-call and tool-result rows, preserves the exact `run_shell_command` command in **ToolCommand**, and marks nested chat directories as subagent evidence. `shell_history` is also parsed, including continued multiline commands. Legacy `session-*.json`, checkpoints, and `logs.json` remain supported.
 
 This is the **Gemini CLI** (npm/agentic CLI), not the official Gemini macOS desktop app (which is mostly cloud-synced).
 
@@ -143,18 +177,26 @@ This is the **Gemini CLI** (npm/agentic CLI), not the official Gemini macOS desk
 |----------|----------------|
 | macOS / Linux | `~/.cursor/projects/<project-slug>/agent-transcripts/<session-id>/<session-id>.jsonl` |
 | Windows | `%USERPROFILE%\.cursor\projects\...` |
+| macOS | `~/Library/Application Support/Cursor/User/globalStorage/conversation-search.db` |
+| Windows | `%APPDATA%\Cursor\User\globalStorage\conversation-search.db` |
+| Linux | `~/.config/Cursor/User/globalStorage/conversation-search.db` |
 
 Each JSONL line is a `user` or `assistant` message with structured `message.content` blocks (text, tool calls). IRFlow uses embedded `timestamp` / `createdAt` values when present; file birth/mtime spreading is only a fallback for transcript rows without per-message time. Project slugs under `projects/` decode to filesystem paths when possible. Subagent transcripts under `subagents/` are skipped by default (same scope prompt as Claude/Codex).
 
-### GitHub Copilot (VS Code)
+`conversation-search.db` is also accepted as a standalone artifact or through its parent Cursor `User` folder. Each indexed conversation becomes a searchable timeline row with its title in **Summary**, indexed body in **FullText**, conversation ID in **SessionId**, and the recorded update time.
+
+### GitHub Copilot (CLI and VS Code)
 
 | Platform | Typical path |
 |----------|----------------|
+| all (CLI) | `$COPILOT_HOME` or `~/.copilot/` |
 | macOS | `~/Library/Application Support/Code/User/workspaceStorage/<hash>/chatSessions/` |
 | Windows | `%APPDATA%\Code\User\workspaceStorage\<hash>\chatSessions\` |
 | Linux | `~/.config/Code/User/workspaceStorage/<hash>/chatSessions/` |
 
-Sessions are stored as `.json` or `.jsonl`. JSONL replays `kind: 0` / `kind: 2` / `kind: 1` lines (not only the last snapshot). **Code - Insiders** and **`emptyWindowChatSessions`** (chats with no folder open) are included. `workspace.json` beside each hash folder maps to the opened workspace path for the **Workspace** column.
+Copilot CLI session events are read from `session-state/<session-id>/events.jsonl`; IRFlow also parses workspace metadata, plans, checkpoints, exact command history, and safe `session-store.db` metadata. Tracked files and process logs are inventoried without reading their contents, and authentication/MCP secret stores are excluded.
+
+VS Code sessions are stored as `.json` or `.jsonl`. JSONL replays `kind: 0` / `kind: 2` / `kind: 1` lines (not only the last snapshot). **Code - Insiders** and **`emptyWindowChatSessions`** (chats with no folder open) are included. `workspace.json` beside each hash folder maps to the opened workspace path for the **Workspace** column.
 
 ## How to use it in IRFlow
 
@@ -198,20 +240,26 @@ Use this for a live Mac triage without a KAPE folder, or to sanity-check what is
 1. **File → Open…** and select your `~/.codex` folder (recommended), or **Tools → Analysis → AI Artifacts → AI Apps → OpenAI Codex…**
 2. Imports `history.jsonl` plus all `rollout-*.jsonl` under `sessions/` and `archived_sessions/` (deduped against session prompts).
 
+**Grok Build**
+
+1. **File → Open…** and select `$GROK_HOME` or `~/.grok` (recommended), or **Tools → Analysis → AI Artifacts → AI Apps → Grok Build…**
+2. IRFlow imports workspace prompt histories and session `summary.json`, `updates.jsonl` (or `chat_history.jsonl` fallback), and `hunk_records.jsonl`.
+3. Subagent session folders are skipped by default unless you choose **Include subagents**.
+
 **Gemini CLI**
 
 1. **File → Open…** and select your `.gemini` folder (recommended), or **Tools → Analysis → AI Artifacts → AI Apps → Gemini CLI…**
-2. Multiple `session-*.json` files from the same `.gemini` tree consolidate into **one** tab.
+2. Current `chats/**/*.jsonl`, `shell_history`, and legacy JSON artifacts from the same `.gemini` tree consolidate into **one** tab.
 
 **Cursor**
 
-1. **File → Open…** and select your `~/.cursor` folder (recommended), or **Tools → Analysis → AI Artifacts → AI Apps → Cursor…**
-2. Multiple agent-transcript `.jsonl` files consolidate into **one** tab. Subagent folders are skipped unless you choose **Include subagents**.
+1. **File → Open…** and select your `~/.cursor` folder, Cursor `User` folder, or `conversation-search.db`, or **Tools → Analysis → AI Artifacts → AI Apps → Cursor…**
+2. Agent transcripts and available Cursor SQLite stores consolidate into **one** tab. Subagent folders are skipped unless you choose **Include subagents**.
 
 **GitHub Copilot**
 
-1. **File → Open…** and select `workspaceStorage` or a specific `chatSessions` folder, or **Tools → Analysis → AI Artifacts → AI Apps → GitHub Copilot…**
-2. All sessions for each workspace hash are merged into **one** tab per import path.
+1. **File → Open…** and select `$COPILOT_HOME` / `~/.copilot`, `workspaceStorage`, or a specific `chatSessions` folder, or **Tools → Analysis → AI Artifacts → AI Apps → GitHub Copilot…**
+2. CLI sessions or all sessions for each VS Code workspace hash are merged into **one** tab per import path.
 
 **Windsurf**
 
@@ -227,15 +275,15 @@ IRFlow opens a new timeline tab with all extracted messages.
 
 ## Large trees and performance
 
-- **File → Open** on a `.claude` or `.codex` folder skips **`subagents/`** session paths by default (main thread only). This keeps triage imports fast on hosts with 80k+ JSONL lines.
-- **Tools → Analysis → AI Artifacts → AI Apps → Claude Code / OpenAI Codex / Cursor** asks whether to include subagent content when you pick a directory: Claude `subagents/` folders and inline sidechains, Cursor `isSidechain` transcript lines, Codex forked threads (`parent_session_id` in session metadata).
+- **File → Open** on a `.claude`, `.codex`, or `.grok` folder skips **`subagents/`** session paths by default (main thread only). This keeps triage imports fast on large developer workstations.
+- **Tools → Analysis → AI Artifacts → AI Apps → Claude Code / OpenAI Codex / Grok Build / Cursor** asks whether to include subagent content when you pick a directory: Claude `subagents/` folders and inline sidechains, Cursor `isSidechain` transcript lines, Codex forked threads (`parent_session_id` in session metadata), and Grok Build `subagents/` session trees.
 - Import progress shows **per-source file** status (e.g. `Reading session-12.jsonl (12/340)`) while JSONL/SQLite is parsed, then row write progress.
 
 ### Extraction safeguards
 
 - **Cancel** — profile imports run in a worker thread; cancel uses a per-job abort check so a second import is not stopped by an earlier cancel.
 - **Row cap** — merged profile extracts stop ingesting after **3,000,000** rows; the tab notice reports when the cap was hit.
-- **Malformed JSONL** — Claude, Codex, and Cursor parsers count lines that fail JSON parse; the import notice reports the total so you know data may be incomplete.
+- **Malformed JSONL** — Claude, Codex, Grok Build, and Cursor parsers count lines that fail JSON parse; the import notice reports the total so you know data may be incomplete.
 - **Scope confinement** — when you pick a KAPE folder or collection root for AI extract, discovered artifact paths must resolve **inside** that folder; paths outside the scope (including `..` traversal) are dropped. The same confinement applies whenever a **browse folder** path is set on **Collect AI Artifacts**, even if discovery also probed standard local paths.
 - **Path authorization** — folders and files chosen in **File → Open**, **Tools → Analysis → AI Artifacts**, and **Collect AI Artifacts** (browse) are registered in a scoped allow-list before read (same model as Sigma/KAPE scan targets). Renderer-supplied paths that were not picked in-app are rejected.
 
@@ -262,6 +310,7 @@ Share the folder with counsel or attach it to a case folder; re-hash sources ind
 ## Investigation tips
 
 - On an **AI Query History** tab, run **AI Secret Hunt** for credential and key exposure, then use **Row Detail → Filter session** / **Correlate path** (jumps to open Prefetch, EVTX/Sigma, or Amcache tabs with a column filter on the workspace executable/path).
+- Filter **InvokedTool** for `Shell` or `Bash`, then review **ToolCommand** for the exact recorded command and **ToolInput** for cwd, timeout, permissions, and other invocation arguments. Tool inputs may themselves contain secrets and should be handled as evidence.
 - **FullText** holds the complete message when **Summary** is truncated; Row Detail also prefers FullText for Summary cells. **Export AI History Package** always includes **FullText** in the CSV even if the column is hidden in the grid.
 - Merged profile scans **dedupe identical prompts across tools** (same role + message text) so Claude and Cursor duplicates collapse to one row. Provenance is preserved: the kept row's **AlsoInTools** column lists every tool the prompt appeared in (e.g. `Claude Code, Cursor`), so the merge never hides which assistants ran the same prompt.
 - **Copilot** replays JSONL `kind:0` / `kind:2` / `kind:1` lines, falls back to sibling `.jsonl` when `.json` is empty, and scans `emptyWindowChatSessions`.
@@ -285,4 +334,6 @@ Large profile scans, **Collect AI Artifacts**, and merged folder extracts share 
 - **Summary** is truncated for grid display; use row detail **Open source** (and **LineNumber** for JSONL) to jump to the artifact on disk.
 - Claude Code: `history.jsonl` and session files may overlap; both are extracted for completeness.
 - ChatGPT: newer builds may keep full chat text cloud-only — local LevelDB may contain titles/timestamps only.
+- Consumer Grok: web/mobile chats are not decoded as a native application store; collect browser origin data or a vendor export.
+- Grok Build: `events.jsonl`, `signals.json`, `prompt_context.json`, and some auxiliary state remain preservation targets even though the first parser slice does not project every record into the timeline.
 - Official **Gemini macOS desktop app** is not parsed (cloud-first); only **Gemini CLI** local sessions are supported.

@@ -17,6 +17,8 @@ const { getXLSXSheets, extractResidentData } = require("./parsers");
 const { createUpdateController } = require("./updater");
 const { JobManager } = require("./jobs/job-manager");
 const { resolveTempDir } = require("./utils/temp-dir");
+const { buildMenu: _buildMenu } = require("./menu");
+const packageMeta = require("../package.json");
 
 // Raise V8 heap limit to 16GB — needed for importing large forensic images (20GB+)
 // app.commandLine.appendSwitch only affects renderer processes; for the main process
@@ -164,12 +166,32 @@ function _cleanupDbFiles(dbPath) {
 }
 
 function enqueueImport(filePath, opts) {
-  let fileName; try { fileName = decodeURIComponent(path.basename(filePath)); } catch { fileName = path.basename(filePath); }
+  let fileName;
+  if (opts?.displayName) { fileName = opts.displayName; }
+  else { try { fileName = decodeURIComponent(path.basename(filePath)); } catch { fileName = path.basename(filePath); } }
   let fileSize = 0; try { fileSize = fs.statSync(filePath).size; } catch {}
   _importQueue.push({ filePath, fileName, fileSize, ...opts });
   if (!opts?.skipRecent) addRecentFile(filePath);
   _broadcastQueue();
   _processQueue();
+}
+
+/**
+ * Drop still-queued imports matching `predicate`. Used by "Open Triage Collection" to
+ * cancel the remainder of a batch — a collection can queue several multi-GB files, and
+ * without this a mis-click has to be waited out. Returns how many were removed.
+ */
+function removeQueuedImports(predicate) {
+  if (typeof predicate !== "function") return 0;
+  const before = _importQueue.length;
+  for (let i = _importQueue.length - 1; i >= 0; i--) {
+    let hit = false;
+    try { hit = !!predicate(_importQueue[i]); } catch { hit = false; }
+    if (hit) _importQueue.splice(i, 1);
+  }
+  const removed = before - _importQueue.length;
+  if (removed > 0) _broadcastQueue();
+  return removed;
 }
 
 function _broadcastQueue() {
@@ -190,7 +212,7 @@ async function _processQueue() {
     dbg("QUEUE", `Starting import: ${item.fileName}`, { heapMB: Math.round(memBefore.heapUsed / 1048576), rssMB: Math.round(memBefore.rss / 1048576), queueRemaining: _importQueue.length });
 
     try {
-      await importFile(item.filePath, item.tabId, item.sheetName);
+      await importFile(item.filePath, item.tabId, item.sheetName, item);
     } catch (err) {
       dbg("QUEUE", `importFile failed for ${item.fileName}`, { error: err?.message });
       // Notify renderer so it can dismiss the loading state for this file
@@ -424,6 +446,23 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, "..", "dist", "index.html"));
   }
 
+  const wc = mainWindow.webContents;
+  wc.on("render-process-gone", (_event, details) => {
+    dbg("CRASH", "Renderer process gone", { reason: details?.reason, exitCode: details?.exitCode });
+    try {
+      dialog.showErrorBox(
+        "IRFlow Timeline — Display Error",
+        `The timeline view stopped unexpectedly (${details?.reason || "unknown"}).\n\nIf this happened after a large import, quit and restart IRFlow, then reopen the file. Debug log: ${debugLogPath}`
+      );
+    } catch (_) {}
+  });
+  wc.on("unresponsive", () => {
+    dbg("CRASH", "Renderer became unresponsive");
+  });
+  wc.on("responsive", () => {
+    dbg("CRASH", "Renderer responsive again");
+  });
+
   mainWindow.once("ready-to-show", () => {
     mainWindow.show();
     if (app.pendingFilePath) {
@@ -440,14 +479,14 @@ function createWindow() {
 
 // ── File import (delegated to electron/import.js) ──────────────────
 const { importFile: _importFile } = require("./import");
-async function importFile(filePath, preTabId, preSheetName) {
+async function importFile(filePath, preTabId, preSheetName, queueItem = {}) {
   return _importFile(filePath, preTabId, preSheetName, {
     mainWindow, safeSend, activeWindow: _activeWindow, db,
     getXLSXSheets, enqueueImport, runImportJob, scheduleIndexBuild,
     importQueue: _importQueue, pendingIndexTabs: _pendingIndexTabs,
     tabMeta: _tabMeta,
     nextTabId: () => `tab_${++tabCounter}_${Date.now()}`,
-  });
+  }, queueItem);
 }
 
 function _descriptorsForTabs(tabIds) {
@@ -487,12 +526,19 @@ function runAnalyzerJob(method, payload = {}) {
 }
 
 // ── IPC Handlers (extracted to electron/ipc/) ────────────────────
+const { PathAuthorizer } = require("./utils/path-authorizer");
+// One authorizer for the whole main process. Scopes are namespaced strings, so a grant
+// under "triage-root" does NOT satisfy a "scan-target" check — sharing the instance only
+// lets modules hand a path they already validated to another module, deliberately.
+const _pathAuthorizer = new PathAuthorizer();
 const { registerAll } = require("./ipc");
 registerAll(safeHandle, safeSend, {
   db,
   _tabMeta,
   _activeWindow,
   enqueueImport,
+  pathAuthorizer: _pathAuthorizer,
+  removeQueuedImports,
   _loadRecentFiles,
   _saveRecentFiles,
   _rebuildMenu: () => _rebuildMenu(),
@@ -502,13 +548,13 @@ registerAll(safeHandle, safeSend, {
   startAnalyzerJob,
   scheduleIndexBuild,
   nextTabId: () => `tab_${++tabCounter}_${Date.now()}`,
+  _newTempDbPath,
   extractResidentData,
   updateController,
   mainWindow: { isDestroyed() { return !mainWindow || mainWindow.isDestroyed(); } },
 });
 
 // ── Native macOS Menu (delegated to electron/menu.js) ─────────────
-const { buildMenu: _buildMenu } = require("./menu");
 function _rebuildMenu() { buildMenu(); }
 
 function buildMenu() {
@@ -524,4 +570,14 @@ function buildMenu() {
 
 // ── HTML Report Builder ──────────────────────────────────────────
 
-app.whenReady().then(() => { _applyTempStorageEnv(); createWindow(); });
+app.whenReady().then(() => {
+  app.setAboutPanelOptions({
+    applicationName: "IRFlow Timeline",
+    applicationVersion: packageMeta.version,
+    version: packageMeta.version,
+    credits: packageMeta.description,
+    copyright: "Copyright © Renzon Cruz and contributors",
+  });
+  _applyTempStorageEnv();
+  createWindow();
+});

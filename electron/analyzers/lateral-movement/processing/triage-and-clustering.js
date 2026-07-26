@@ -13,20 +13,39 @@
  */
 const { DC_PAT: _DC_PAT, SRV_PAT: _SRV_PAT, SEV_ORDER: sevOrder } = require("../constants");
 
+/**
+ * Index findings by "SOURCE->TARGET". A pure projection of the findings array, so any
+ * stage can rebuild it for the findings that exist at its point in the pipeline —
+ * stages that emit findings now run before triage and still need this index.
+ */
+function buildFindingPairs(findings) {
+  const pairs = new Map();
+  for (const f of findings || []) {
+    if (!f.source) continue;
+    const targets = (f.target || "").split(", ").filter(Boolean);
+    for (const t of targets) {
+      const pk = `${(f.source || "").toUpperCase()}->${t.toUpperCase()}`;
+      if (!pairs.has(pk)) pairs.set(pk, []);
+      pairs.get(pk).push(f.id);
+    }
+  }
+  return pairs;
+}
+
+/** Set of "A->B" hops present in any chain. Pure projection of `chains`. */
+function buildChainEdges(chains) {
+  const edges = new Set();
+  for (const chain of chains || []) {
+    for (let ci = 0; ci < chain.path.length - 1; ci++) edges.add(`${chain.path[ci]}->${chain.path[ci + 1]}`);
+  }
+  return edges;
+}
+
 function correlateTriageAndCluster(state) {
   const { findings, chains, timeOrdered, _outlierHosts, _dedupeEvidenceRefs, _rowidsFromRefs } = state;
 
       // === _findingPairs: index findings by source->target pair ===
-      const _findingPairs = new Map();
-      for (const f of findings) {
-        if (!f.source) continue;
-        const targets = (f.target || "").split(", ").filter(Boolean);
-        for (const t of targets) {
-          const pk = `${(f.source || "").toUpperCase()}->${t.toUpperCase()}`;
-          if (!_findingPairs.has(pk)) _findingPairs.set(pk, []);
-          _findingPairs.get(pk).push(f.id);
-        }
-      }
+      const _findingPairs = buildFindingPairs(findings);
 
       // === Related findings: other findings on same source->target pair ===
       for (const f of findings) {
@@ -40,10 +59,7 @@ function correlateTriageAndCluster(state) {
       }
 
       // === Chain edges set (for triage scoring + edge scoring) ===
-      const _chainEdges = new Set();
-      for (const chain of chains) {
-        for (let ci = 0; ci < chain.path.length - 1; ci++) _chainEdges.add(`${chain.path[ci]}->${chain.path[ci + 1]}`);
-      }
+      const _chainEdges = buildChainEdges(chains);
 
       // === Triage priority score ===
       const _sevBase = { critical: 40, high: 25, medium: 12, low: 3 };
@@ -300,4 +316,4 @@ function correlateTriageAndCluster(state) {
   return { _findingPairs, _chainEdges, executionSessions, incidents };
 }
 
-module.exports = { correlateTriageAndCluster };
+module.exports = { correlateTriageAndCluster, buildFindingPairs, buildChainEdges };

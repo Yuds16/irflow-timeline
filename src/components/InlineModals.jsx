@@ -1,7 +1,8 @@
-import { useState, useMemo, useRef } from "react";
+import { useState, useMemo, useRef, useEffect } from "react";
 import useUIStore from "../store/useUIStore.js";
 import useTabStore from "../store/useTabStore.js";
 import { PRESETS } from "../constants/presets.js";
+import { SEARCH_BEHAVIORS, SEARCH_CONDITIONS, SEARCH_MATCH_MODES } from "../constants/ui-controls.js";
 import { formatNumber, formatBytes } from "../utils/format.js";
 
 // Helper to build the theme-dependent modal styles object
@@ -9,20 +10,56 @@ export function makeModalStyles(th) {
   return {
     mh: { margin: "0 0 14px", fontSize: 16, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif" },
     fg: { marginBottom: 10 },
-    lb: { display: "block", fontSize: 10, color: th.textDim, marginBottom: 3, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "-apple-system, sans-serif" },
+    lb: { display: "block", fontSize: 11, color: th.textDim, marginBottom: 3, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "-apple-system, sans-serif" },
     sl: { width: "100%", padding: "6px 8px", background: th.bgInput, border: `1px solid ${th.btnBorder}`, borderRadius: 6, color: th.text, fontSize: 12, outline: "none", fontFamily: "inherit" },
     ip: { width: "100%", padding: "6px 8px", background: th.bgInput, border: `1px solid ${th.btnBorder}`, borderRadius: 6, color: th.text, fontSize: 12, outline: "none", fontFamily: "inherit", boxSizing: "border-box" },
     bp: { padding: "6px 16px", background: th.primaryBtn, color: "#fff", border: "none", borderRadius: 6, fontSize: 12, fontWeight: 500, cursor: "pointer", fontFamily: "-apple-system,sans-serif" },
     bs: { padding: "6px 16px", background: th.btnBg, color: th.text, border: `1px solid ${th.btnBorder}`, borderRadius: 6, fontSize: 12, cursor: "pointer", fontFamily: "-apple-system,sans-serif" },
-    bsm: { padding: "3px 8px", background: th.btnBg, color: th.text, border: `1px solid ${th.btnBorder}`, borderRadius: 4, fontSize: 10, cursor: "pointer", fontFamily: "-apple-system,sans-serif" },
+    bsm: { padding: "4px 9px", minHeight: 26, background: th.btnBg, color: th.text, border: `1px solid ${th.btnBorder}`, borderRadius: 4, fontSize: 11, cursor: "pointer", fontFamily: "-apple-system,sans-serif" },
   };
 }
 
 // Shared modal overlay wrapper
-export function Overlay({ th, children }) {
+export function Overlay({ th, children, label = "Dialog" }) {
+  const dialogRef = useRef(null);
+
+  useEffect(() => {
+    const previousFocus = document.activeElement;
+    const dialog = dialogRef.current;
+    if (!dialog) return undefined;
+    const selector = 'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [href], [tabindex]:not([tabindex="-1"])';
+    const firstControl = dialog.querySelector(selector);
+    (firstControl || dialog).focus({ preventScroll: true });
+
+    const trapFocus = (event) => {
+      if (event.key !== "Tab") return;
+      const controls = [...dialog.querySelectorAll(selector)].filter((node) => node.getClientRects().length > 0);
+      if (controls.length === 0) {
+        event.preventDefault();
+        dialog.focus();
+        return;
+      }
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    dialog.addEventListener("keydown", trapFocus);
+    return () => {
+      dialog.removeEventListener("keydown", trapFocus);
+      previousFocus?.focus?.({ preventScroll: true });
+    };
+  }, []);
+
   return (
     <div style={{ position: "fixed", inset: 0, background: th.overlay, display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, backdropFilter: "blur(4px)", WebkitBackdropFilter: "blur(4px)", WebkitAppRegion: "drag", animation: "tle-overlay-in var(--m-fast) var(--ease-out-soft)" }}>
-      <div style={{ background: th.modalBg + "f2", border: `1px solid ${th.glassBorder}`, borderRadius: 12, padding: 24, width: 480, maxWidth: "92vw", maxHeight: "80vh", overflow: "auto", backdropFilter: "blur(40px) saturate(1.6)", WebkitBackdropFilter: "blur(40px) saturate(1.6)", boxShadow: "0 24px 80px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.04) inset", WebkitAppRegion: "no-drag", animation: "tle-modal-in var(--m-modal) var(--ease-out)" }}>
+      <div ref={dialogRef} role="dialog" aria-modal="true" aria-label={label} tabIndex={-1}
+        style={{ background: th.modalBg + "f2", border: `1px solid ${th.glassBorder}`, borderRadius: 12, padding: 24, width: 480, maxWidth: "92vw", maxHeight: "80vh", overflow: "auto", backdropFilter: "blur(40px) saturate(1.6)", WebkitBackdropFilter: "blur(40px) saturate(1.6)", boxShadow: "0 24px 80px rgba(0,0,0,0.55), 0 0 0 1px rgba(255,255,255,0.04) inset", WebkitAppRegion: "no-drag", animation: "tle-modal-in var(--m-modal) var(--ease-out)" }}>
         {children}
       </div>
     </div>
@@ -136,7 +173,7 @@ export function ColModal({ th, ct, up, ms, colMgrSearch, setColMgrSearch, colMgr
       </div>
       <input
         type="text"
-        placeholder="Search columns…"
+        placeholder="Search columns"
         value={colMgrSearch}
         onChange={(e) => setColMgrSearch(e.target.value)}
         style={{ ...ms.ip, marginBottom: 8 }}
@@ -198,7 +235,7 @@ export function ShortModal({ th, ms }) {
   return (
     <Overlay th={th}>
       <h3 style={ms.mh}>Shortcuts & Search Syntax</h3>
-      {[["⌘ O", "Open file"], ["⌘ E", "Export filtered view"], ["⌘⇧R", "Generate report"], ["⌘ S", "Save session"], ["⌘⇧O", "Open session"], ["⌘ W", "Close tab"], ["⌘⇧Q", "Close all tabs"], ["⌘ F", "Focus search"], ["⌘⇧F", "Find in all tabs"], ["F3 / ⌘→", "Next search match"], ["⇧F3 / ⌘←", "Previous search match"], ["↑ / ↓", "Navigate rows"], ["⌘ B", "Toggle bookmarked only"], ["⌘⇧C", "Column Manager"], ["⌘⇧L", "Conditional Formatting"], ["⌘ R", "Reset column widths"], ["⌘ + / ⌘ -", "Font size increase / decrease"], ["⌘ C", "Copy selected rows"], ["Shift+Click", "Select range"], ["⌘+Click", "Context menu (Copy / Tags)"], ["⌃+Click", "Context menu (alt)"], ["⇧F10", "Context menu (keyboard)"], ["FL / HL", "Toggle filter/highlight search mode"], ["⏱ icon", "Date range filter (timestamp cols)"], ["Dbl-click", "Cell detail popup"], ["Dbl-click border", "Auto-fit column"], ["Drag header", "Group by column"], ["Esc", "Close panel/modal"]].map(([k, d]) => (
+      {[["⌘ K", "Open command palette"], ["⌘ O", "Open file"], ["⌘ E", "Export filtered view"], ["⌘⇧R", "Generate report"], ["⌘ S", "Save session"], ["⌘⇧O", "Open session"], ["⌘ W", "Close tab"], ["⌘⇧Q", "Close all tabs"], ["⌘ F", "Focus search"], ["⌘⇧F", "Find in all tabs"], ["F3 / ⌘→", "Next search match"], ["⇧F3 / ⌘←", "Previous search match"], ["↑ / ↓", "Navigate rows"], ["⌘ B", "Toggle bookmarked only"], ["⌘⇧C", "Column Manager"], ["⌘⇧L", "Conditional Formatting"], ["⌘ R", "Reset column widths"], ["⌘ + / ⌘ -", "Font size increase / decrease"], ["⌘ C", "Copy selected rows"], ["Shift+Click", "Select range"], ["⌘+Click", "Cell quick actions"], ["⌃+Click", "Cell quick actions (alternate)"], ["⇧F10", "Context menu (keyboard)"], [SEARCH_BEHAVIORS.map((item) => item.label).join(" / "), "Switch search behavior"], ["⏱ icon", "Date range filter (timestamp cols)"], ["Dbl-click", "Cell detail popup"], ["Dbl-click border", "Auto-fit column"], ["Drag header", "Group by column"], ["Esc", "Close panel/modal"]].map(([k, d]) => (
         <div key={k} style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", borderBottom: `1px solid ${th.bgAlt}` }}>
           <kbd style={{ background: th.btnBg, color: th.accent, padding: "2px 7px", borderRadius: 4, fontSize: 11, fontFamily: "'SF Mono',Menlo,monospace", border: `1px solid ${th.btnBorder}` }}>{k}</kbd>
           <span style={{ color: th.textDim, fontSize: 12 }}>{d}</span>
@@ -210,6 +247,11 @@ export function ShortModal({ th, ms }) {
           <code style={{ background: th.btnBg, padding: "1px 5px", borderRadius: 3, color: th.accent }}>{s}</code> — {d}
         </div>
       ))}
+      <div style={{ marginTop: 8, color: th.textDim, fontSize: 11, lineHeight: 1.6 }}>
+        <b style={{ color: th.text }}>Conditions:</b> {SEARCH_CONDITIONS.map((item) => item.label).join(", ")}
+        <br />
+        <b style={{ color: th.text }}>Match modes:</b> {SEARCH_MATCH_MODES.map((item) => item.label).join(", ")}
+      </div>
       <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 14 }}>
         <button onClick={() => setModal(null)} style={ms.bp}>Close</button>
       </div>
@@ -242,11 +284,17 @@ export function ImportProgress({ th, info }) {
   const importQueue = useTabStore((s) => s.importQueue);
   const queueLen = importQueue.length;
   const phase = info?.phase || (info?.status === "indexing" ? "finalizing" : "parsing");
-  const phaseLabel = phase === "finalizing"
-    ? "Finalizing SQLite timeline..."
-    : phase === "parsing"
-      ? "Reading and importing events..."
-      : "Preparing import...";
+  const phaseLabel = info?.statusDetail
+    ? info.statusDetail
+    : phase === "finalizing"
+      ? "Finalizing SQLite timeline..."
+      : phase === "extracting"
+        ? "Extracting AI history sources..."
+        : phase === "loading"
+          ? "Writing timeline rows..."
+          : phase === "parsing"
+            ? "Reading and importing events..."
+            : "Preparing import...";
   const percent = Math.max(0, Math.min(100, Number.isFinite(info?.percent) ? info.percent : 0));
   const byteTotal = info?.totalBytes || info?.fileSize || 0;
   const hasByteProgress = byteTotal > 0 && Number.isFinite(info?.bytesRead);

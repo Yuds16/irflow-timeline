@@ -11,10 +11,17 @@ import { create } from "zustand";
  */
 const useGridInteractionStore = create((set) => ({
   // ── Selection ──────────────────────────────────────────────────────
+  // Explicit mode: stable SQLite row IDs. Select-all mode: deselected row-ID exceptions.
   selectedRows: new Set(),
+  allRowsSelected: false,
+  selectionTabId: null,
+  selectAllScopeSignature: null,
   lastClickedRow: null,
 
   setSelectedRows: (v) => set((s) => ({ selectedRows: typeof v === "function" ? v(s.selectedRows) : v })),
+  setAllRowsSelected: (v) => set({ allRowsSelected: !!v }),
+  setSelectionTabId: (v) => set({ selectionTabId: v || null }),
+  setSelectAllScopeSignature: (v) => set({ selectAllScopeSignature: v || null }),
   setLastClickedRow: (v) => set({ lastClickedRow: v }),
 
   // Spreadsheet-style whole-column selection: the display name of the column the user
@@ -65,6 +72,9 @@ const useGridInteractionStore = create((set) => ({
   // ── Dismiss all transient state (on tab switch) ────────────────────
   resetTransient: () => set({
     selectedRows: new Set(),
+    allRowsSelected: false,
+    selectionTabId: null,
+    selectAllScopeSignature: null,
     lastClickedRow: null,
     selectedColumn: null,
     contextMenu: null,

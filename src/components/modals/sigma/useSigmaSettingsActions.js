@@ -1,4 +1,5 @@
 import { buildDetectionSettingsFromModal } from "./sigmaModalHelpers.js";
+import { clearIpcSubscription, replaceIpcSubscription } from "../../../utils/ipc-subscriptions.js";
 
 export default function useSigmaSettingsActions({ modal, setModal, tle, selectedRepos, availableRepos }) {
   const handleSaveDetectionSettings = async () => {
@@ -88,8 +89,7 @@ export default function useSigmaSettingsActions({ modal, setModal, tle, selected
     const repoIds = selectedRepos || availableRepos.filter((r) => r.default).map((r) => r.id);
     if (repoIds.length === 0) return;
     setModal((p) => ({ ...p, downloading: true, error: null }));
-    tle.removeAllListeners?.("sigma-progress");
-    tle.onSigmaProgress?.((prog) => {
+    replaceIpcSubscription("sigma-progress", tle.onSigmaProgress, (prog) => {
       setModal((p) => p?.type === "sigma" ? { ...p, progress: prog } : p);
     });
     try {
@@ -149,8 +149,7 @@ export default function useSigmaSettingsActions({ modal, setModal, tle, selected
   };
 
   const startHayabusaUpdateProgress = (mode) => {
-    tle.removeAllListeners?.("sigma-progress");
-    tle.onSigmaProgress?.((prog) => appendHayabusaUpdateProgress(prog, mode));
+    replaceIpcSubscription("sigma-progress", tle.onSigmaProgress, (prog) => appendHayabusaUpdateProgress(prog, mode));
   };
 
   const handleDownloadHayabusa = async () => {
@@ -159,10 +158,10 @@ export default function useSigmaSettingsActions({ modal, setModal, tle, selected
     startHayabusaUpdateProgress("install");
     try {
       const result = await tle.sigmaHayabusaDownload();
-      tle.removeAllListeners?.("sigma-progress");
+      clearIpcSubscription("sigma-progress");
       setModal((p) => ({ ...p, hayabusaDownloading: false, hayabusaStatus: result, hayabusaUpdateResult: { type: "install", ...result }, progress: null }));
     } catch (e) {
-      tle.removeAllListeners?.("sigma-progress");
+      clearIpcSubscription("sigma-progress");
       setModal((p) => ({ ...p, hayabusaDownloading: false, error: e?.message || "Download failed", progress: null }));
     }
   };
@@ -173,10 +172,10 @@ export default function useSigmaSettingsActions({ modal, setModal, tle, selected
     startHayabusaUpdateProgress("rules");
     try {
       const result = await tle.sigmaHayabusaUpdateRules();
-      tle.removeAllListeners?.("sigma-progress");
+      clearIpcSubscription("sigma-progress");
       setModal((p) => ({ ...p, hayabusaUpdating: false, hayabusaUpdateResult: { type: "rules", ...result }, hayabusaUpdateRuleDiff: result?.ruleDiff || p.hayabusaUpdateRuleDiff || null, progress: null }));
     } catch (e) {
-      tle.removeAllListeners?.("sigma-progress");
+      clearIpcSubscription("sigma-progress");
       setModal((p) => ({ ...p, hayabusaUpdating: false, error: e?.message || "Rule update failed", progress: null }));
     }
   };
@@ -187,10 +186,10 @@ export default function useSigmaSettingsActions({ modal, setModal, tle, selected
     startHayabusaUpdateProgress("binary");
     try {
       const result = await tle.sigmaHayabusaUpdate();
-      tle.removeAllListeners?.("sigma-progress");
+      clearIpcSubscription("sigma-progress");
       setModal((p) => ({ ...p, hayabusaDownloading: false, hayabusaStatus: result, hayabusaUpdateResult: { type: "binary", ...result }, progress: null }));
     } catch (e) {
-      tle.removeAllListeners?.("sigma-progress");
+      clearIpcSubscription("sigma-progress");
       setModal((p) => ({ ...p, hayabusaDownloading: false, error: e?.message || "Update failed", progress: null }));
     }
   };

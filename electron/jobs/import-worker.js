@@ -32,14 +32,18 @@ function cleanupAndExit(db, tabId) {
     db._dbPathHint = dbPath;
     progress({ phase: "parsing", rowsImported: 0, bytesRead: 0, totalBytes: fileSize || 0, percent: 0 });
 
-    const parsed = await parseFile(filePath, tabId, db, (rows, bytesRead, totalBytes) => {
+    const parsed = await parseFile(filePath, tabId, db, (rows, bytesRead, totalBytes, meta = {}) => {
       if (cancelled) throw Object.assign(new Error("Import cancelled"), { cancelled: true });
+      const percent = Number.isFinite(meta.percentHint)
+        ? Math.max(0, Math.min(100, meta.percentHint))
+        : (totalBytes > 0 ? Math.round((bytesRead / totalBytes) * 100) : 0);
       progress({
-        phase: "parsing",
+        phase: meta.phase || "parsing",
         rowsImported: rows,
         bytesRead,
         totalBytes,
-        percent: totalBytes > 0 ? Math.round((bytesRead / totalBytes) * 100) : 0,
+        percent,
+        statusDetail: meta.statusDetail || "",
       });
     }, sheetName, fileSize);
 

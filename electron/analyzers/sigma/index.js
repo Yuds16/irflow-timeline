@@ -17,6 +17,8 @@ const { getAllRules, getCacheStatus } = require("./rule-cache");
 const { SigmaResultStore } = require("./result-store");
 const { resolveDatasetFormat } = require("./format-detect");
 const { severityHistogram, sortMatchesBySeverity } = require("./match-utils");
+const { ensureSigmaFilterIndexes } = require("./sigma-filter-indexes");
+const { buildGroupSelectClause, MATCH_DETAIL_FIELDS } = require("./scan-columns");
 
 /**
  * Scan a dataset against Sigma rules.
@@ -169,17 +171,17 @@ async function scanSigmaRules(meta, options = {}, onProgress) {
   const MAX_EVENT_ROWS = 100000;
   let eventRowsCapped = false;
 
+  const rowCount = meta.rowCount || 0;
+  const yieldInterval = rowCount >= 1_000_000 ? 5000 : 1000;
+
   try {
-    // Build select columns — include all columns the rules might reference
-    const selectCols = new Set();
-    selectCols.add("data.rowid as _rid");
-    if (tsCol) selectCols.add(`${tsCol} as _ts`);
-    if (computerCol) selectCols.add(`${computerCol} as _host`);
-    // Include all mapped columns for field resolution
-    for (const h of meta.headers) {
-      if (meta.colMap[h]) selectCols.add(`${meta.colMap[h]} as [${h}]`);
+    onProgress?.({ phase: "indexing", text: "Preparing EventID/Channel indexes for scan..." });
+    const { built: sigmaIndexesBuilt, columns: sigmaIndexCols } = ensureSigmaFilterIndexes(meta);
+    if (sigmaIndexesBuilt > 0) {
+      warnings.push(
+        `Built ${sigmaIndexesBuilt} EventID/Channel index${sigmaIndexesBuilt === 1 ? "" : "es"} before scanning (${sigmaIndexCols.join(", ")}) — this one-time step speeds up large-tab JS Sigma scans.`,
+      );
     }
-    const selectClause = [...selectCols].join(", ");
 
     // Process each logsource group
     let groupIdx = 0;
@@ -246,6 +248,9 @@ async function scanSigmaRules(meta, options = {}, onProgress) {
       }
 
       const whereClause = whereParts.length > 0 ? `WHERE ${whereParts.join(" AND ")}` : "";
+      const selectClause = buildGroupSelectClause(meta, formatFlags, group.rules, {
+        tsCol, computerCol, eidCol, channelCol,
+      });
       const sql = `SELECT ${selectClause} FROM data ${whereClause} LIMIT ${maxRowsPerQuery}`;
 
     let rowsScannedForGroup = 0;
@@ -256,16 +261,9 @@ async function scanSigmaRules(meta, options = {}, onProgress) {
       dbg("SIGMA", `Group ${groupIdx}/${ruleGroups.size} (${key}): streaming candidate rows, ${group.compiled.length} rules`);
 
       // Evaluate all rules against each row
-      // Key fields to extract for Hayabusa-style detail display
-      const DETAIL_FIELDS = ["Image", "CommandLine", "ParentImage", "TargetUserName", "SubjectUserName", "User",
-        "ServiceName", "TargetObject", "Details", "LogonType", "IpAddress", "WorkstationName",
-        "ShareName", "ScriptBlockText", "Hashes", "DestinationIp", "DestinationPort", "SourcePort"];
-
-      // Yield to event loop every N rows to prevent UI freeze
-      const YIELD_INTERVAL = 1000;
       for (const row of iterator) {
         rowsScannedForGroup++;
-        if (rowsScannedForGroup > 0 && rowsScannedForGroup % YIELD_INTERVAL === 0) {
+        if (rowsScannedForGroup > 0 && rowsScannedForGroup % yieldInterval === 0) {
           assertNotCancelled();
           await new Promise(r => setImmediate(r));
           onProgress?.({
@@ -295,7 +293,7 @@ async function scanSigmaRules(meta, options = {}, onProgress) {
               if (row._host) rm.hosts.add(String(row._host).toUpperCase());
               if (rm.sampleRows.length < 5) {
                 const sample = { _rid: row._rid, _ts: row._ts, _host: row._host };
-                for (const f of DETAIL_FIELDS) {
+                for (const f of MATCH_DETAIL_FIELDS) {
                   const v = resolve(f, row);
                   if (v) sample[f] = v.substring(0, 200);
                 }
@@ -325,7 +323,7 @@ async function scanSigmaRules(meta, options = {}, onProgress) {
               };
 
               // Resolve each Sigma field into its own column
-              for (const f of DETAIL_FIELDS) {
+              for (const f of MATCH_DETAIL_FIELDS) {
                 const v = resolve(f, row);
                 if (v && v.length > 0) evtRow[f] = v.substring(0, 500);
               }

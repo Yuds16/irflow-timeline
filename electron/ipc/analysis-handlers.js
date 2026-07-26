@@ -1,5 +1,6 @@
 const fs = require("fs");
 const { dialog } = require("electron");
+const { openDialogOptions } = require("../utils/open-dialog");
 
 module.exports = function registerAnalysisHandlers(safeHandle, safeSend, { db, _tabMeta, extractResidentData, _activeWindow, runAnalyzerJob }) {
   const analyze = (method, payload, fallback) => {
@@ -16,11 +17,11 @@ module.exports = function registerAnalysisHandlers(safeHandle, safeSend, { db, _
       return { error: `Original MFT file no longer exists: ${meta.filePath}` };
     }
 
-    const result = await dialog.showOpenDialog(_activeWindow(), {
+    const result = await dialog.showOpenDialog(_activeWindow(), openDialogOptions({
       title: "Choose output folder for resident data extraction",
       properties: ["openDirectory", "createDirectory"],
       buttonLabel: "Extract Here",
-    });
+    }));
     if (result.canceled || !result.filePaths[0]) return { canceled: true };
 
     const extractResult = await extractResidentData(meta.filePath, result.filePaths[0], (processed, total) => {
@@ -161,6 +162,23 @@ module.exports = function registerAnalysisHandlers(safeHandle, safeSend, { db, _
       "analyzeADS",
       { tabId, options: { usnTabId: resolvedUsnTabId, evtxTabId: resolvedEvtxTabId } },
       () => db.analyzeADS(tabId, { usnTabId: resolvedUsnTabId, evtxTabId: resolvedEvtxTabId })
+    );
+  });
+
+  // AI Secret & Leak Scan — credential/key/PII detection over an AI history tab.
+  safeHandle("analyze-ai-history", (event, { tabId, mode, redact, salt }) => {
+    const m = _tabMeta.get(tabId);
+    if (!m || typeof m.sourceFormat !== "string" || !m.sourceFormat.startsWith("ai-history-")) {
+      return { error: "This tab is not an AI history timeline." };
+    }
+    const normalizedSalt = salt != null && String(salt).trim() ? String(salt).slice(0, 256) : undefined;
+    const options = { mode: mode === "deep" ? "deep" : "quick", redact: redact !== false, salt: normalizedSalt };
+    return analyze(
+      "analyzeAiHistory",
+      { tabId, options },
+      // Inline-fallback progress must use the same channel the worker path routes to
+      // (main.js legacyProgressChannel → "analysis-progress"), which the modal listens on.
+      () => db.analyzeAiHistory(tabId, { ...options, progressCb: (p) => safeSend("analysis-progress", { phase: "ai-secrets", ...p }) })
     );
   });
 

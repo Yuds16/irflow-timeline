@@ -24,12 +24,17 @@ export function applyColors(row, compiledRules) {
   return null;
 }
 
+const MAX_TIMELINE_COLOR_RULES = 150;
+
 export function buildTimelineColorRules(rows, colName, isDark) {
   const palette = isDark ? TIMELINE_PALETTE : TIMELINE_PALETTE_LIGHT;
   const seen = new Map();
   for (const row of rows) {
     const val = (row[colName] || "").trim();
-    if (val && !seen.has(val)) seen.set(val, seen.size);
+    if (val && !seen.has(val)) {
+      seen.set(val, seen.size);
+      if (seen.size >= MAX_TIMELINE_COLOR_RULES) break;
+    }
   }
   return Array.from(seen.entries()).map(([val, idx]) => {
     const p = palette[idx % palette.length];

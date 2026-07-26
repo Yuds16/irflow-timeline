@@ -1,5 +1,12 @@
 import useUIStore from "../../store/useUIStore.js";
 import useTheme from "../../hooks/useTheme.js";
+import {
+  HISTOGRAM_GRANULARITIES,
+  MIN_SEARCH_LENGTH,
+  SEARCH_BEHAVIORS,
+  SEARCH_CONDITIONS,
+  SEARCH_MATCH_MODES,
+} from "../../constants/ui-controls.js";
 import { Modal } from "../primitives/index.js";
 
 export default function QuickHelpModal() {
@@ -37,12 +44,13 @@ export default function QuickHelpModal() {
         <Li><b>$J / $UsnJrnl</b> — Raw NTFS USN Change Journal. Change reason mapping (rename, delete, data extend, security change, close), MFT parent correlation, and full path resolution.</Li>
         <Li><b>Plaso</b> — log2timeline/Plaso SQLite output files. All event sources and timestamps preserved.</Li>
 
-        <S>Search Modes</S>
-        <Li><b>Mixed</b> — Uses FTS (full-text search) when available, falls back to LIKE. Best for general use.</Li>
-        <Li><b>FTS</b> — SQLite FTS5 full-text search. Fast keyword matching across all columns.</Li>
-        <Li><b>LIKE</b> — SQL LIKE pattern matching. Supports <K>%</K> (any chars) and <K>_</K> (single char) wildcards.</Li>
-        <Li><b>Fuzzy</b> — Approximate matching with configurable distance. Finds near-matches and typos.</Li>
-        <Li><b>Regex</b> — Full regular expression support. Use for complex pattern matching.</Li>
+        <S>Search Controls</S>
+        {SEARCH_BEHAVIORS.map((behavior) => <Li key={behavior.value}><b>{behavior.label}</b> — {behavior.description}</Li>)}
+        <P>Match modes:</P>
+        {SEARCH_MATCH_MODES.map((mode) => <Li key={mode.value}><b>{mode.label}</b> — {mode.description}</Li>)}
+        <P>Conditions:</P>
+        {SEARCH_CONDITIONS.map((condition) => <Li key={condition.value}><b>{condition.label}</b> — {condition.description}</Li>)}
+        <P>Search starts after at least <b>{MIN_SEARCH_LENGTH} characters</b>. The <b>Like</b> condition supports <K>%</K> (any characters) and <K>_</K> (one character).</P>
         <P>Prefix with <K>+AND</K> to require all terms, <K>-NOT</K> to exclude terms, or wrap in <K>"quotes"</K> for exact phrase matching.</P>
 
         <S>Column Filters</S>
@@ -61,7 +69,7 @@ export default function QuickHelpModal() {
         <Li><b>IOC tagging</b> — Load IOC files (CSV, XLSX, TSV) and auto-tag matching rows with per-IOC tags.</Li>
 
         <S>Timeline Histogram</S>
-        <P>The histogram at the top shows event distribution over time. Click and drag to brush-select a time range — this filters the grid to only show events in that window. Toggle between Day/Hour/Minute granularity. Use the histogram to identify activity bursts and gaps.</P>
+        <P>The histogram at the top shows event distribution over time. Click and drag to brush-select a time range — this filters the grid to only show events in that window. Available granularity: {HISTOGRAM_GRANULARITIES.map((item) => item.label).join(" / ")}. Use the histogram to identify activity bursts and gaps.</P>
 
         <S>DFIR Analysis Tools</S>
         <Li><b>Sigma Detection</b> — Dual-engine rule-based detection (Tools ▸ Sigma Scan): bundled Hayabusa over raw .evtx folders, or an in-app JS Sigma engine for imported timelines and EvtxECmd output. Scan presets, custom rules, noisy-rule suppression, and a MITRE ATT&CK-mapped triage dashboard with reopenable scan history.</Li>
@@ -88,7 +96,8 @@ export default function QuickHelpModal() {
         <Li><K>⌘C</K> copies selected rows as tab-separated text (with headers). Works in both normal and grouped mode.</Li>
         <Li>Double-click any cell to see its full content in a popup.</Li>
         <Li>Drop files directly onto the window to import them.</Li>
-        <Li>The status bar (bottom) shows active filters, row counts, and sort state. Double-click the file path to copy it.</Li>
+        <Li><K>⌘K</K> opens the command palette so you can search available File, View, Actions, Tools, and Help commands.</Li>
+        <Li>The status bar (bottom) shows active filters, row counts, and sort state. Click the file path to copy it.</Li>
         <Li>IRFlow Timeline checks for updates automatically; use <b>Help ▸ Check for Updates…</b> to check on demand and install with one click.</Li>
       </div>
     </Modal>

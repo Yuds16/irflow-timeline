@@ -1,7 +1,13 @@
 const { dbg } = require("../../logger");
-const { buildEvtxHaystack, cleanWrappedField, compactGet, evtxChannelMatches, isChainsawDataset, isHayabusaDataset, parseCompactKeyValues, resolveEventChannel, RAW_EVTX_HAYSTACK_FIELDS } = require("../evtx-utils");
+const { buildEvtxHaystack, cleanWrappedField, compactGet, evtxChannelMatches, extractFirstInteger, isChainsawDataset, isHayabusaDataset, parseCompactKeyValues, resolveEventChannel, RAW_EVTX_HAYSTACK_FIELDS } = require("../evtx-utils");
 const { parseTimestampMs } = require("../../utils/parse-timestamp");
 const { compileSafeRegex } = require("../../utils/safe-regex");
+const { EVTX_RULES, REGISTRY_RULES, PERSISTENCE_RULE_CATALOG } = require("./rules");
+const {
+  canonicalizeKeyPath, hiveContext, deriveCollectionHost, hostFromComputerNameKey,
+  detectRegistryPlugin, projectPluginRows,
+} = require("./registry-shapes");
+const { corrHost, isBenignReason, hasSuspiciousReason, clusterIncidents } = require("./incidents");
 
 // Compile an untrusted custom-rule pattern into a ReDoS-safe, .test()-able object
 // (same interface as the built-in RegExp literals used throughout this file), or null
@@ -22,8 +28,15 @@ function previewPersistenceAnalysis(meta, options = {}, ctx) {
     const hasKeyPath = detect([/^KeyPath$/i, /^Key ?Path$/i]);
     const hasValueName = detect([/^ValueName$/i, /^Value ?Name$/i]);
     const isHayabusa = isHayabusaDataset(meta);
+    // RECmd writes one detail CSV per plugin with no KeyPath/ValueName pair at all. Those
+    // used to fall straight through to "Cannot detect data type".
+    const regPlugin = (hasKeyPath && hasValueName) ? null : detectRegistryPlugin(headers, detect);
     let detectedMode = mode;
-    if (detectedMode === "auto") detectedMode = (hasKeyPath && hasValueName) ? "registry" : hasEventId ? "evtx" : null;
+    if (detectedMode === "auto") {
+      detectedMode = (hasKeyPath && hasValueName) ? "registry"
+        : hasEventId ? "evtx"
+          : regPlugin ? "registry" : null;
+    }
 
     try {
       // Build WHERE clause from active filters (mirrors the real analyzer's scope)
@@ -53,7 +66,11 @@ function previewPersistenceAnalysis(meta, options = {}, ctx) {
         // Event counts for persistence-relevant EIDs
         if (cols.eventId && meta.colMap[cols.eventId]) {
           const eidSafe = meta.colMap[cols.eventId];
-          const uiEids = ["7045","4697","4698","4699","106","129","140","200","141","118","119","5861","19","20","21","13","12","14","11","7","6","25","4720","4728","4732","4756","4724","4738","5136","5137","5141","4104","4657","7040","4702"];
+          // Must stay a superset of every event id in EVTX_RULES (plus 4104, which the
+          // analyzer queries separately) — an id missing here is invisible in the pre-scan
+          // coverage strip AND excluded from the "≈ N events in scope" estimate, so the
+          // analyst is told a detection is unavailable when it will in fact fire.
+          const uiEids = ["7045","4697","4698","4699","106","129","140","200","141","118","119","5861","19","20","21","13","12","14","11","7","6","25","4720","4728","4732","4756","4724","4738","5136","5137","5141","4104","4657","7040","4702","5001","5007","5010","5012","5101","5857","5858","5860","145","161","169","4624"];
           const eidWhere = wc ? `${wc} AND` : "WHERE";
           const rows = db.prepare(`SELECT ${eidSafe} as eid, COUNT(*) as cnt FROM data ${eidWhere} ${eidSafe} IN (${uiEids.map(() => "?").join(",")}) GROUP BY ${eidSafe}`).all(...params, ...uiEids);
           for (const r of rows) { if (r.eid != null) { const k = String(r.eid).trim(); eventCounts[k] = r.cnt; trackedEvents += r.cnt; } }
@@ -75,30 +92,74 @@ function previewPersistenceAnalysis(meta, options = {}, ctx) {
         return { eventCounts, trackedEvents, columnQuality, detectedMode, resolvedColumns: cols, isHayabusa, isChainsaw };
 
       } else if (detectedMode === "registry") {
+        // Plugin CSV: no KeyPath column to LIKE against, so report what the file IS and
+        // how many rows will be projected instead of a coverage breakdown that cannot exist.
+        if (regPlugin) {
+          const r = db.prepare(`SELECT COUNT(*) as cnt FROM data ${wc}`).get(...params);
+          const rowCount = r ? r.cnt : 0;
+          const plugin = { id: regPlugin.shape.id, label: regPlugin.shape.label, projects: !!regPlugin.shape.projects };
+          if (!regPlugin.shape.projects) {
+            return {
+              eventCounts: {}, trackedEvents: 0, columnQuality: {}, detectedMode: null, registryPlugin: plugin,
+              error: `${regPlugin.shape.label} — execution evidence, not persistence keys. Load the RECmd batch output (KeyPath/ValueName) or the Services/TaskCache plugin CSV instead.`,
+            };
+          }
+          return {
+            eventCounts: { [regPlugin.shape.label]: rowCount }, trackedEvents: rowCount,
+            columnQuality: Object.fromEntries(Object.entries(regPlugin.cols).map(([k, cn]) => [k, { mapped: !!(cn && meta.colMap[cn]) }])),
+            detectedMode, registryPlugin: plugin, resolvedColumns: regPlugin.cols, isHayabusa, isChainsaw,
+          };
+        }
+
         const cols = {
           keyPath: userCols.keyPath || detect([/^KeyPath$/i, /^Key ?Path$/i]),
           valueName: userCols.valueName || detect([/^ValueName$/i, /^Value ?Name$/i]),
           valueData: userCols.valueData || detect([/^ValueData$/i, /^Value ?Data$/i]),
           hivePath: detect([/^HivePath$/i, /^Hive ?Path$/i]),
+          hiveType: detect([/^HiveType$/i, /^Hive ?Type$/i]),
           ts: userCols.ts || detect([/^LastWriteTimestamp$/i, /^Timestamp$/i, /^datetime$/i, /^TimeCreated$/i]),
         };
 
-        // Registry coverage: count rows per group + deduplicated total via single query
+        // Registry coverage: count rows per group + deduplicated total via single query.
+        //
+        // These are SQL LIKE patterns, NOT regexes — a backslash is a literal here (SQLite
+        // gives LIKE no default escape character). In a JS string literal that means ONE
+        // escaped backslash: "%\\Run%" is the pattern %\Run%. Writing "%\\\\Run%" produces
+        // %\\Run% — two literal backslashes — which no KeyPath ever contains, so the group
+        // permanently counted 0 and trackedEvents was undercounted. Labels must stay in
+        // sync with PA_REG_GROUPS in PersistenceModal.jsx (they key the coverage chips).
         const regGroups = [
-          { label: "Run Keys", pattern: "%\\\\Run%" },
-          { label: "Services", pattern: "%\\\\Services\\\\%" },
-          { label: "Winlogon", pattern: "%\\\\Winlogon%" },
+          { label: "Run Keys", pattern: "%\\Run%" },
+          { label: "Services", pattern: "%\\Services\\%" },
+          { label: "Winlogon", pattern: "%\\Winlogon%" },
           { label: "IFEO", pattern: "%Image File Execution%" },
           { label: "COM Objects", pattern: "%InprocServer32%" },
           { label: "Scheduled Tasks", pattern: "%TaskCache%" },
           { label: "Boot Execute", pattern: "%Session Manager%" },
-          { label: "LSA", pattern: "%\\\\Lsa%" },
+          { label: "LSA", pattern: "%\\Lsa%" },
           { label: "Shell Extensions", pattern: "%ShellEx%" },
           { label: "AppInit DLLs", pattern: "%AppInit_DLLs%" },
-          { label: "Print Monitors", pattern: "%Print\\\\Monitors%" },
+          { label: "Print Monitors", pattern: "%Print\\Monitors%" },
           { label: "Active Setup", pattern: "%Active Setup%" },
           { label: "BHO", pattern: "%Browser Helper%" },
           { label: "Network Providers", pattern: "%NetworkProvider%" },
+          // Groups the modal already renders chips for but the preview never counted.
+          { label: "Logon Script", pattern: "%\\Environment%" },
+          { label: "AppCert DLLs", pattern: "%AppCertDlls%" },
+          { label: "Silent Process Exit", pattern: "%SilentProcessExit%" },
+          { label: "Credential Providers", pattern: "%Credential Provider%" },
+          { label: "Command Processor", pattern: "%Command Processor%" },
+          { label: "Explorer Autoruns", pattern: "%ShellServiceObjectDelayLoad%" },
+          { label: "Netsh Helper DLLs", pattern: "%\\Microsoft\\Netsh%" },
+          { label: "Screensaver", pattern: "%Control Panel\\Desktop%" },
+          { label: "Office Add-ins", pattern: "%\\Addins\\%" },
+          { label: "Time Providers", pattern: "%TimeProviders%" },
+          { label: "Terminal Server", pattern: "%Terminal Server\\%" },
+          { label: "File Association", pattern: "%shell\\open\\command%" },
+          { label: "Group Policy Scripts", pattern: "%\\Scripts\\%" },
+          { label: "Security Support Provider", pattern: "%SecurityProviders%" },
+          { label: "COM TreatAs", pattern: "%\\TreatAs%" },
+          { label: "Defender Tampering", pattern: "%Windows Defender\\%" },
         ];
         if (cols.keyPath && meta.colMap[cols.keyPath]) {
           const kpSafe = meta.colMap[cols.keyPath];
@@ -151,270 +212,28 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
     const hasValueName = detect([/^ValueName$/i, /^Value ?Name$/i]);
     const isHayabusa = isHayabusaDataset(meta);
 
+    // RECmd per-plugin detail CSVs carry no KeyPath/ValueName pair — they are a projected
+    // view of one key family. Recognize them so the richest registry artifact in a parsed
+    // KAPE package stops dead-ending on "Cannot detect data type".
+    const regPlugin = (hasKeyPath && hasValueName) ? null : detectRegistryPlugin(headers, detect);
+
     let mode = options.mode || "auto";
     if (mode === "auto") {
-      mode = (hasKeyPath && hasValueName) ? "registry" : hasEventId ? "evtx" : null;
+      mode = (hasKeyPath && hasValueName) ? "registry"
+        : hasEventId ? "evtx"
+          : regPlugin ? "registry" : null;
     }
     if (!mode) return { items: [], stats: {}, error: "Cannot detect data type. Need EventID column (EVTX) or KeyPath column (Registry)." };
+    if (mode === "registry" && regPlugin && !regPlugin.shape.projects) {
+      return {
+        items: [], incidents: [], warnings: [], stats: {}, detectedMode: null,
+        error: `${regPlugin.shape.label} — this is execution evidence (program run history), which contains no persistence keys. Load the RECmd batch output (KeyPath/ValueName columns) or the Services/TaskCache plugin CSV instead.`,
+      };
+    }
 
     // --- Detection rules ---
-    // Regex helper: match "Key: Value" in EvtxECmd PayloadData (pipe-delimited haystack)
-    // EvtxECmd formats vary: "Name: Svc", "Task: \Path", "ServiceName: Svc", "Image: C:\..."
-    // Match "Key: Value" and stop at end-of-part, a pipe (EvtxECmd/raw join), OR the
-    // Hayabusa broken-bar "¦" KV separator — otherwise on Hayabusa/Chainsaw data the
-    // lazy capture runs past "¦" into the next field, polluting serviceName/taskName/
-    // member/etc and breaking correlation. The (?:^|\b) anchor stops a short key like
-    // "Name" from binding inside a longer one ("ServiceName"/"DisplayName"). Commas are
-    // intentionally NOT delimiters (they appear inside DNs and command lines).
-    const P = (key) => new RegExp("(?:^|\\b)" + key + ":\\s*(.+?)(?:\\s*$|\\s*[|¦])", "i");
-    const EVTX_RULES = [
-      // --- Services ---
-      { category: "Services", name: "Service Installed", eventIds: ["7045"], channels: ["system"], severity: "high",
-        // EvtxECmd 7045 (System): PD2="Name: SvcName", PD3="StartType:", PD4="Account:", ExecutableInfo=ImagePath
-        extractors: { serviceName: [P("Name"), P("ServiceName")], imagePath: [P("ImagePath"), P("Path"), P("ServiceFileName")], startType: [P("StartType")], account: [P("Account"), P("AccountName")] },
-        topFields: ["serviceName", "imagePath", "account"], useExecInfo: "imagePath", payloadFilter: null },
-      { category: "Services", name: "Service Installed", eventIds: ["4697"], channels: ["security"], severity: "high",
-        // imagePath mirrors 7045 so service-execution correlation (which keys on details.imagePath) works for 4697 too.
-        extractors: { serviceName: [P("ServiceName")], imagePath: [P("ServiceFileName"), P("ImagePath"), P("Path")], serviceFile: [P("ServiceFileName")], serviceType: [P("ServiceType")], startType: [P("ServiceStartType")], account: [P("ServiceAccount")] },
-        topFields: ["serviceName", "imagePath", "account"], useExecInfo: "imagePath", payloadFilter: null },
-      // --- Scheduled Tasks ---
-      { category: "Scheduled Tasks", name: "Scheduled Task Created", eventIds: ["4698"], channels: ["security"], severity: "high",
-        extractors: { taskName: [P("Task"), P("TaskName"), P("Task Name")], command: [P("Command"), P("Arguments"), P("Actions")] },
-        topFields: ["taskName", "command", "executable"], useExecInfo: "executable", payloadFilter: null },
-      { category: "Scheduled Tasks", name: "Scheduled Task Deleted", eventIds: ["4699"], channels: ["security"], severity: "medium",
-        extractors: { taskName: [P("Task"), P("TaskName"), P("Task Name")] },
-        topFields: ["taskName"], payloadFilter: null },
-      { category: "Scheduled Tasks", name: "Task Registered", eventIds: ["106"], channels: ["taskscheduler"], severity: "medium",
-        // EvtxECmd 106 (TaskScheduler/Operational): PD2="Task: \Name", ExecutableInfo=empty for this event
-        extractors: { taskName: [P("Task"), P("TaskName"), P("Name")] },
-        topFields: ["taskName"], payloadFilter: null },
-      { category: "Scheduled Tasks", name: "Task Updated", eventIds: ["140"], channels: ["taskscheduler"], severity: "medium",
-        extractors: { taskName: [P("Task"), P("TaskName"), P("Name")] },
-        topFields: ["taskName"], payloadFilter: null },
-      { category: "Scheduled Tasks", name: "Task Process Created", eventIds: ["129"], channels: ["taskscheduler"], severity: "high",
-        // EvtxECmd 129 (TaskScheduler/Operational): PD2="Task: \Name", PD3="ProcessID:", ExecutableInfo=exe path
-        extractors: { taskName: [P("Task"), P("TaskName"), P("Name")], processId: [P("ProcessID"), P("ProcessId")] },
-        topFields: ["taskName", "executable", "processId"], useExecInfo: "executable", payloadFilter: null },
-      { category: "Scheduled Tasks", name: "Task Action Started", eventIds: ["200"], channels: ["taskscheduler"], severity: "medium",
-        // EvtxECmd 200 (TaskScheduler/Operational): PD2="Task: \Name", ExecutableInfo=action/handler name
-        extractors: { taskName: [P("Task"), P("TaskName"), P("Name")], instanceId: [P("Instance Id"), P("TaskInstanceId")] },
-        topFields: ["taskName", "executable"], useExecInfo: "executable", payloadFilter: null },
-      // --- WMI ---
-      { category: "WMI Persistence", name: "WMI Event Subscription", eventIds: ["5861"], channels: ["wmi-activity"], severity: "critical",
-        extractors: { namespace: [P("Namespace")], operation: [P("Operation")], query: [P("Query")], consumer: [P("Consumer")], poss_command: [P("PossibleCause"), P("Command")] },
-        topFields: ["operation", "query", "consumer"], payloadFilter: null },
-      { category: "WMI Persistence", name: "WMI EventFilter Created", eventIds: ["19"], channels: ["sysmon"], severity: "critical",
-        extractors: { name: [P("Name")], query: [P("Query")], eventNamespace: [P("EventNamespace")], operation: [P("Operation")] },
-        topFields: ["name", "query", "operation"], payloadFilter: null },
-      { category: "WMI Persistence", name: "WMI EventConsumer Created", eventIds: ["20"], channels: ["sysmon"], severity: "critical",
-        extractors: { name: [P("Name")], type: [P("Type")], destination: [P("Destination")], operation: [P("Operation")] },
-        topFields: ["name", "destination", "type"], payloadFilter: null },
-      { category: "WMI Persistence", name: "WMI Binding Created", eventIds: ["21"], channels: ["sysmon"], severity: "critical",
-        extractors: { consumer: [P("Consumer")], filter: [P("Filter")], operation: [P("Operation")] },
-        topFields: ["consumer", "filter"], payloadFilter: null },
-      // --- Registry (Sysmon) ---
-      { category: "Registry Autorun", name: "Registry Value Set", eventIds: ["13"], channels: ["sysmon"], severity: "high",
-        extractors: { targetObject: [P("TargetObject"), P("TgtObj")], details: [P("Details")], image: [P("Image")] },
-        topFields: ["targetObject", "details", "image"],
-        payloadFilter: /\\(?:Run|RunOnce|RunServices|Services\\[^\\]*\\(?:ImagePath|Parameters)|Winlogon\\(?:Shell|Userinit|Notify|Taskman|VmApplet|AppSetup)|AppInit_DLLs|Image File Execution Options\\[^\\]*\\Debugger|CurrentVersion\\Explorer\\(?:Shell|User Shell)|Session Manager\\(?:BootExecute|SetupExecute|AppCertDlls)|InprocServer32|LocalServer32|ShellIconOverlay|ShellServiceObjectDelayLoad|ContextMenuHandler|Browser Helper|Active Setup|Print\\Monitors|NetworkProvider|Lsa\\|Control\\SecurityProviders|GPExtensions\\|Group Policy\\Scripts|System\\Scripts\\|TreatAs(?:\\|$)|Windows Defender\\Exclusions|WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\(?:Run|RunOnce|RunOnceEx)|SilentProcessExit\\|Environment\\(?:$|\\)|COR_PROFILER|Credential Provid|PLAP Providers\\|Command Processor\\|Microsoft\\Netsh|Control Panel\\Desktop|Office\\[^\\]*\\[^\\]*\\Addins\\|W32Time\\TimeProviders\\|Terminal Server\\|shell\\open\\command|FileExts\\)/i },
-      { category: "Registry Modification", name: "Registry Key Created/Deleted", eventIds: ["12"], channels: ["sysmon"], severity: "medium",
-        extractors: { targetObject: [P("TargetObject"), P("TgtObj")], eventType: [P("EventType")], image: [P("Image")] },
-        topFields: ["eventType", "targetObject", "image"],
-        // NOTE: bare "Services\\" intentionally excluded — CreateKey/DeleteKey on a service
-        // key is overwhelmingly benign install/uninstall/update churn. The meaningful signal
-        // (ImagePath/ServiceDll SetValue) is caught by EID 13 / 4657 instead.
-        payloadFilter: /\\(?:Run|RunOnce|Winlogon|AppInit_DLLs|Image File Execution Options|Session Manager\\(?:BootExecute|AppCertDlls)|Active Setup|Print\\Monitors|NetworkProvider|Lsa\\|Control\\SecurityProviders|GPExtensions\\|WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\(?:Run|RunOnce)|SilentProcessExit\\|Credential Provid|PLAP Providers\\|ShellServiceObjectDelayLoad|Command Processor\\|Microsoft\\Netsh|Control Panel\\Desktop|Office\\[^\\]*\\[^\\]*\\Addins\\|W32Time\\TimeProviders\\|Terminal Server\\|shell\\open\\command|FileExts\\)/i },
-      { category: "Registry Rename", name: "Registry Key/Value Renamed", eventIds: ["14"], channels: ["sysmon"], severity: "medium",
-        extractors: { targetObject: [P("TargetObject")], newName: [P("NewName")], eventType: [P("EventType")] },
-        topFields: ["targetObject", "newName"],
-        payloadFilter: /\\(?:Run|RunOnce|Services\\|Winlogon|Image File Execution Options|WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\(?:Run|RunOnce)|SilentProcessExit\\|AppCertDlls|Credential Provid|PLAP Providers\\|ShellServiceObjectDelayLoad|Command Processor\\|Microsoft\\Netsh|Control Panel\\Desktop|Office\\[^\\]*\\[^\\]*\\Addins\\|W32Time\\TimeProviders\\|Terminal Server\\|shell\\open\\command|FileExts\\)/i },
-      // --- File system (Sysmon) ---
-      { category: "Startup Folder", name: "File Created in Startup", eventIds: ["11"], channels: ["sysmon"], severity: "high",
-        extractors: { targetFilename: [P("TargetFilename")], image: [P("Image")], creationTime: [P("CreationUtcTime")] },
-        topFields: ["targetFilename", "image"],
-        payloadFilter: /Start Menu\\Programs\\Startup|ProgramData\\Microsoft\\Windows\\Start Menu|\\Startup\\[^\\]*\.(exe|dll|bat|cmd|ps1|vbs|js|lnk|url)$/i },
-      { category: "DLL Hijacking", name: "Unsigned DLL Loaded", eventIds: ["7"], channels: ["sysmon"], severity: "medium",
-        extractors: { imageLoaded: [P("ImageLoaded")], signed: [P("Signed")], signatureStatus: [P("SignatureStatus")], image: [P("Image")] },
-        topFields: ["imageLoaded", "image", "signatureStatus"],
-        payloadFilter: /Signed:\s*false/i },
-      { category: "Driver Loading", name: "Suspicious Driver Loaded", eventIds: ["6"], channels: ["sysmon"], severity: "critical",
-        extractors: { imageLoaded: [P("ImageLoaded")], signed: [P("Signed")], signatureStatus: [P("SignatureStatus")], signer: [P("Signer")] },
-        topFields: ["imageLoaded", "signatureStatus", "signer"],
-        payloadFilter: /Signed:\s*false|SignatureStatus:\s*(?:Expired|Revoked|Invalid|Unavailable)/i },
-      { category: "Process Tampering", name: "Process Tampering Detected", eventIds: ["25"], channels: ["sysmon"], severity: "critical",
-        extractors: { type: [P("Type")], image: [P("Image")] },
-        topFields: ["image", "type"], payloadFilter: null },
-      // --- Task Scheduler lifecycle (anti-forensics / trigger tracking) ---
-      { category: "Scheduled Tasks", name: "Task Deleted", eventIds: ["141"], channels: ["taskscheduler"], severity: "high",
-        extractors: { taskName: [P("Task"), P("TaskName"), P("Name")], userName: [P("UserName"), P("User")] },
-        topFields: ["taskName", "userName"], payloadFilter: null },
-      { category: "Scheduled Tasks", name: "Boot Trigger Fired", eventIds: ["118"], channels: ["taskscheduler"], severity: "medium",
-        extractors: { taskName: [P("Task"), P("TaskName"), P("Name")] },
-        topFields: ["taskName"], payloadFilter: null },
-      { category: "Scheduled Tasks", name: "Logon Trigger Fired", eventIds: ["119"], channels: ["taskscheduler"], severity: "medium",
-        extractors: { taskName: [P("Task"), P("TaskName"), P("Name")], userName: [P("UserName"), P("User")] },
-        topFields: ["taskName", "userName"], payloadFilter: null },
-      // --- Account Persistence (DFIR report-derived: 7/11 reports) ---
-      { category: "Account Persistence", name: "User Account Created", eventIds: ["4720"], channels: ["security"], severity: "high",
-        extractors: { targetUser: [P("TargetUserName"), P("Target_User_Name")], subjectUser: [P("SubjectUserName")], samAccountName: [P("SamAccountName"), P("SAMAccountName")] },
-        topFields: ["targetUser", "subjectUser", "samAccountName"], payloadFilter: null },
-      { category: "Account Persistence", name: "Member Added to Global Security Group", eventIds: ["4728"], channels: ["security"], severity: "critical",
-        extractors: { groupName: [P("TargetUserName")], memberName: [P("MemberName"), P("Member_Name")], memberSid: [P("MemberSid"), P("Member_Sid"), P("Member_Security_ID")], subjectUser: [P("SubjectUserName")] },
-        topFields: ["groupName", "memberName", "memberSid", "subjectUser"], payloadFilter: null },
-      { category: "Account Persistence", name: "Member Added to Local Security Group", eventIds: ["4732"], channels: ["security"], severity: "high",
-        extractors: { groupName: [P("TargetUserName")], memberName: [P("MemberName")], memberSid: [P("MemberSid"), P("Member_Sid"), P("Member_Security_ID")], subjectUser: [P("SubjectUserName")] },
-        topFields: ["groupName", "memberName", "memberSid", "subjectUser"], payloadFilter: null },
-      { category: "Account Persistence", name: "Member Added to Universal Security Group", eventIds: ["4756"], channels: ["security"], severity: "critical",
-        extractors: { groupName: [P("TargetUserName")], memberName: [P("MemberName")], memberSid: [P("MemberSid"), P("Member_Sid"), P("Member_Security_ID")], subjectUser: [P("SubjectUserName")] },
-        topFields: ["groupName", "memberName", "memberSid", "subjectUser"], payloadFilter: null },
-      { category: "Account Persistence", name: "User Password Reset", eventIds: ["4724"], channels: ["security"], severity: "medium",
-        extractors: { targetUser: [P("TargetUserName")], subjectUser: [P("SubjectUserName")] },
-        topFields: ["targetUser", "subjectUser"], payloadFilter: null },
-      { category: "Account Persistence", name: "User Account Changed", eventIds: ["4738"], channels: ["security"], severity: "high",
-        extractors: {
-          targetUser: [P("TargetUserName"), P("Target_User_Name")],
-          subjectUser: [P("SubjectUserName"), P("Subject_User_Name")],
-          samAccountName: [P("SamAccountName"), P("SAMAccountName")],
-          scriptPath: [P("ScriptPath"), P("Script_Path")],
-          userAccountControl: [P("UserAccountControl"), P("User_Account_Control"), P("NewUacValue")],
-          homeDirectory: [P("HomeDirectory"), P("Home_Directory")],
-          profilePath: [P("ProfilePath"), P("Profile_Path")],
-          userParameters: [P("UserParameters"), P("User_Parameters")],
-          primaryGroupId: [P("PrimaryGroupId"), P("Primary_Group_Id")],
-          allowedToDelegateTo: [P("AllowedToDelegateTo"), P("Allowed_To_Delegate_To")],
-        },
-        topFields: ["targetUser", "subjectUser", "scriptPath", "userAccountControl"],
-        payloadFilter: null },
-      // --- Domain Persistence (AD object changes: 5136/5137/5141) ---
-      { category: "Domain Persistence", name: "AD Object Modified", eventIds: ["5136"], channels: ["security"], severity: "high",
-        extractors: {
-          objectDN: [P("ObjectDN"), P("Object_DN")],
-          objectClass: [P("ObjectClass"), P("Object_Class")],
-          attributeName: [P("AttributeLDAPDisplayName"), P("Attribute_LDAP_Display_Name"), P("AttributeName")],
-          attributeValue: [P("AttributeValue"), P("Attribute_Value")],
-          operationType: [P("OperationType"), P("Operation_Type")],
-          subjectUser: [P("SubjectUserName"), P("Subject_User_Name")],
-        },
-        topFields: ["objectDN", "attributeName", "attributeValue", "subjectUser"],
-        payloadFilter: /(?:AdminSDHolder|CN=Policies|scriptPath|servicePrincipalName|userAccountControl|adminCount|member(?:Of)?|gPCFileSysPath|gPCMachineExtensionNames|gPCUserExtensionNames|msDS-AllowedToDelegateTo|msDS-KeyCredentialLink|SIDHistory|nTSecurityDescriptor)/i },
-      { category: "Domain Persistence", name: "AD Object Created", eventIds: ["5137"], channels: ["security"], severity: "medium",
-        extractors: {
-          objectDN: [P("ObjectDN"), P("Object_DN")],
-          objectClass: [P("ObjectClass"), P("Object_Class")],
-          subjectUser: [P("SubjectUserName"), P("Subject_User_Name")],
-        },
-        topFields: ["objectDN", "objectClass", "subjectUser"],
-        payloadFilter: /(?:AdminSDHolder|CN=Policies|groupPolicyContainer|trustedDomain|msDS-ManagedServiceAccount|msDS-GroupManagedServiceAccount)/i },
-      { category: "Domain Persistence", name: "AD Object Deleted", eventIds: ["5141"], channels: ["security"], severity: "high",
-        extractors: {
-          objectDN: [P("ObjectDN"), P("Object_DN")],
-          objectClass: [P("ObjectClass"), P("Object_Class")],
-          subjectUser: [P("SubjectUserName"), P("Subject_User_Name")],
-        },
-        topFields: ["objectDN", "objectClass", "subjectUser"],
-        payloadFilter: /(?:AdminSDHolder|CN=Policies|groupPolicyContainer|trustedDomain)/i },
-      // --- Service start type change (7040): detect auto-start flipping ---
-      { category: "Services", name: "Service StartType Changed", eventIds: ["7040"], channels: ["system"], severity: "high",
-        extractors: { serviceName: [P("param1"), P("ServiceName"), P("Name")], oldStartType: [P("param2"), P("OldStartType")], newStartType: [P("param3"), P("NewStartType")] },
-        topFields: ["serviceName", "oldStartType", "newStartType"], payloadFilter: null },
-      // --- Security 4702: Scheduled task updated (Security log fallback for 140) ---
-      { category: "Scheduled Tasks", name: "Task Updated (Security)", eventIds: ["4702"], channels: ["security"], severity: "medium",
-        extractors: { taskName: [P("Task"), P("TaskName"), P("Task Name")], command: [P("Command"), P("Actions")] },
-        topFields: ["taskName", "command"], payloadFilter: null },
-      // --- Security 4657: Registry audit fallback when Sysmon 12/13/14 are absent ---
-      { category: "Registry Autorun", name: "Registry Value Modified (4657)", eventIds: ["4657"], channels: ["security"], severity: "high",
-        extractors: {
-          targetObject: [P("ObjectName"), P("Object Name")],
-          valueName: [P("ObjectValueName"), P("Object Value Name")],
-          newValue: [P("NewValue"), P("New Value")],
-          oldValue: [P("OldValue"), P("Old Value")],
-          image: [P("ProcessName"), P("Process Name"), P("SubjectProcessName")],
-          subjectUser: [P("SubjectUserName"), P("Subject_User_Name")],
-        },
-        topFields: ["targetObject", "valueName", "newValue", "image"],
-        payloadFilter: /\\(?:Run|RunOnce|RunServices|Services\\[^\\]*\\(?:ImagePath|Parameters|ServiceDll|FailureCommand)|Winlogon\\(?:Shell|Userinit|Notify|Taskman|VmApplet|AppSetup)|AppInit_DLLs|LoadAppInit_DLLs|Image File Execution Options\\[^\\]*\\Debugger|CurrentVersion\\Explorer\\(?:Shell|User Shell)|Session Manager\\(?:BootExecute|SetupExecute|AppCertDlls)|InprocServer32|LocalServer32|ShellIconOverlay|ShellServiceObjectDelayLoad|ContextMenuHandler|Browser Helper|Active Setup|Print\\Monitors|NetworkProvider|Lsa\\|Control\\SecurityProviders|GPExtensions\\|Group Policy\\Scripts|System\\Scripts\\|TreatAs(?:\\|$)|Windows Defender\\Exclusions|WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\(?:Run|RunOnce|RunOnceEx)|SilentProcessExit\\|Environment\\(?:$|\\)|COR_PROFILER|Credential Provid|PLAP Providers\\|Command Processor\\|Microsoft\\Netsh|Control Panel\\Desktop|Office\\[^\\]*\\[^\\]*\\Addins\\|W32Time\\TimeProviders\\|Terminal Server\\|shell\\open\\command|FileExts\\)/i },
-      // --- Defender tampering (Microsoft-Windows-Windows Defender/Operational) ---
-      { category: "Defender Tampering", name: "Defender Protection Disabled", eventIds: ["5001", "5010", "5012", "5101"], channels: ["defender"], severity: "high",
-        extractors: { newValue: [P("New Value"), P("NewValue")], oldValue: [P("Old Value"), P("OldValue")], feature: [P("Feature Name"), P("Product Name")] },
-        topFields: ["feature", "newValue", "oldValue"], payloadFilter: null },
-      { category: "Defender Tampering", name: "Defender Setting Changed", eventIds: ["5007"], channels: ["defender"], severity: "medium",
-        extractors: { newValue: [P("New Value"), P("NewValue")], oldValue: [P("Old Value"), P("OldValue")] },
-        topFields: ["newValue", "oldValue"],
-        // 5007 fires on every signature update — only surface tamper-relevant settings.
-        payloadFilter: /Exclusions|DisableAntiSpyware|DisableRealtimeMonitoring|DisableBehaviorMonitoring|DisableIOAVProtection|DisableScriptScanning|DisableArchiveScanning|DisableScanningNetworkFiles|DisableOnAccessProtection|SubmitSamplesConsent|MpEnablePus|TamperProtection|PUAProtection|DisableBlockAtFirstSeen/i },
-    ];
-
-    const REGISTRY_RULES = [
-      { category: "Run Keys", name: "Run/RunOnce Autostart", severity: "high", description: "Standard autorun registry key",
-        keyPathPattern: /\\(?:Software|SOFTWARE)\\(?:Microsoft\\Windows\\CurrentVersion|WOW6432Node\\Microsoft\\Windows\\CurrentVersion)\\(?:Run|RunOnce|RunOnceEx|RunServices|RunServicesOnce|Policies\\Explorer\\Run)(?:\\|$)/i, valueNameFilter: null },
-      { category: "Services", name: "Service ImagePath/ServiceDll", severity: "high", description: "Service executable or DLL path",
-        keyPathPattern: /\\(?:SYSTEM|System)\\(?:CurrentControlSet|ControlSet\d+)\\Services\\[^\\]+(?:\\Parameters)?$/i,
-        valueNameFilter: /^(ImagePath|ServiceDll|FailureCommand)$/i },
-      { category: "Winlogon", name: "Winlogon Shell/Userinit", severity: "critical", description: "Login-triggered execution via Winlogon",
-        keyPathPattern: /\\Microsoft\\Windows NT\\CurrentVersion\\Winlogon$/i, valueNameFilter: /^(Shell|Userinit|Notify|VmApplet|AppSetup|Taskman)$/i },
-      { category: "AppInit DLLs", name: "AppInit_DLLs", severity: "critical", description: "DLL injection on every user-mode process",
-        keyPathPattern: /\\Microsoft\\Windows NT\\CurrentVersion\\Windows$/i, valueNameFilter: /^(AppInit_DLLs|LoadAppInit_DLLs)$/i },
-      { category: "IFEO", name: "Image File Execution Options Debugger", severity: "critical", description: "Debugger hijacking of executable launch",
-        keyPathPattern: /\\Image File Execution Options\\[^\\]+$/i, valueNameFilter: /^(Debugger|GlobalFlag)$/i },
-      { category: "COM Hijacking", name: "COM Object Server", severity: "high", description: "COM object DLL/executable hijacking",
-        keyPathPattern: /\\(?:InprocServer32|LocalServer32|InprocHandler32)$/i, valueNameFilter: null },
-      { category: "Shell Extensions", name: "Shell Extension Handler", severity: "medium", description: "Explorer shell extension persistence",
-        keyPathPattern: /\\(?:ShellIconOverlayIdentifiers|ContextMenuHandlers|PropertySheetHandlers|ColumnHandlers|CopyHookHandlers|DragDropHandlers|ShellExecuteHooks)\\[^\\]+$/i, valueNameFilter: null },
-      { category: "Boot Execute", name: "Session Manager BootExecute", severity: "critical", description: "Pre-boot execution before Windows starts",
-        keyPathPattern: /\\(?:Session Manager)$/i, valueNameFilter: /^(BootExecute|SetupExecute|Execute)$/i },
-      { category: "BHO", name: "Browser Helper Object", severity: "medium", description: "Browser helper object (IE/Edge extension)",
-        keyPathPattern: /\\Browser Helper Objects\\{[0-9a-fA-F-]+}$/i, valueNameFilter: null },
-      { category: "LSA", name: "LSA Security/Auth Packages", severity: "critical", description: "Credential interception via LSA packages",
-        keyPathPattern: /\\(?:Control\\)?Lsa(?:\\OSConfig)?$/i, valueNameFilter: /^(Security Packages|Authentication Packages|Notification Packages)$/i },
-      { category: "Print Monitors", name: "Print Monitor DLL", severity: "high", description: "Spooler-based persistence via print monitor",
-        keyPathPattern: /\\Print\\Monitors\\[^\\]+$/i, valueNameFilter: /^Driver$/i },
-      { category: "Active Setup", name: "Active Setup StubPath", severity: "high", description: "Per-user execution on first login",
-        keyPathPattern: /\\Active Setup\\Installed Components\\{[0-9a-fA-F-]+}$/i, valueNameFilter: /^StubPath$/i },
-      { category: "Startup Folder", name: "Startup Folder Registry Path", severity: "high", description: "Startup folder path redirection",
-        keyPathPattern: /\\Explorer\\(?:User Shell Folders|Shell Folders)$/i, valueNameFilter: /Startup/i },
-      { category: "Scheduled Tasks (Reg)", name: "Scheduled Task in Registry", severity: "medium", description: "Task definition stored in registry",
-        keyPathPattern: /\\Schedule\\TaskCache\\(?:Tasks|Tree)\\?/i, valueNameFilter: null },
-      { category: "Network Providers", name: "Network Provider Order", severity: "high", description: "Network login interception via custom provider",
-        keyPathPattern: /\\NetworkProvider\\Order$/i, valueNameFilter: /^ProviderOrder$/i },
-      { category: "Logon Script", name: "User Logon Script (Environment)", severity: "high", description: "Per-user logon script via Environment key",
-        keyPathPattern: /\\Environment$/i, valueNameFilter: /^UserInitMprLogonScript$/i },
-      { category: "AppCert DLLs", name: "AppCert DLL", severity: "critical", description: "DLL loaded into every process that calls Win32 API CreateProcess",
-        keyPathPattern: /\\Session Manager\\AppCertDlls$/i, valueNameFilter: null },
-      { category: "Silent Process Exit", name: "Silent Process Exit Monitor", severity: "critical", description: "Execution triggered by monitored process termination",
-        keyPathPattern: /\\SilentProcessExit\\[^\\]+$/i, valueNameFilter: /^(MonitorProcess|ReportingMode|IgnoreSelfExits)$/i },
-      { category: "Credential Providers", name: "Credential Provider Registration", severity: "high", description: "Custom credential provider DLL for login interception",
-        keyPathPattern: /\\Authentication\\(?:Credential Providers|Credential Provider Filters|PLAP Providers)\\{[0-9a-fA-F-]+}$/i, valueNameFilter: null },
-      { category: "Command Processor", name: "Command Processor AutoRun", severity: "high", description: "cmd.exe startup command persistence",
-        keyPathPattern: /\\Command Processor$/i, valueNameFilter: /^AutoRun$/i },
-      { category: "Explorer Autoruns", name: "ShellServiceObjectDelayLoad", severity: "high", description: "Explorer-triggered DLL persistence via ShellServiceObjectDelayLoad",
-        keyPathPattern: /\\ShellServiceObjectDelayLoad$/i, valueNameFilter: null },
-      { category: "Netsh Helper DLLs", name: "Netsh Helper DLL", severity: "high", description: "Netsh helper DLL persistence",
-        keyPathPattern: /\\Microsoft\\Netsh$/i, valueNameFilter: null },
-      // --- New rules: commonly seen in DFIR cases, previously undetected ---
-      { category: "Screensaver", name: "Screensaver Hijack", severity: "high", description: "Idle-triggered execution via screensaver registry (T1546.002)",
-        keyPathPattern: /\\Control Panel\\Desktop$/i, valueNameFilter: /^SCRNSAVE\.EXE$/i },
-      { category: "Office Add-ins", name: "Office Add-in Registration", severity: "high", description: "Persistent Office add-in DLL loaded on application start (T1137.006)",
-        keyPathPattern: /\\Microsoft\\Office\\[^\\]+\\[^\\]+\\Addins\\/i, valueNameFilter: null },
-      { category: "Time Providers", name: "Time Provider DLL", severity: "critical", description: "W32Time service DLL persistence — runs as SYSTEM (T1547.003)",
-        keyPathPattern: /\\Services\\W32Time\\TimeProviders\\[^\\]+$/i, valueNameFilter: /^DllName$/i },
-      { category: "Terminal Server", name: "Terminal Server InitialProgram", severity: "critical", description: "RDP session hijacking — runs arbitrary binary on RDP login instead of explorer",
-        keyPathPattern: /\\Terminal Server\\(?:WinStations\\[^\\]+|DefaultUserConfiguration)$/i, valueNameFilter: /^(?:InitialProgram|fInheritInitialProgram)$/i },
-      { category: "File Association", name: "File Association Hijack", severity: "high", description: "File extension handler hijack — triggers on every file open (T1546.001)",
-        keyPathPattern: /(?:\\(?:Classes|Explorer\\FileExts)\\[^\\]+\\(?:shell\\open\\command|OpenWithList|UserChoice)|\\[^\\]*\.[^\\]+\\shell\\open\\command)$/i, valueNameFilter: null },
-      // --- Tier-3 coverage additions (2026-05-29 gap analysis) ---
-      { category: "Group Policy Scripts", name: "GPO Logon/Startup Script", severity: "high", description: "Logon/Startup/Shutdown script registered via Group Policy (T1037.001)",
-        keyPathPattern: /\\(?:Group Policy\\Scripts|Windows\\System\\Scripts)\\(?:Startup|Shutdown|Logon|Logoff)\\/i, valueNameFilter: /^(Script|Parameters)$/i },
-      { category: "Security Support Provider", name: "LSA Security Support Provider", severity: "critical", description: "SSP/AP DLL loaded into LSASS — credential interception (T1547.005)",
-        keyPathPattern: /\\Control\\SecurityProviders$/i, valueNameFilter: /^SecurityProviders$/i },
-      { category: "Environment Hijack", name: "COR_PROFILER .NET Profiler", severity: "high", description: "DLL injected into any CLR process via COR_PROFILER env var (T1574.012)",
-        keyPathPattern: /\\Environment$/i, valueNameFilter: /^(COR_PROFILER|COR_ENABLE_PROFILING|COR_PROFILER_PATH(?:_32|_64)?)$/i },
-      { category: "Winlogon", name: "Winlogon Notify/GPExtensions DLL", severity: "critical", description: "Logon-triggered DLL via Winlogon Notify or GPExtensions subkey (T1547.004)",
-        keyPathPattern: /\\Winlogon\\Notify\\[^\\]+$|\\GPExtensions\\{[0-9a-fA-F-]+}$/i, valueNameFilter: /^DllName$/i },
-      { category: "COM Hijacking", name: "COM TreatAs Redirect", severity: "high", description: "COM class redirected to another server via TreatAs (T1546.015)",
-        keyPathPattern: /\\CLSID\\{[0-9a-fA-F-]+}\\TreatAs$/i, valueNameFilter: null },
-      { category: "Defender Tampering", name: "Defender Exclusion / Protection Disabled", severity: "high", description: "AV exclusion added or protection disabled via registry (T1562.001)",
-        keyPathPattern: /\\(?:Windows Defender|Microsoft Antimalware)\\(?:Exclusions\\(?:Paths|Extensions|Processes|TemporaryPaths)|Real-Time Protection|Features)(?:\\|$)/i, valueNameFilter: null },
-    ];
+    // EVTX_RULES / REGISTRY_RULES live in ./rules.js so the renderer's rule catalog can be
+    // derived from the same arrays the engine runs (see PERSISTENCE_RULE_CATALOG).
 
     // --- Apply user rule customization ---
     const disabledRules = new Set(options.disabledRules || []);
@@ -508,8 +327,19 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
         valueData3: detect([/^ValueData3$/i]),
         valueType: detect([/^ValueType$/i, /^Value ?Type$/i]),
         hivePath: detect([/^HivePath$/i, /^Hive ?Path$/i]),
+        // HiveType is what makes a hive-relative KeyPath ("ROOT\ControlSet001\Services\X")
+        // resolvable to a canonical root without guessing from the file path.
+        hiveType: detect([/^HiveType$/i, /^Hive ?Type$/i]),
+        computer: userCols.computer || detect([/^Computer$/i, /^ComputerName$/i, /^Hostname$/i, /^MachineName$/i]),
         ts: userCols.ts || detect([/^LastWriteTimestamp$/i, /^Timestamp$/i, /^datetime$/i, /^TimeCreated$/i]),
       };
+      // Plugin CSV: pull in that shape's own columns so projectPluginRows() can rebuild
+      // the {keyPath, valueName, valueData} triple the rules match on.
+      if (regPlugin) {
+        for (const [key, colName] of Object.entries(regPlugin.cols)) {
+          if (colName && !columns[key]) columns[key] = colName;
+        }
+      }
     }
 
     // --- Build SQL query ---
@@ -597,7 +427,8 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
       return diff >= 0 && diff <= window;
     };
     const _withinWindowBidi = (ts1, ts2, window) => _withinWindow(ts1, ts2, window) || _withinWindow(ts2, ts1, window);
-    const _corrHost = (value) => cleanWrappedField(value).toUpperCase();
+    // Canonical host key for correlation — see analyzers/persistence/incidents.js.
+    const _corrHost = corrHost;
     const _corrUser = (value) => cleanWrappedField(value);
 
     // --- PowerShell 4104 Script Block persistence patterns ---
@@ -639,13 +470,45 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
     const PS_4104_ALLOWLIST_PATHS = /(?:Microsoft\\Configuration\s*Manager|SCCM|CCM\\|Intune\\|Microsoft\s+Intune|sysvol\\|Group\s*Policy|\\Policies\\|Windows\s*Defender\\|MpCmdRun|AMSI|Sophos\\|CrowdStrike\\|SentinelOne\\|CarbonBlack\\|Cortex\s*XDR)/i;
     const PS_4104_ALLOWLIST_SCRIPTS = /(?:(?:Microsoft|Windows)\\(?:Azure|Intune|SCCM|ConfigMgr)|(?:chocolatey|nuget|pester|psake|platyPS|PSReadLine|PackageManagement|PowerShellGet)\\)/i;
 
+    // Multi-source mode hands the engine an already-merged, already-aliased row set from
+    // several tabs (see ./multi-source.js). There is no single `db` to query then, so every
+    // query site below reads from this array instead. Rows carry the same alias names the
+    // SELECT would have produced, plus _sourceTab/_sourceTabId provenance.
+    const _prequeried = Array.isArray(options._prequeriedRows) ? options._prequeriedRows : null;
+    const _eidOf = (row) => String(row?.eventId ?? "").trim();
+    // Carry the source tab onto every finding it produced. In a merged run `rowid` alone is
+    // ambiguous — each tab's rowids start at 1 — so the tab id is what makes a finding
+    // navigable back to the grid it came from. A no-op for single-tab analysis.
+    const _provenance = (row) => (row?._sourceTabId
+      ? { _sourceTab: row._sourceTab, _sourceTabId: row._sourceTabId, _sourceRowId: row._sourceRowId, _sourceFormat: row._sourceFormat }
+      : null);
+
     try {
       const maxRows = 500000;
-      const sql = `SELECT ${selectParts.join(", ")} FROM data ${whereClause} ${orderClause} LIMIT ${maxRows}`;
-      const rows = db.prepare(sql).all(...params);
+      let rows;
+      if (_prequeried) {
+        // The SQL path pre-filters on the active rules' event ids; do the same in memory so
+        // correlation-only ids (7036/7035/1/4688/4104) don't become findings.
+        const wanted = new Set(ALL_EVTX_EIDS);
+        rows = mode === "evtx" ? _prequeried.filter((r) => wanted.has(_eidOf(r))) : _prequeried;
+      } else {
+        const sql = `SELECT ${selectParts.join(", ")} FROM data ${whereClause} ${orderClause} LIMIT ${maxRows}`;
+        rows = db.prepare(sql).all(...params);
+      }
 
       let items = [];
       const warnings = [];
+      // Registry-mode provenance, surfaced in stats so the analyst can see WHERE the host
+      // attribution came from and which plugin shape was projected.
+      let registryHost = "";
+      let registryHostSource = "none";
+      let registryPluginInfo = null;
+      let registryInventorySuppressed = 0;
+      // Remote arrivals seen in this scan: inbound network/RDP logons and remote WMI/WinRM
+      // operations. A multi-source run analyzes EVTX and registry in separate passes, so
+      // the EVTX pass hands its arrivals to the registry pass through `_remoteLogons` —
+      // otherwise a Run value written over an RDP session could never be attributed.
+      const remoteLogons = Array.isArray(options._remoteLogons) ? [...options._remoteLogons] : [];
       const LOLBIN_PAT = /(?:powershell|pwsh|cmd\.exe|mshta|wscript|cscript|rundll32|regsvr32|certutil|bitsadmin|msiexec|forfiles|cmstp|hh\.exe|odbcconf|regasm|regsvcs|installutil|pcalua|msconfig|msbuild|xwizard|presentationhost|ieexec|control\.exe)/i;
       let ps4104CorrelatedCount = 0;
       const ps4104Reassembled = [];
@@ -717,12 +580,13 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
             const tags = rmmMatch ? ["RMM Tool"] : [];
 
             // Preserve raw payload for task items that need deep XML parsing (4698/4702/140)
-            if ((eid === "4698" || eid === "4702" || eid === "140") && rule.category === "Scheduled Tasks") {
+            if ((eid === "4698" || eid === "4702" || eid === "140" || eid === "TASKXML") && rule.category === "Scheduled Tasks") {
               details._rawPayload = haystack;
             }
 
             items.push({
               rowid: row._rowid,
+              ..._provenance(row),
               category: rule.category,
               name: rule.name,
               severity: rule.severity,
@@ -834,50 +698,108 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
         }
       } else {
         // Registry mode
-        // Helper: derive user and hive scope from hivePath
-        const _hiveContext = (hp) => {
-          if (!hp) return { user: "", hiveScope: "" };
-          const h = hp.replace(/\\/g, "/");
-          // NTUSER.DAT / UsrClass.dat -> HKCU, extract username from path
-          const userM = h.match(/[/\\]Users[/\\]([^/\\]+)[/\\]/i);
-          if (/ntuser\.dat/i.test(h) || /usrclass\.dat/i.test(h)) {
-            return { user: userM ? userM[1] : "", hiveScope: "HKCU" };
+        //
+        // A plugin CSV is a projected view of one key family — rebuild the
+        // {keyPath, valueName, valueData} triple the rules are written against.
+        const regRows = regPlugin ? projectPluginRows(regPlugin, rows) : rows;
+        if (regPlugin) {
+          registryPluginInfo = { id: regPlugin.shape.id, label: regPlugin.shape.label };
+          if (regRows.length === 0 && rows.length > 0) {
+            warnings.push(`${regPlugin.shape.label}: ${rows.length} rows carried no projectable values — check the plugin CSV's column names.`);
           }
-          // SYSTEM hive
-          if (/[/\\]config[/\\]SYSTEM$/i.test(h) || /[/\\]SYSTEM$/i.test(h)) return { user: "", hiveScope: "HKLM\\SYSTEM" };
-          // SOFTWARE hive
-          if (/[/\\]config[/\\]SOFTWARE$/i.test(h) || /[/\\]SOFTWARE$/i.test(h)) return { user: "", hiveScope: "HKLM\\SOFTWARE" };
-          // SAM hive
-          if (/[/\\]config[/\\]SAM$/i.test(h)) return { user: "", hiveScope: "HKLM\\SAM" };
-          // SECURITY hive
-          if (/[/\\]config[/\\]SECURITY$/i.test(h)) return { user: "", hiveScope: "HKLM\\SECURITY" };
-          // DEFAULT hive
-          if (/[/\\]config[/\\]DEFAULT$/i.test(h)) return { user: "", hiveScope: "HKU\\.DEFAULT" };
-          // Amcache
-          if (/amcache/i.test(h)) return { user: "", hiveScope: "Amcache" };
-          return { user: userM ? userM[1] : "", hiveScope: "" };
-        };
-        for (const row of rows) {
-          const kp = row.keyPath || "";
+        }
+
+        // --- Host attribution (registry tabs carry no Computer column) ---
+        // Precedence: an explicit column, then the machine name read straight out of the
+        // SYSTEM hive, then the KAPE collection path. Only the last is a guess, and items
+        // attributed that way are flagged so the analyst can tell.
+        const _explicitHost = cleanWrappedField(regRows.find((r) => r.computer)?.computer || "");
+        // The ComputerName patterns are suffix-anchored, so they match the RAW key path in
+        // every shape — no need to canonicalize a second time over what can be 500K rows.
+        const _hiveHost = _explicitHost ? "" : cleanWrappedField(hostFromComputerNameKey(regRows, {
+          keyPathOf: (r) => r.keyPath,
+          valueNameOf: (r) => r.valueName,
+          valueDataOf: (r) => [r.valueData, r.valueData2, r.valueData3].filter(Boolean).join(" "),
+        }));
+        let _pathHost = "";
+        if (!_explicitHost && !_hiveHost) {
+          // Every row in a tab comes from the same collection, so the first resolvable hive
+          // path settles it; bound the scan so an export with no HivePath column can't walk
+          // the whole row set for nothing.
+          const _hostProbe = Math.min(regRows.length, 1000);
+          for (let i = 0; i < _hostProbe; i++) {
+            _pathHost = deriveCollectionHost(regRows[i].hivePath);
+            if (_pathHost) break;
+          }
+        }
+        // Last resort: ask the same collection-host detector lateral movement uses, rather
+        // than growing a second notion of "which machine is this tab about". It reads the
+        // Computer column's distribution, so it only helps when the tab HAS one — but on a
+        // merged EVTX+registry scan that is exactly the case, and it means both analyzers
+        // agree on the host a finding belongs to.
+        let _detectedHost = "";
+        if (!_explicitHost && !_hiveHost && !_pathHost && meta?.db) {
+          try {
+            const { detectKapeCollectionHost } = require("../lateral-movement/kape-host");
+            const detected = detectKapeCollectionHost(meta);
+            if (detected?.collectionHost && detected.confidence !== "low") _detectedHost = detected.collectionHost;
+          } catch { /* optional enrichment — never fail the scan over it */ }
+        }
+
+        const _optHost = cleanWrappedField(options.computerName || "");
+        registryHost = _optHost || _explicitHost || _hiveHost || _pathHost || _detectedHost || "";
+        registryHostSource = _optHost ? "user"
+          : _explicitHost ? "column"
+            : _hiveHost ? "system-hive"
+              : _pathHost ? "collection-path"
+                : _detectedHost ? "collection-host-detection" : "none";
+        const _hostInferred = registryHostSource === "collection-path";
+
+        for (const row of regRows) {
+          // Fold RECmd/Registry Explorer/raw-hive shapes onto one canonical path BEFORE
+          // rule matching — hive-relative "ROOT\ControlSet001\Services\X" carries no
+          // \SYSTEM\ segment, so the Services rule matched nothing on a RECmd export.
+          const rawKp = row.keyPath || "";
+          const kp = canonicalizeKeyPath(rawKp, { hiveType: row.hiveType, hivePath: row.hivePath }) || rawKp;
           const vn = row.valueName || "";
           const vd = [row.valueData, row.valueData2, row.valueData3].filter(Boolean).join(" ");
-          const hiveCtx = _hiveContext(row.hivePath);
+          const hiveCtx = hiveContext(row.hivePath, row.hiveType);
 
           for (const rule of activeRegRules) {
             if (!rule.keyPathPattern.test(kp)) continue;
             if (rule.valueNameFilter && !rule.valueNameFilter.test(vn)) continue;
 
+            const details = {
+              keyPath: kp, valueName: vn, valueData: vd,
+              hivePath: row.hivePath || "", hiveScope: hiveCtx.hiveScope,
+            };
+            if (rawKp && rawKp !== kp) details.keyPathRaw = rawKp;
+            if (row.hiveType) details.hiveType = row.hiveType;
+            if (_hostInferred && registryHost) details._hostInferred = true;
+            // A plugin CSV is a snapshot of current STATE, not a record of a change: every
+            // host yields hundreds of rows. Flag them so scoring/suppression can treat them
+            // as inventory to hunt through rather than observed modifications.
+            if (row._inventory) {
+              details._registryInventory = true;
+              details._registrySource = row._pluginLabel || row._plugin;
+            }
+            for (const [k, v] of Object.entries(row)) {
+              if (k.startsWith("_plugin") && v !== undefined && k !== "_plugin" && k !== "_pluginLabel") details[k] = v;
+            }
+            if (row._taskRegHasActions) details._taskRegHasActions = true;
+
             items.push({
               rowid: row._rowid,
+              ..._provenance(row),
               category: rule.category,
               name: rule.name,
               severity: rule.severity,
               description: rule.description,
               timestamp: row.ts || "",
-              computer: "",
-              user: hiveCtx.user,
-              source: "Registry",
-              details: { keyPath: kp, valueName: vn, valueData: vd, hivePath: row.hivePath || "", hiveScope: hiveCtx.hiveScope },
+              computer: registryHost,
+              user: cleanWrappedField(row.user || "") || hiveCtx.user,
+              source: row._pluginLabel || "Registry",
+              details,
               detailsSummary: `${vn}: ${vd}`.substring(0, 300),
               mode: "registry",
             });
@@ -910,7 +832,7 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
         // Works on 4698 (Task Created), 4702 (Task Updated Security), 140 (Task Updated Operational)
         for (const item of items) {
           if (item.category !== "Scheduled Tasks") continue;
-          if (item.name !== "Scheduled Task Created" && item.name !== "Task Updated (Security)" && item.name !== "Task Updated") continue;
+          if (item.name !== "Scheduled Task Created" && item.name !== "Task Updated (Security)" && item.name !== "Task Updated" && item.name !== "Scheduled Task Defined") continue;
           // Prefer raw payload (full event text) over reduced summary for XML field extraction
           const raw = item.details._rawPayload || "";
           const fallback = (item.detailsSummary || "") + " " + JSON.stringify(item.details || {});
@@ -968,14 +890,28 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
         const svcStartEvents = [];
         const svcControlEvents = []; // 7035: service control manager requests (start/stop)
         const procStartEvents = [];
-        const CORR_EIDS = ["7036", "7035", "1", "4688"];
-        if (columns.eventId && meta.colMap[columns.eventId]) {
-          const safeEidCol = meta.colMap[columns.eventId];
-          const corrWhere = [`${safeEidCol} IN (${CORR_EIDS.map(() => "?").join(",")})`, ...scopeConditions];
-          const corrParams = [...CORR_EIDS, ...scopeParams];
-          const corrSql = `SELECT ${selectParts.join(", ")} FROM data WHERE ${corrWhere.join(" AND ")} ${orderClause} LIMIT 200000`;
+        // 4624 is here for ORIGIN, not for detection: an inbound network (type 3) or RDP
+        // (type 10) logon shortly before a service/task/autorun appears is what makes that
+        // artifact attributable to a remote actor rather than to the console user.
+        const CORR_EIDS = ["7036", "7035", "1", "4688", "4624"];
+        // This is the single most consequential query in the analyzer: it is what turns a
+        // 7045 service install from "present" into "confirmed". On raw KAPE triage the
+        // corroborating events live in OTHER files — 4688 in Security.evtx, Sysmon 1 in
+        // the Sysmon channel — so a single-tab run can never find them. In multi-source
+        // mode they are already in the merged set.
+        if (_prequeried || (columns.eventId && meta.colMap[columns.eventId])) {
+          const corrSet = new Set(CORR_EIDS);
+          let corrSql = null, corrParams = null;
+          if (!_prequeried) {
+            const safeEidCol = meta.colMap[columns.eventId];
+            const corrWhere = [`${safeEidCol} IN (${CORR_EIDS.map(() => "?").join(",")})`, ...scopeConditions];
+            corrParams = [...CORR_EIDS, ...scopeParams];
+            corrSql = `SELECT ${selectParts.join(", ")} FROM data WHERE ${corrWhere.join(" AND ")} ${orderClause} LIMIT 200000`;
+          }
           try {
-            const corrRows = db.prepare(corrSql).all(...corrParams);
+            const corrRows = _prequeried
+              ? _prequeried.filter((r) => corrSet.has(_eidOf(r)))
+              : db.prepare(corrSql).all(...corrParams);
             for (const row of corrRows) {
               const eid = String(row.eventId || "").trim();
               const ch = resolveEventChannel(row);
@@ -1021,25 +957,79 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
                   if (p) procStartEvents.push({ ...p, parentImage: pp?.imagePath || "", parentBase: pp?.imageBase || "", timestamp: row.ts || "", computer: _corrHost(row.computer || "") });
                 }
               }
+              // Security 4624: inbound logon. ONLY network (3) and RemoteInteractive (10)
+              // are remote arrivals — 2 is the console, 5 is a service start, 7 is unlock.
+              if (eid === "4624" && evtxChannelMatches(ch, ["security"])) {
+                const lt = extractFirstInteger(
+                  (haystack.match(/(?:^|\b)LogonType:\s*(.+?)(?:\s*$|\s*[|¦])/i) || [])[1] || "",
+                );
+                if (lt === "3" || lt === "10") {
+                  const grab = (re) => (haystack.match(re) || [])[1]?.trim() || "";
+                  const ip = grab(/(?:^|\b)IpAddress:\s*(.+?)(?:\s*$|\s*[|¦])/i);
+                  const wks = grab(/(?:^|\b)WorkstationName:\s*(.+?)(?:\s*$|\s*[|¦])/i);
+                  // "-", "::1" and 127.0.0.1 are the local machine talking to itself.
+                  const remoteIp = /^(?:-|::1|127\.0\.0\.1|0\.0\.0\.0)?$/.test(ip) ? "" : ip;
+                  const remoteWks = _corrHost(wks);
+                  const target = _corrHost(row.computer || "");
+                  if ((remoteIp || (remoteWks && remoteWks !== target))) {
+                    remoteLogons.push({
+                      target,
+                      sourceHost: remoteWks && remoteWks !== target ? remoteWks : "",
+                      sourceIp: remoteIp,
+                      user: cleanWrappedField(grab(/(?:^|\b)TargetUserName:\s*(.+?)(?:\s*$|\s*[|¦])/i)),
+                      logonId: grab(/(?:^|\b)TargetLogonId:\s*(.+?)(?:\s*$|\s*[|¦])/i),
+                      logonType: lt,
+                      timestamp: row.ts || "",
+                      via: lt === "10" ? "RDP logon (4624 type 10)" : "network logon (4624 type 3)",
+                    });
+                  }
+                }
+              }
             }
           } catch (_corrErr) { /* correlation query may fail on non-EVTX datasets — silently skip */ }
         }
 
+        // Remote-execution FINDINGS double as arrivals: WMI 5858/5860 names the calling
+        // machine outright, so it is a pivot source in its own right even with no 4624.
+        for (const item of items) {
+          if (item.category !== "Remote Execution") continue;
+          const client = _corrHost(item.details?.clientMachine || "");
+          const target = _corrHost(item.computer || "");
+          if (!client || client === target) continue;
+          remoteLogons.push({
+            target,
+            sourceHost: client,
+            sourceIp: "",
+            user: item.details?.remoteUser || "",
+            logonId: "",
+            logonType: "",
+            timestamp: item.timestamp || "",
+            via: item.name === "WinRM Remote Session" ? "WinRM session" : "WMI remote operation",
+          });
+        }
+
         // --- PowerShell 4104 Script Block Logging: separate query + fragment reassembly ---
         const ps4104Fragments = [];
-        if (columns.eventId && meta.colMap[columns.eventId]) {
-          const safeEidCol = meta.colMap[columns.eventId];
-          const ps4104Where = [`${safeEidCol} IN (?)`, ...scopeConditions];
-          const ps4104Params = ["4104", ...scopeParams];
+        if (_prequeried || (columns.eventId && meta.colMap[columns.eventId])) {
           const ps4104MaxRows = Math.max(10000, Math.min(Number(options.ps4104MaxRows) || 250000, 1000000));
           const ps4104PageSize = Math.max(1000, Math.min(Number(options.ps4104PageSize) || 20000, 100000));
+          // PowerShell%4Operational.evtx is its own file, so on raw KAPE a single-tab run
+          // never sees the script block that created the task/service it is scoring.
+          const _prequeried4104 = _prequeried ? _prequeried.filter((r) => _eidOf(r) === "4104") : null;
+          let ps4104Where = null, ps4104Params = null;
+          if (!_prequeried) {
+            const safeEidCol = meta.colMap[columns.eventId];
+            ps4104Where = [`${safeEidCol} IN (?)`, ...scopeConditions];
+            ps4104Params = ["4104", ...scopeParams];
+          }
           try {
             let lastRid = 0;
             let fetched = 0;
             while (fetched < ps4104MaxRows) {
               const chunk = Math.min(ps4104PageSize, ps4104MaxRows - fetched);
-              const ps4104Sql = `SELECT ${selectParts.join(", ")} FROM data WHERE ${ps4104Where.join(" AND ")} AND data.rowid > ? ORDER BY data.rowid ASC LIMIT ${chunk}`;
-              const ps4104Rows = db.prepare(ps4104Sql).all(...ps4104Params, lastRid);
+              const ps4104Rows = _prequeried4104
+                ? _prequeried4104.slice(fetched, fetched + chunk)
+                : db.prepare(`SELECT ${selectParts.join(", ")} FROM data WHERE ${ps4104Where.join(" AND ")} AND data.rowid > ? ORDER BY data.rowid ASC LIMIT ${chunk}`).all(...ps4104Params, lastRid);
               if (ps4104Rows.length === 0) break;
               for (const row of ps4104Rows) {
                 const ch = resolveEventChannel(row);
@@ -1210,7 +1200,7 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
           if (item.category !== "Services" || (item.name !== "Service Installed" && item.name !== "Service StartType Changed")) continue;
           const sn = _normSvcName(item.details.serviceName);
           const exe = _parseExePath(item.details.imagePath || item.details.serviceFile);
-          const host = (item.computer || "").toUpperCase();
+          const host = _corrHost(item.computer);
           const ts = item.timestamp;
 
           // 1. Service start (7036 running) — same host, within time window
@@ -1418,7 +1408,7 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
           for (const item of items) {
             if (item.category === "Registry Autorun" && item.details.details) {
               const vd = _normPath(item.details.details);
-              const host = (item.computer || "").toUpperCase();
+              const host = _corrHost(item.computer);
               if (vd && (execPaths.has(vd) || (procStartByPath[vd] || []).some(e => e.computer === host))) {
                 item.details._execSeen = true;
                 item.confidence = "confirmed";
@@ -1436,7 +1426,7 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
           if (item.category !== "Scheduled Tasks" || (item.name !== "Task Registered" && item.name !== "Scheduled Task Created")) continue;
           const tn = (item.details.taskName || "").replace(/^\\+/, "").toLowerCase();
           if (!tn) continue;
-          const host = (item.computer || "").toUpperCase();
+          const host = _corrHost(item.computer);
           const candidates = (ps4104ByTask[host] || {})[tn]
             || Object.values(ps4104ByTask[host] || {}).find(arr => arr[0] && tn.endsWith(arr[0].extractedArtifactName?.replace(/^\\+/, "").toLowerCase() || "__"))
             || [];
@@ -1455,7 +1445,7 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
           if (item.category !== "Services" || item.name !== "Service Installed") continue;
           const sn = _normSvcName(item.details.serviceName);
           if (!sn) continue;
-          const host = (item.computer || "").toUpperCase();
+          const host = _corrHost(item.computer);
           const candidates = (ps4104BySvc[host] || {})[sn] || [];
           const match = candidates.find(rs => _withinWindow(item.timestamp, rs.timestamp, CORR_WINDOW_EXT) || _withinWindow(rs.timestamp, item.timestamp, CORR_WINDOW_EXT));
           if (match) {
@@ -1472,7 +1462,7 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
           if (item.category !== "WMI Persistence") continue;
           const wn = (item.details.name || item.details.consumer || item.details.filter || "").toLowerCase().trim();
           if (!wn) continue;
-          const host = (item.computer || "").toUpperCase();
+          const host = _corrHost(item.computer);
           const candidates = (ps4104ByWmi[host] || {})[wn] || [];
           const match = candidates.find(rs => _withinWindow(item.timestamp, rs.timestamp, CORR_WINDOW_EXT) || _withinWindow(rs.timestamp, item.timestamp, CORR_WINDOW_EXT));
           if (match) {
@@ -1492,7 +1482,7 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
         };
         for (const item of items) {
           if (item.category !== "Registry Autorun") continue;
-          const host = (item.computer || "").toUpperCase();
+          const host = _corrHost(item.computer);
           const candidates = ps4104ByRegKey[host] || [];
           const itemKeyFamily = _regKeyFamily(item.details.targetObject);
           const match = candidates.find(rs => {
@@ -1600,7 +1590,7 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
         for (const item of items) {
           if (item.category !== "Account Persistence") continue;
           const actor = (item.details?.subjectUser || "").toLowerCase();
-          const host = (item.computer || "").toUpperCase();
+          const host = _corrHost(item.computer);
           if (!actor || BUILTIN_ACCOUNT_PAT.test(actor) || MACHINE_ACCOUNT_PAT.test(actor)) continue;
           const key = `${actor}|${host}`;
           if (!acctEventsByActor[key]) acctEventsByActor[key] = [];
@@ -1611,7 +1601,7 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
           if (!PERSIST_CATS.has(item.category)) continue;
           // Get the user who performed the persistence action
           const actor = (item.user || item.details?.subjectUser || "").toLowerCase();
-          const host = (item.computer || "").toUpperCase();
+          const host = _corrHost(item.computer);
           if (!actor) continue;
           const key = `${actor}|${host}`;
           const acctEvents = acctEventsByActor[key];
@@ -1688,6 +1678,10 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
         } else if (item.category === "WMI Persistence") {
           item.artifact = d._wmiName || d.name || "";
           item.command = d._wmiCommand || d._wmiQuery || d.query || d.poss_command || "";
+        } else if (item.category === "Remote Execution") {
+          // The artifact IS the far end of the connection — that is what an analyst pivots on.
+          item.artifact = d.clientMachine || d.remoteUser || d.operation || "";
+          item.command = d.operation || d.query || d.resource || "";
         } else if (item.mode === "evtx") {
           item.artifact = d.taskName || d.serviceName || d.targetObject || d.targetFilename || d.name || d.imageLoaded || "";
           item.command = d.executable || d.command || d.serviceFile || d.imagePath || d.image || d.query || d.destination || d.details || "";
@@ -1768,7 +1762,10 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
       const LEGIT_ENTERPRISE_TASK_PATHS = /(?:Program\s*Files(?:\s*\(x86\))?\\(?:Adobe|Zoom|Slack|Cisco\s*Webex|Citrix|VMware|Duo\s*Security|Okta|Qualys|Tanium|BigFix|Rapid7|Tenable|Microsoft|Google)|\\Windows\\System32\\|\\Windows\\SysWOW64\\|\\ProgramData\\Microsoft\\|IntuneManagementExtension|CCM\\|OfficeClickToRun|GoogleUpdate\.exe|MicrosoftEdgeUpdate\.exe)/i;
       const LEGIT_WINDOWS_SCHED_TASKS = /^\\Microsoft\\Windows\\(?:UpdateOrchestrator\\(?:Schedule\s+Wake\s+To\s+Work|Schedule\s+Maintenance\s+Work|USO_[^\\]+|Reboot(?:_AC|_Battery)?|Refresh\s+Settings|Maintenance\s+Install|MusUx_UpdateInterval|MusUx_UpdateIntervalNoWake)?|SoftwareProtectionPlatform\\SvcRestartTask)$/i;
       const LEGIT_WINDOWS_TASK_PREFIX = /^\\Microsoft\\Windows\\[^\\]+/i;
-      const LEGIT_WINDOWS_TASK_CMD_PATHS = /(?:\\Windows\\System32\\|\\Windows\\SysWOW64\\|taskhostw\.exe|svchost\.exe|rundll32\.exe|sihclient\.exe|usoclient\.exe|musnotification\.exe|taskschd\.dll|\\ProgramData\\Microsoft\\)/i;
+      // Task definitions on disk write their action UNEXPANDED — "%windir%\system32\..." —
+      // so a pattern that only knows the literal "\Windows\System32\" form matches none of
+      // the OS's own tasks. (EvtxECmd payloads carry the same env-var forms.)
+      const LEGIT_WINDOWS_TASK_CMD_PATHS = /(?:\\Windows\\System32\\|\\Windows\\SysWOW64\\|%windir%\\|%SystemRoot%\\|%SystemDrive%\\Windows\\|%ProgramFiles(?:\(x86\))?%\\|taskhostw\.exe|svchost\.exe|rundll32\.exe|sihclient\.exe|usoclient\.exe|musnotification\.exe|taskschd\.dll|\\ProgramData\\Microsoft\\)/i;
       const ENTERPRISE_SERVICE_NAMES = /(?:tanium|bigfix|besclient|qualys|rapid7|insight|nessus|tenable|carbon\s*black|cbdefense|crowdstrike|sentinelone|sophos|mcafee|trellix|symantec|defender|elastic|osquery|intune|ccmexec|sccm|configmgr|kaseya|connectwise|screenconnect|teamviewer|anydesk|rustdesk|splashtop|atera|meshagent|action1|pulseway|n-?able|solarwinds|manageengine|pdq)/i;
       const ENTERPRISE_SERVICE_PATHS = /(?:Program\s*Files(?:\s*\(x86\))?\\(?:Tanium|BigFix\s*Enterprise|Qualys|Rapid7|Tenable|CrowdStrike|SentinelOne|Sophos|McAfee|Trellix|Symantec|Windows\s*Defender|Elastic|osquery|Microsoft\s*Intune|Microsoft\\CCM|ScreenConnect|TeamViewer|AnyDesk|RustDesk|Splashtop|Atera|MeshAgent|Action1|Pulseway|N-able|SolarWinds|ManageEngine|PDQ))/i;
       const BENIGN_RUN_VALUE_NAMES = /(?:onedrive|sharepoint|groove|teams|edgeupdate|googleupdate|adobe.*updater|acrobat|java|zoom|slack|webex|citrix|vmware|okta|duo|intune|ccmexec|sccm|defender|securityhealth|officeclicktorun)/i;
@@ -1863,6 +1860,51 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
         return null;
       };
 
+      // --- Registry defaults that every Windows install ships with ---
+      // The Startup path stored in (User) Shell Folders IS the Startup folder. Matching the
+      // key alone flags the default value as a redirection; only a value pointing somewhere
+      // ELSE is a redirection.
+      const DEFAULT_SHELL_FOLDER_VALUES = /^(?:%USERPROFILE%|%ProgramData%|%ALLUSERSPROFILE%|[A-Za-z]:\\Users\\[^\\]+|[A-Za-z]:\\ProgramData|[A-Za-z]:\\Documents and Settings\\[^\\]+)\\(?:AppData\\Roaming\\)?Microsoft\\Windows\\Start Menu\\Programs\\Startup\\?$/i;
+      // Default file-association verbs. `"%1" %*` is exefile's shipped command — it names no
+      // image at all, so there is nothing hijacked.
+      const DEFAULT_SHELL_OPEN_COMMANDS = /^(?:"?%[1L]"?(?:\s+%\*)?|rundll32\.exe\s+shell32\.dll,OpenAs_RunDLL\s+%1)$/i;
+
+      // Install roots that are not user-writable, used to decide whether a full-state
+      // inventory row is worth an analyst's attention. Covers the forms a service ImagePath
+      // actually takes: NT paths (\SystemRoot\, \??\C:\), env-expanded (%SystemRoot%\),
+      // driver-relative (System32\drivers\...), and quoted absolute paths.
+      //
+      // The Windows root itself is NOT trusted — only its system subdirectories are. A
+      // binary sitting directly in C:\Windows\ is the classic drop location (PSEXESVC.exe
+      // lands there), and trusting the whole tree would suppress it as routine inventory.
+      const TRUSTED_IMAGE_ROOTS = /^(?:(?:\\SystemRoot|%SystemRoot%|%windir%|[A-Za-z]:\\Windows)\\(?:System32|SysWOW64|WinSxS|Microsoft\.NET|servicing|SystemApps|ImmersiveControlPanel|assembly)\\|system32\\|syswow64\\|[A-Za-z]:\\Program Files(?: \(x86\))?\\)/i;
+      const _normInventoryPath = (v) => {
+        const quoted = /^"([^"]*)"/.exec(v);
+        return (quoted ? quoted[1] : v).replace(/^\\\?\?\\/, "").trim();
+      };
+      /**
+       * A plugin CSV is the host's CURRENT STATE, not a log of changes — a normal machine
+       * has 300 services and 200 tasks. Ranking all of them as findings buries the one that
+       * matters, so an inventory row must carry a hunting signal to survive. Suppressed
+       * rows are counted into stats.registryInventorySuppressed rather than silently dropped.
+       */
+      const _inventoryRowIsInteresting = (item) => {
+        const vd = (item.details?.valueData || "").trim();
+        const vn = (item.details?.valueName || "").trim();
+        if (!vd) return false;                                   // nothing to judge
+        if (/^FailureCommand$/i.test(vn)) return true;           // rare and directly abusable
+        if (LOLBIN_PAT.test(vd)) return true;
+        if (/\\(?:Users|Temp|AppData|Downloads|Public|PerfLogs|Tasks|Intel|Recycle)\\/i.test(vd)) return true;
+        if (/(?:base64|frombase64|-enc\s|-e\s|iex|invoke-|downloadstring|webclient)/i.test(vd)) return true;
+        if (item.details?._pluginTaskHidden) return true;
+        // Named attack tooling — PsExec, Impacket, Cobalt Strike, RMM. The name is the
+        // signal here; PSEXESVC.exe otherwise looks like an ordinary C:\Windows binary.
+        const invName = item.details?._pluginServiceName || (item.artifact || "").split("\\").pop() || "";
+        if (invName && MALICIOUS_TOOLS.some((t) => t.namePattern.test(invName))) return true;
+        // Anything installed outside the protected system/program roots.
+        return !TRUSTED_IMAGE_ROOTS.test(_normInventoryPath(vd));
+      };
+
       // Filter out whitelisted items
       items = items.filter((item) => {
         // AV/EDR services from expected paths
@@ -1880,7 +1922,7 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
             || item.name === "Task Action Started" || item.name === "Task Process Created"
             // 4698: built-in \Microsoft\Windows\ tasks are re-registered during imaging /
             // in-place upgrade / servicing. Treat as noisy too (still gated on mutation signals).
-            || item.name === "Scheduled Task Created";
+            || item.name === "Scheduled Task Created" || item.name === "Scheduled Task Defined";
           const taskActionBlob = `${item.details?.command || ""} ${item.details?.executable || ""} ${cmd || ""}`;
           const hasTaskMutationSignal = Boolean(
             item.details?._taskHidden
@@ -1893,6 +1935,24 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
           // Legitimate Windows system tasks with known system executables
           if ((item.name === "Task Process Created" || item.name === "Task Action Started")
             && LEGIT_TASK_PREFIXES.test(art) && LEGIT_TASK_EXECUTABLES.test(cmd.split("\\").pop())) return false;
+          // A task DEFINITION read from disk covers EVERY registered task, which on a stock
+          // Windows install means ~200 of the OS's own. Most of those legitimately run
+          // elevated (68/204 on a real host), through a COM handler (111/204), and via
+          // rundll32 — signals that are near-universal among built-ins and therefore
+          // meaningless as evidence there. Judge them on WHERE the action points instead:
+          // a `\Microsoft\Windows\` task whose action stays inside a system path, is not
+          // hidden and carries no encoded payload is the operating system, not an intrusion.
+          // Every one of those conditions is still checked, so a task hiding behind a
+          // built-in-looking name but pointing at C:\Users\Public survives to be scored.
+          // `Hidden` is deliberately NOT a discriminator here: 54 of 204 built-in tasks on a
+          // stock host set it, so it separates nothing within this population. The action
+          // path does the work — a hidden built-in-named task pointing anywhere
+          // user-writable still survives this branch and gets scored.
+          if (item.name === "Scheduled Task Defined"
+            && LEGIT_WINDOWS_TASK_PREFIX.test(art)
+            && !ENCODING_INDICATORS.test(taskActionBlob)
+            && !/\\(?:Users|Temp|AppData|Downloads|Public|PerfLogs|ProgramData\\(?!Microsoft\\))/i.test(taskActionBlob)
+            && (!cmd || LEGIT_WINDOWS_TASK_CMD_PATHS.test(cmd))) return false;
           // Explicit Windows scheduler maintenance tasks (UpdateOrchestrator/SPP) are high-volume benign noise
           if (noisyTaskEvent && LEGIT_WINDOWS_SCHED_TASKS.test(art) && !hasTaskMutationSignal) return false;
           // Broad Microsoft Windows scheduler noise suppression for lifecycle/trigger events.
@@ -1917,8 +1977,66 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
           if (_taskActionClean && LEGIT_VENDOR_TASKS.test(art) && cmd && (LEGIT_VENDOR_TASK_PATHS.test(cmd) || _isExpectedMicrosoftBinary(cmd, `${item.detailsSummary || ""} ${JSON.stringify(item.details || {})}`))) return false;
           if (_taskActionClean && LEGIT_ENTERPRISE_TASKS.test(art) && cmd && LEGIT_ENTERPRISE_TASK_PATHS.test(cmd)) return false;
         }
+
+        // --- Registry false-positive pack ---
+        // Every one of these dominated the top of triage on a clean host: they are the
+        // registry's DEFAULT state, present on every Windows install, and a rule that
+        // matches a key path alone cannot tell them apart from a real modification.
+        if (item.mode === "registry") {
+          const kp = item.details?.keyPath || "";
+          const vn = (item.details?.valueName || "").trim();
+          const vd = (item.details?.valueData || "").trim();
+
+          // 1. Shell folder redirection: the shipped value IS the Startup folder. Six of the
+          //    top-6 incidents on a real triage package were this one value, scored 8/10 on
+          //    "user-writable path" and timestamped at OS install.
+          if (item.category === "Startup Folder" && /\\Explorer\\(?:User )?Shell Folders$/i.test(kp)
+            && DEFAULT_SHELL_FOLDER_VALUES.test(vd)) return false;
+
+          // 2. Defender: the Exclusions KEY existing is not an exclusion — the excluded path
+          //    is the VALUE NAME. A row with neither a value name nor data is just the key.
+          if (item.category === "Defender Tampering") {
+            if (!vn && !vd) return false;
+            // "DisableAntiSpyware = 0" means protection is ON.
+            if (/^Disable/i.test(vn) && /^(?:0|0x0+|false)$/i.test(vd)) return false;
+          }
+
+          // 3. File associations: the default verb for a class. `"%1" %*` (exefile) and
+          //    friends carry no image path at all — there is nothing hijacked.
+          if (item.category === "File Association" && vd && DEFAULT_SHELL_OPEN_COMMANDS.test(vd)) return false;
+
+          // 4. TaskCache\Tree rows are an inventory of every task on the box; the ACTION
+          //    lives under TaskCache\Tasks\{GUID}. A structural value (Id/Index/SD) on a
+          //    built-in Microsoft task with no action blob says nothing an analyst can use.
+          if (item.category === "Scheduled Tasks (Reg)" && /\\TaskCache\\Tree\\/i.test(kp)
+            && /^(?:Id|Index|SD|)$/i.test(vn)
+            && !item.details?._taskRegHasActions
+            && LEGIT_TASK_PREFIXES.test(`\\${kp.split(/\\TaskCache\\Tree\\/i)[1] || ""}`)) return false;
+
+          // 5. Plugin-CSV inventory: a full-state export lists every service on the host.
+          //    Surfacing 300 signed system services at "high" buries the one that matters,
+          //    so an inventory row must carry at least one hunting signal to survive.
+          if (item.details?._registryInventory && !_inventoryRowIsInteresting(item)) {
+            registryInventorySuppressed++;
+            return false;
+          }
+        }
         return true;
       });
+
+      // --- Registry provenance notes ---
+      // Surfaced through `warnings` (the modal's "Data quality" strip) so neither the
+      // inventory filtering nor an inferred host is a silent decision.
+      if (mode === "registry") {
+        if (registryInventorySuppressed > 0) {
+          warnings.push(`${registryInventorySuppressed} ${registryPluginInfo?.label || "registry inventory"} rows were routine system state and are not listed — only rows with a hunting signal (non-standard path, LOLBin, encoded value, known tooling) are shown.`);
+        }
+        if (registryHostSource === "collection-path") {
+          warnings.push(`Host "${registryHost}" was inferred from the collection folder layout, not read from the hive — verify before attributing.`);
+        } else if (registryHostSource === "none") {
+          warnings.push("No host could be attributed to these registry findings — the export carries no ComputerName value and no machine folder in the hive path.");
+        }
+      }
 
       // --- Registry value-data analysis helper ---
       const _analyzeValueData = (valueData, keyPath) => {
@@ -1939,14 +2057,76 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
       // downgrade (e.g. "Common updater/enterprise autorun"). They must NOT flip
       // isSuspicious=true — otherwise the very metric analysts triage by (stats.suspicious)
       // is inflated by items we just declared benign.
-      const _isBenignReason = (r) => /^(?:Known enterprise management|Microsoft sync\/service binary|Common enterprise\/system task|Common updater\/enterprise autorun|Correlation signal present but low-fidelity|Standalone script-block signal without strong|IFEO GlobalFlag without Debugger|COM\/shell server in trusted system\/program path|Autorun from protected program path)/i.test(r);
-      const _hasSuspiciousReason = (rs) => (rs || []).some((r) => !_isBenignReason(r));
+      // Benign-reason classification lives with the clustering it feeds (incidents.js).
+      const _hasSuspiciousReason = hasSuspiciousReason;
       // AV/EDR product NAME match independent of path — used to flag name masquerading
       // when the install path is missing/unverifiable (so spoofs aren't silently dropped).
       const _avNameMatches = (name) => {
         const n = (name || "").replace(/"/g, "").trim();
         return !!n && (/cortex-xdr-payload\.exe/i.test(n) || AV_EDR_WHITELIST.some((w) => w.namePattern.test(n)));
       };
+
+      // --- Remote origin: which pivot planted this artifact ---
+      // A persistence artifact created minutes after an inbound network/RDP logon (or a
+      // remote WMI/WinRM operation) on the same host did not appear by itself. Tagging it
+      // with {sourceHost, sourceIp, logonId} turns a standalone finding into an edge, and
+      // that tuple is the join key the lateral-movement graph consumes (see ./lm-handoff.js).
+      const REMOTE_ORIGIN_WINDOW = Number(options.remoteOriginWindowMs) > 0
+        ? Number(options.remoteOriginWindowMs)
+        : 30 * 60 * 1000; // 30 min
+      // Only artifacts an attacker plants; a logon does not "explain" a DLL load.
+      const REMOTE_ORIGIN_CATEGORIES = new Set([
+        "Services", "Scheduled Tasks", "Scheduled Tasks (Reg)", "Registry Autorun", "Run Keys",
+        "WMI Persistence", "Startup Folder", "Winlogon", "IFEO", "COM Hijacking",
+        "Account Persistence", "Defender Tampering",
+      ]);
+      if (remoteLogons.length > 0) {
+        const arrivalsByHost = new Map();
+        for (const r of remoteLogons) {
+          if (!arrivalsByHost.has(r.target)) arrivalsByHost.set(r.target, []);
+          arrivalsByHost.get(r.target).push(r);
+        }
+        for (const item of items) {
+          if (item.category === "Remote Execution") continue;      // the arrival itself
+          if (!REMOTE_ORIGIN_CATEGORIES.has(item.category)) continue;
+          const host = _corrHost(item.computer);
+          const candidates = arrivalsByHost.get(host);
+          if (!candidates || !item.timestamp) continue;
+          const itemMs = parseTimestampMs(item.timestamp);
+          if (itemMs == null) continue;
+          // The arrival must land within the window either side of the artifact (clock skew
+          // between logs is routine). Where several qualify, prefer the one carrying the
+          // strongest identity rather than merely the nearest: a 4624 supplies the logon
+          // session id, which is the actual join key into the lateral-movement graph, while
+          // a WMI ClientMachine only names the host. Gap breaks ties.
+          const identityRank = (c) => (c.logonId ? 2 : 0) + (c.sourceIp ? 1 : 0);
+          let best = null;
+          let bestGap = Infinity;
+          let bestRank = -1;
+          for (const c of candidates) {
+            const cMs = parseTimestampMs(c.timestamp);
+            if (cMs == null) continue;
+            const gap = itemMs - cMs;
+            if (gap < -REMOTE_ORIGIN_WINDOW || gap > REMOTE_ORIGIN_WINDOW) continue;
+            const dist = Math.abs(gap);
+            const rank = identityRank(c);
+            if (rank > bestRank || (rank === bestRank && dist < bestGap)) {
+              bestRank = rank; bestGap = dist; best = c;
+            }
+          }
+          if (!best) continue;
+          item.remoteOrigin = {
+            sourceHost: best.sourceHost || "",
+            sourceIp: best.sourceIp || "",
+            user: best.user || "",
+            logonId: best.logonId || "",
+            logonType: best.logonType || "",
+            timestamp: best.timestamp,
+            via: best.via,
+            gapMs: bestGap,
+          };
+        }
+      }
 
       for (const item of items) {
         let score = SEVERITY_SCORES[item.severity] || 4;
@@ -1960,12 +2140,19 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
         const art = item.artifact || "";
         if (item.category === "Services" && art) {
           const cp = item.command || item.details?.imagePath || item.details?.serviceFile || "";
-          if (isWhitelistedAV(art, cp)) {
+          // Name checks below are anchored on the SERVICE name. In registry mode the
+          // artifact is the full key path, so a bare `art` never matches — PSEXESVC would
+          // be scored as an ordinary C:\Windows binary and CrowdStrike would never be
+          // recognized as AV. Resolve `...\Services\<Name>[\Parameters]` back to the name.
+          const svcName = item.mode === "registry"
+            ? (item.details?._pluginServiceName || (/\\Services\\([^\\]+)/i.exec(art)?.[1] || ""))
+            : art;
+          if (isWhitelistedAV(svcName, cp)) {
             item.whitelisted = true;
             item.whitelistReason = "Known AV/EDR component";
             item.severity = "low";
             score = SEVERITY_SCORES.low;
-          } else if (_avNameMatches(art) && !cp) {
+          } else if (_avNameMatches(svcName) && !cp) {
             // AV/EDR product name but no install path captured → cannot confirm it's the
             // real product. Keep it visible and flag possible masquerading (T1036.004)
             // rather than dropping it on the name alone.
@@ -1973,14 +2160,14 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
             score = Math.max(score, SEVERITY_SCORES.high);
           }
           for (const mt of MALICIOUS_TOOLS) {
-            if (mt.namePattern.test(art)) {
+            if (mt.namePattern.test(svcName)) {
               item.severity = mt.severity;
               score = Math.max(score, SEVERITY_SCORES[mt.severity] || 6);
               reasons.push(...mt.reasons);
             }
           }
           // Browser services: downgrade if legitimate path, escalate if mimicked
-          const browserCheck = checkBrowserService(art, item.command || "");
+          const browserCheck = checkBrowserService(svcName, item.command || "");
           if (browserCheck === "legitimate") {
             item.severity = "low";
             score = SEVERITY_SCORES.low;
@@ -2550,7 +2737,7 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
               reasons.push("Suspicious task execution");
               score += 1;
             }
-          } else if (item.name === "Task Registered" || item.name === "Scheduled Task Created") {
+          } else if (item.name === "Task Registered" || item.name === "Scheduled Task Created" || item.name === "Scheduled Task Defined") {
             item.subtype = "task-created";
           } else if (item.name === "Task Updated" || item.name === "Task Updated (Security)") {
             item.subtype = "task-updated";
@@ -2663,6 +2850,17 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
           }
         }
 
+        // Remote-planted persistence is the thing an analyst is hunting for in a triage
+        // package: this host was reached AND kept. Applied LAST so the bump is additive —
+        // several earlier blocks raise the score with Math.max against a severity floor,
+        // which would otherwise swallow it whole on exactly the findings that matter most
+        // (a known tool like PSEXESVC already sits at the critical floor).
+        if (item.remoteOrigin) {
+          const src = item.remoteOrigin.sourceHost || item.remoteOrigin.sourceIp || "a remote host";
+          reasons.push(`Planted over ${item.remoteOrigin.via} from ${src}`);
+          score += 2;
+        }
+
         item.triageScore = score;
         item.riskScore = Math.min(score, 10);
         item.isSuspicious = _hasSuspiciousReason(reasons);
@@ -2756,6 +2954,11 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
           if (/DONT_REQ_PREAUTH|%%2087/i.test(item.details?.userAccountControl || "")) pills.push({ text: "AS-REP roast", type: "execution" });
         }
         if (item.computer)                                 pills.push({ text: item.computer, type: "target" });
+        // The strongest pill an artifact can carry: it names who put it there.
+        if (item.remoteOrigin) {
+          const _src = item.remoteOrigin.sourceHost || item.remoteOrigin.sourceIp;
+          if (_src) pills.push({ text: `from ${_src}`, type: "execution" });
+        }
         if (item.details?.hiveScope)                       pills.push({ text: item.details.hiveScope, type: "context" });
         if (item.whitelistReason)                          pills.push({ text: item.whitelistReason, type: "context" });
         // Service correlation pills
@@ -2815,58 +3018,10 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
       items.sort((a, b) => b.triageScore - a.triageScore || (a.timestamp < b.timestamp ? -1 : a.timestamp > b.timestamp ? 1 : 0));
 
       // --- Incident clustering ---
-      const _normArt = (a) => (a || "").replace(/^\\+/, "").replace(/\{[0-9a-f-]+\}$/i, "").trim().toLowerCase();
-      const _secondaryArt = (it) => {
-        // When primary artifact is empty, derive a discriminator from details
-        const d = it.details || {};
-        return d.groupName || d.targetUser || d.memberName || d.samAccountName || d._wmiName || d._wmiType || d.namespace || d.operationType || d.valueName || "";
-      };
-      const _incKey = (it) => {
-        const art = _normArt(it.artifact);
-        const disc = art || _normArt(_secondaryArt(it));
-        return [it.category || "", it.name || "", (it.computer || "").toUpperCase(), disc, it.user ? it.user.toLowerCase() : ""].join("|");
-      };
-      const _incGroups = new Map();
-      for (const it of items) { const k = _incKey(it); if (!_incGroups.has(k)) _incGroups.set(k, []); _incGroups.get(k).push(it); }
-      const _INC_GAP = 3600000; // 60-min merge window
-      const sevOrd = { critical: 0, high: 1, medium: 2, low: 3 };
-      const incidents = [];
-      let _paIncId = 0;
-      for (const [, grp] of _incGroups) {
-        grp.sort((a, b) => ((a.timestamp || "") < (b.timestamp || "") ? -1 : (a.timestamp || "") > (b.timestamp || "") ? 1 : 0));
-        const clusters = [];
-        let cur = [grp[0]];
-        for (let i = 1; i < grp.length; i++) {
-          const pT = new Date(cur[cur.length - 1].timestamp || "");
-          const nT = new Date(grp[i].timestamp || "");
-          if (!isNaN(pT) && !isNaN(nT) && Math.abs(nT - pT) <= _INC_GAP) cur.push(grp[i]);
-          else { clusters.push(cur); cur = [grp[i]]; }
-        }
-        clusters.push(cur);
-        for (const cl of clusters) {
-          const rep = cl.reduce((best, it) => (it.riskScore || 0) > (best.riskScore || 0) ? it : best, cl[0]);
-          const allTs = cl.map(i => i.timestamp).filter(Boolean).sort();
-          const allReasons = [...new Set(cl.flatMap(i => i.suspiciousReasons || []))];
-          const pillSeen = new Set(); const allPills = [];
-          for (const it of cl) for (const p of (it.evidencePills || [])) { if (!pillSeen.has(p.text)) { pillSeen.add(p.text); allPills.push(p); } }
-          const maxRisk = Math.max(...cl.map(i => i.triageScore || i.riskScore || 0));
-          const worstSev = cl.reduce((b, i) => (sevOrd[i.severity] ?? 4) < (sevOrd[b] ?? 4) ? i.severity : b, "low");
-          const artShort = (rep.artifact || "").split("\\").pop() || _secondaryArt(rep) || "";
-          let title = rep.name;
-          if (artShort && artShort.toLowerCase() !== rep.name.toLowerCase()) title = `${artShort} — ${rep.name}`;
-          if (rep.computer) title += ` on ${rep.computer}`;
-          incidents.push({
-            id: _paIncId++, category: rep.category, title, severity: worstSev, triageScore: maxRisk,
-            computer: rep.computer || "", user: rep.user || "", artifact: rep.artifact || _secondaryArt(rep) || "", command: rep.command || "", source: rep.source || "",
-            firstSeen: allTs[0] || "", lastSeen: allTs[allTs.length - 1] || "", occurrenceCount: cl.length,
-            items: cl, itemRowids: cl.map(i => i.rowid),
-            suspiciousReasons: allReasons, evidencePills: allPills,
-            isSuspicious: _hasSuspiciousReason(allReasons), rmmTool: cl.some(i => i.rmmTool),
-            details: rep.details, mode: rep.mode,
-          });
-        }
-      }
-      incidents.sort((a, b) => (b.triageScore - a.triageScore) || ((sevOrd[a.severity] ?? 4) - (sevOrd[b.severity] ?? 4)) || ((a.firstSeen || "") < (b.firstSeen || "") ? -1 : 1));
+      // Collapse the item list into one row of triage per artifact-per-host. Lives in
+      // ./incidents.js so a multi-source run can re-cluster the MERGED item set instead
+      // of stitching together one incident list per tab.
+      const incidents = clusterIncidents(items, { crossModeRegistry: !!options._crossModeRegistry });
 
       // --- Build stats ---
       const byCategory = {};
@@ -2890,11 +3045,26 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
           byIncidentSeverity,
           suspicious: items.filter(i => i.isSuspicious).length,
           suspiciousIncidents: incidents.filter(i => i.isSuspicious).length,
-          uniqueComputers: new Set(items.map(i => i.computer).filter(Boolean)).size,
+          // Count canonical hosts, not raw strings — otherwise one machine logged both
+          // short and FQDN inflates the host count on a single-host collection.
+          uniqueComputers: new Set(items.map(i => _corrHost(i.computer)).filter(Boolean)).size,
           categoriesFound: Object.keys(byCategory).length,
           ps4104Scripts: ps4104Reassembled?.length || 0,
           ps4104Correlated: ps4104CorrelatedCount,
+          // Registry provenance. `registryHostSource` tells the analyst whether the host on
+          // these findings was read (column / SYSTEM hive) or inferred from the collection
+          // path; `registryInventorySuppressed` is the count of full-state rows filtered as
+          // routine inventory, so a coverage drop is never silent.
+          registryHost: registryHost || "",
+          registryHostSource,
+          registryPlugin: registryPluginInfo,
+          registryInventorySuppressed,
+          // How many findings could be tied to a remote arrival — the pivot-to-persistence link.
+          remoteOriginItems: items.filter((i) => i.remoteOrigin).length,
+          remoteArrivals: remoteLogons.length,
         },
+        // Handed to the registry pass of a multi-source run, and to the LM handoff.
+        _remoteLogons: remoteLogons,
         columns,
         detectedMode: mode,
         error: null,
@@ -2904,4 +3074,4 @@ function getPersistenceAnalysis(meta, options = {}, ctx) {
     }
 }
 
-module.exports = { previewPersistenceAnalysis, getPersistenceAnalysis };
+module.exports = { previewPersistenceAnalysis, getPersistenceAnalysis, PERSISTENCE_RULE_CATALOG };

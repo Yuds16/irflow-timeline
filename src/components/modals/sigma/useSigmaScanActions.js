@@ -11,6 +11,7 @@ import {
   JS_SIGMA_MAX_ROWS_PER_QUERY,
   activeSuppressedRuleIdsFromModal,
 } from "./sigmaModalHelpers.js";
+import { clearIpcSubscription, replaceIpcSubscription } from "../../../utils/ipc-subscriptions.js";
 
 export default function useSigmaScanActions({
   modal,
@@ -61,14 +62,13 @@ export default function useSigmaScanActions({
       setModal((p) => ({
         ...p,
         largeJsSigmaScanConfirmed: true,
-        error: `Large imported-tab JS Sigma scan detected (${formatNumber(ct.totalRows || 0)} rows). Raw EVTX + Hayabusa is faster and more complete when available. Click Scan Imported Tab again to continue; each logsource group will be capped at ${formatNumber(JS_SIGMA_MAX_ROWS_PER_QUERY)} candidate rows to avoid runaway scans.`,
+        error: `Large imported-tab JS Sigma scan detected (${formatNumber(ct.totalRows || 0)} rows). Use the "Fast high-confidence only" preset (or fewer severity levels) for much faster results; raw EVTX + Hayabusa is faster when available. Click Scan Imported Tab again to continue; each logsource group is capped at ${formatNumber(JS_SIGMA_MAX_ROWS_PER_QUERY)} candidate rows.`,
       }));
       return;
     }
     const scanJobId = `scan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     setModal((p) => ({ ...p, phase: "scanning", scanJobId, progress: { pct: 0, text: "Starting scan..." }, error: null }));
-    tle.removeAllListeners?.("sigma-progress");
-    tle.onSigmaProgress?.((prog) => {
+    replaceIpcSubscription("sigma-progress", tle.onSigmaProgress, (prog) => {
       setModal((p) => p?.type === "sigma" ? { ...p, progress: prog } : p);
     });
     try {
@@ -202,8 +202,7 @@ export default function useSigmaScanActions({
     }
     const scanJobId = `scan-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     setModal((p) => ({ ...p, phase: "scanning", scanJobId, preflightChecking: false, scanPreflight: preflight, progress: { phase: "discovering", text: "Scanning directory..." }, error: null }));
-    tle.removeAllListeners?.("sigma-progress");
-    tle.onSigmaProgress?.((prog) => {
+    replaceIpcSubscription("sigma-progress", tle.onSigmaProgress, (prog) => {
       setModal((p) => p?.type === "sigma" ? { ...p, progress: prog } : p);
     });
     try {
@@ -239,8 +238,7 @@ export default function useSigmaScanActions({
     }
     const scanJobId = options.scanJobId;
     setModal((p) => ({ ...p, phase: "scanning", scanJobId, progress: { pct: 0, text: "Starting EvtxECmd output scan..." }, error: null }));
-    tle.removeAllListeners?.("sigma-progress");
-    tle.onSigmaProgress?.((prog) => {
+    replaceIpcSubscription("sigma-progress", tle.onSigmaProgress, (prog) => {
       setModal((p) => p?.type === "sigma" ? { ...p, progress: prog } : p);
     });
     try {
@@ -260,7 +258,7 @@ export default function useSigmaScanActions({
 
   const handleCancelScan = async () => {
     const id = modal.scanJobId;
-    tle.removeAllListeners?.("sigma-progress");
+    clearIpcSubscription("sigma-progress");
     if (id && tle?.sigmaCancelScan) {
       try { await tle.sigmaCancelScan(id); } catch (_) {}
     }
@@ -269,7 +267,7 @@ export default function useSigmaScanActions({
 
   const handleCloseModal = () => {
     const id = modal?.scanJobId;
-    tle.removeAllListeners?.("sigma-progress");
+    clearIpcSubscription("sigma-progress");
     if (id && tle?.sigmaCancelScan) {
       try { tle.sigmaCancelScan(id); } catch (_) {}
     }

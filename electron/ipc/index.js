@@ -17,6 +17,8 @@ const registerVtHandlers = require("./vt-handlers");
 const registerSigmaHandlers = require("./sigma-handlers");
 const registerJobHandlers = require("./job-handlers");
 const registerRdpBitmapCacheHandlers = require("./rdp-bitmap-cache-handlers");
+const registerAiHistoryHandlers = require("./ai-history-handlers");
+const registerTriageHandlers = require("./triage-handlers");
 
 function registerAll(safeHandle, safeSend, context) {
   registerQueryHandlers(safeHandle, safeSend, context);
@@ -28,6 +30,8 @@ function registerAll(safeHandle, safeSend, context) {
   registerVtHandlers(safeHandle, safeSend, context);
   registerSigmaHandlers(safeHandle, safeSend, context);
   registerRdpBitmapCacheHandlers(safeHandle, safeSend, context);
+  registerAiHistoryHandlers(safeHandle, safeSend, context);
+  registerTriageHandlers(safeHandle, safeSend, context);
 }
 
 module.exports = { registerAll };

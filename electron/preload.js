@@ -1,12 +1,33 @@
 const { contextBridge, ipcRenderer, webUtils } = require("electron");
 
+function onIpc(channel, cb, mapArgs = (_event, d) => d) {
+  const handler = (...args) => cb(mapArgs(...args));
+  ipcRenderer.on(channel, handler);
+  return () => ipcRenderer.removeListener(channel, handler);
+}
+
+function onIpcNoArgs(channel, cb) {
+  const handler = () => cb();
+  ipcRenderer.on(channel, handler);
+  return () => ipcRenderer.removeListener(channel, handler);
+}
+
 contextBridge.exposeInMainWorld("tle", {
   // File operations
   openFileDialog: () => ipcRenderer.invoke("open-file-dialog"),
+  openAiSource: (filePath, lineNumber) => ipcRenderer.invoke("open-ai-source", { filePath, lineNumber }),
   openExternal: (url) => ipcRenderer.invoke("open-external", { url }),
   checkForUpdates: () => ipcRenderer.invoke("check-for-updates"),
   installUpdate: () => ipcRenderer.invoke("install-update"),
-  importFiles: (filePaths) => ipcRenderer.invoke("import-files", { filePaths }),
+  importFiles: (filePaths, options) => ipcRenderer.invoke("import-files", {
+    filePaths: filePaths || [],
+    items: options?.items,
+  }),
+  // Open Triage Collection: pick a KAPE/triage folder, review a manifest, import a selection.
+  triageSelectRoot: () => ipcRenderer.invoke("triage-select-root"),
+  triageDiscover: (dir) => ipcRenderer.invoke("triage-discover", { dir }),
+  triageImport: (dir, paths, opts) => ipcRenderer.invoke("triage-import", { dir, paths, ...(opts || {}) }),
+  triageCancelBatch: (batchId, tabIds) => ipcRenderer.invoke("triage-cancel-batch", { batchId, tabIds }),
   listJobs: () => ipcRenderer.invoke("jobs-list"),
   cancelJob: (jobId) => ipcRenderer.invoke("jobs-cancel", { jobId }),
   debugLog: (payload) => ipcRenderer.invoke("debug-log", payload),
@@ -17,6 +38,9 @@ contextBridge.exposeInMainWorld("tle", {
 
   // Data queries (SQLite-backed)
   queryRows: (tabId, options) => ipcRenderer.invoke("query-rows", { tabId, options }),
+  getRowIdsInRange: (tabId, options) => ipcRenderer.invoke("get-row-ids-in-range", { tabId, options }),
+  countRowsByIdsMatching: (tabId, rowIds, options) => ipcRenderer.invoke("count-rows-by-ids-matching", { tabId, rowIds, options }),
+  findSearchMatch: (tabId, options) => ipcRenderer.invoke("find-search-match", { tabId, options }),
   toggleBookmark: (tabId, rowId) => ipcRenderer.invoke("toggle-bookmark", { tabId, rowId }),
   setBookmarks: (tabId, rowIds, add) => ipcRenderer.invoke("set-bookmarks", { tabId, rowIds, add }),
   getBookmarkCount: (tabId) => ipcRenderer.invoke("get-bookmark-count", { tabId }),
@@ -28,6 +52,7 @@ contextBridge.exposeInMainWorld("tle", {
   getTabInfo: (tabId) => ipcRenderer.invoke("get-tab-info", { tabId }),
   getFtsStatus: (tabId) => ipcRenderer.invoke("get-fts-status", { tabId }),
   exportFiltered: (tabId, options) => ipcRenderer.invoke("export-filtered", { tabId, options }),
+  exportAiHistoryPackage: (tabId, options, tabName, sourceFormat) => ipcRenderer.invoke("export-ai-history-package", { tabId, options, tabName, sourceFormat }),
   extractResidentData: (tabId) => ipcRenderer.invoke("extract-resident-data", { tabId }),
   analyzeRansomware: (tabId, encryptedExt, ransomNotePattern, noteMatchMode, usnTabId) => ipcRenderer.invoke("analyze-ransomware", { tabId, encryptedExt, ransomNotePattern, noteMatchMode, usnTabId }),
   scanRansomwareExtensions: (tabId) => ipcRenderer.invoke("scan-ransomware-extensions", { tabId }),
@@ -35,8 +60,15 @@ contextBridge.exposeInMainWorld("tle", {
   getFileActivityHeatmap: (tabId) => ipcRenderer.invoke("get-file-activity-heatmap", { tabId }),
   analyzeADS: (tabId) => ipcRenderer.invoke("analyze-ads", { tabId }),
   analyzeUsnJournal: (tabId, startTime, endTime, analyses, pathFilter, mftTabId) => ipcRenderer.invoke("analyze-usn-journal", { tabId, startTime, endTime, analyses, pathFilter, mftTabId }),
+  analyzeAiHistory: (tabId, options) => ipcRenderer.invoke("analyze-ai-history", { tabId, mode: options?.mode, redact: options?.redact, salt: options?.salt }),
+  decodeAiHistory: (path, tool, options) => ipcRenderer.invoke("decode-ai-history", { path, tool, ...(options || {}) }),
+  pickAiHistoryScanFolder: () => ipcRenderer.invoke("pick-ai-history-scan-folder"),
+  discoverAiHistoryProfile: (options) => ipcRenderer.invoke("discover-ai-history-profile", options || {}),
+  extractAiHistoryProfile: (options) => ipcRenderer.invoke("extract-ai-history-profile", options || {}),
+  cancelAiHistoryExtract: () => ipcRenderer.invoke("cancel-ai-history-extract"),
   saveTextFile: (content, defaultPath, filters) => ipcRenderer.invoke("save-text-file", { content, defaultPath, filters }),
   exportRansomwarePdf: (html, defaultName) => ipcRenderer.invoke("export-ransomware-pdf", { html, defaultName }),
+  exportAiSecretsPdf: (html, defaultName) => ipcRenderer.invoke("export-ai-secrets-pdf", { html, defaultName }),
   generateReport: (tabId, fileName, tagColors, vtEnrichment) => ipcRenderer.invoke("generate-report", { tabId, fileName, tagColors, vtEnrichment }),
   selectSheet: (data) => ipcRenderer.invoke("select-sheet", data),
   searchCount: (tabId, searchTerm, searchMode, searchCondition) => ipcRenderer.invoke("search-count", { tabId, searchTerm, searchMode, searchCondition }),
@@ -59,6 +91,14 @@ contextBridge.exposeInMainWorld("tle", {
   lateralMovementClearTriage: (scope) => ipcRenderer.invoke("lateral-movement-clear-triage", { scope }),
   previewPersistenceAnalysis: (tabId, options) => ipcRenderer.invoke("preview-persistence-analysis", { tabId, options }),
   getPersistenceAnalysis: (tabId, options) => ipcRenderer.invoke("get-persistence-analysis", { tabId, options }),
+  startPersistenceAnalysis: (tabId, options) => ipcRenderer.invoke("start-persistence-analysis", { tabId, options }),
+  previewMultiSourcePersistence: (tabIds, options) => ipcRenderer.invoke("preview-multi-source-persistence", { tabIds, options }),
+  getMultiSourcePersistence: (tabIds, options) => ipcRenderer.invoke("get-multi-source-persistence", { tabIds, options }),
+  startMultiSourcePersistence: (tabIds, options) => ipcRenderer.invoke("start-multi-source-persistence", { tabIds, options }),
+  getPersistencePivotJoin: (tabIds, options) => ipcRenderer.invoke("get-persistence-pivot-join", { tabIds, options }),
+  selectKapeCollection: () => ipcRenderer.invoke("select-kape-collection"),
+  scanKapeCollection: (dir) => ipcRenderer.invoke("scan-kape-collection", { dir }),
+  analyzeKapeCollection: (dir, options) => ipcRenderer.invoke("analyze-kape-collection", { dir, options }),
   rdpBitmapSelectSource: () => ipcRenderer.invoke("rdp-bitmap-select-source"),
   rdpBitmapSelectTool: () => ipcRenderer.invoke("rdp-bitmap-select-tool"),
   rdpBitmapToolStatus: () => ipcRenderer.invoke("rdp-bitmap-tool-status"),
@@ -98,8 +138,8 @@ contextBridge.exposeInMainWorld("tle", {
   vtCancel: (requestId) => ipcRenderer.invoke("vt-cancel", { requestId }),
   vtClearCache: () => ipcRenderer.invoke("vt-clear-cache"),
   vtGetRelated: (ioc, category) => ipcRenderer.invoke("vt-get-related", { ioc, category }),
-  onVtProgress: (cb) => ipcRenderer.on("vt-progress", (_, d) => cb(d)),
-  onVtComplete: (cb) => ipcRenderer.on("vt-complete", (_, d) => cb(d)),
+  onVtProgress: (cb) => onIpc("vt-progress", cb),
+  onVtComplete: (cb) => onIpc("vt-complete", cb),
 
   // Session operations
   saveSession: (data) => ipcRenderer.invoke("save-session", { sessionData: data }),
@@ -118,24 +158,29 @@ contextBridge.exposeInMainWorld("tle", {
   savePiAnalystProfile: (profile) => ipcRenderer.invoke("save-pi-analyst-profile", { profile }),
 
   // Event listeners from main process
-  onImportStart: (cb) => ipcRenderer.on("import-start", (_, d) => cb(d)),
-  onImportProgress: (cb) => ipcRenderer.on("import-progress", (_, d) => cb(d)),
-  onImportComplete: (cb) => ipcRenderer.on("import-complete", (_, d) => cb(d)),
-  onImportError: (cb) => ipcRenderer.on("import-error", (_, d) => cb(d)),
-  onImportQueue: (cb) => ipcRenderer.on("import-queue", (_, d) => cb(d)),
-  onExportProgress: (cb) => ipcRenderer.on("export-progress", (_, d) => cb(d)),
-  onExtractResidentProgress: (cb) => ipcRenderer.on("extract-resident-progress", (_, d) => cb(d)),
-  onFtsProgress: (cb) => ipcRenderer.on("fts-progress", (_, d) => cb(d)),
-  onIndexProgress: (cb) => ipcRenderer.on("index-progress", (_, d) => cb(d)),
-  onJobProgress: (cb) => ipcRenderer.on("job-progress", (_, d) => cb(d)),
-  onAnalysisProgress: (cb) => ipcRenderer.on("analysis-progress", (_, d) => cb(d)),
-  onProcessTreeComplete: (cb) => ipcRenderer.on("process-tree-complete", (_, d) => cb(d)),
-  onSheetSelection: (cb) => ipcRenderer.on("sheet-selection", (_, d) => cb(d)),
-  onRecentFilesUpdated: (cb) => ipcRenderer.on("recent-files-updated", (_, d) => cb(d)),
-  onUsnPathsUpdated: (cb) => ipcRenderer.on("usn-paths-updated", (_, d) => cb(d)),
-  onRwProgress: (cb) => ipcRenderer.on("rw-progress", (_, d) => cb(d)),
-  onHmProgress: (cb) => ipcRenderer.on("hm-progress", (_, d) => cb(d)),
-  onUpdaterState: (cb) => ipcRenderer.on("updater-state", (_, d) => cb(d)),
+  onImportStart: (cb) => onIpc("import-start", cb),
+  onImportProgress: (cb) => onIpc("import-progress", cb),
+  onImportComplete: (cb) => onIpc("import-complete", cb),
+  onImportError: (cb) => onIpc("import-error", cb),
+  onImportQueue: (cb) => onIpc("import-queue", cb),
+  onExportProgress: (cb) => onIpc("export-progress", cb),
+  onExtractResidentProgress: (cb) => onIpc("extract-resident-progress", cb),
+  onFtsProgress: (cb) => onIpc("fts-progress", cb),
+  onIndexProgress: (cb) => onIpc("index-progress", cb),
+  onJobProgress: (cb) => onIpc("job-progress", cb),
+  onAnalysisProgress: (cb) => {
+    const handler = (_, d) => cb(d);
+    ipcRenderer.on("analysis-progress", handler);
+    return () => ipcRenderer.removeListener("analysis-progress", handler);
+  },
+  onProcessTreeComplete: (cb) => onIpc("process-tree-complete", cb),
+  onPersistenceAnalysisComplete: (cb) => onIpc("persistence-analysis-complete", cb),
+  onSheetSelection: (cb) => onIpc("sheet-selection", cb),
+  onRecentFilesUpdated: (cb) => onIpc("recent-files-updated", cb),
+  onUsnPathsUpdated: (cb) => onIpc("usn-paths-updated", cb),
+  onRwProgress: (cb) => onIpc("rw-progress", cb),
+  onHmProgress: (cb) => onIpc("hm-progress", cb),
+  onUpdaterState: (cb) => onIpc("updater-state", cb),
   onRdpBitmapProgress: (cb) => {
     const handler = (_, d) => cb(d);
     ipcRenderer.on("rdp-bitmap-progress", handler);
@@ -157,7 +202,7 @@ contextBridge.exposeInMainWorld("tle", {
   sigmaGetRules: () => ipcRenderer.invoke("sigma-get-rules"),
   sigmaScan: (tabId, options) => ipcRenderer.invoke("sigma-scan", { tabId, options }),
   sigmaDetectFormat: (tabId) => ipcRenderer.invoke("sigma-detect-format", { tabId }),
-  sigmaOpenAsTab: (rows, name, jobId) => ipcRenderer.invoke("sigma-open-as-tab", { rows, name, jobId }),
+  sigmaOpenAsTab: (rows, name, jobId, options) => ipcRenderer.invoke("sigma-open-as-tab", { rows, name, jobId, ...(options || {}) }),
   sigmaOpenDirResultsAsTab: (name, jobId) => ipcRenderer.invoke("sigma-open-dir-results-as-tab", { name, jobId }),
   sigmaHayabusaStatus: () => ipcRenderer.invoke("sigma-hayabusa-status"),
   sigmaHayabusaDownload: () => ipcRenderer.invoke("sigma-hayabusa-download"),
@@ -205,33 +250,31 @@ contextBridge.exposeInMainWorld("tle", {
   sigmaGeoIpStatus: () => ipcRenderer.invoke("sigma-geoip-status"),
   sigmaGeoIpDownload: () => ipcRenderer.invoke("sigma-geoip-download"),
   sigmaSelectGeoIpDir: () => ipcRenderer.invoke("sigma-select-geoip-dir"),
-  onSigmaProgress: (cb) => ipcRenderer.on("sigma-progress", (_, d) => cb(d)),
+  onSigmaProgress: (cb) => onIpc("sigma-progress", cb),
+  onAiHistoryProfileProgress: (cb) => onIpc("ai-history-profile-progress", cb),
 
   // Menu triggers
-  onTriggerOpen: (cb) => ipcRenderer.on("trigger-open", () => cb()),
-  onTriggerExport: (cb) => ipcRenderer.on("trigger-export", () => cb()),
-  onTriggerGenerateReport: (cb) => ipcRenderer.on("trigger-generate-report", () => cb()),
-  onTriggerSearch: (cb) => ipcRenderer.on("trigger-search", () => cb()),
-  onTriggerBookmarkToggle: (cb) => ipcRenderer.on("trigger-bookmark-toggle", () => cb()),
-  onTriggerColumnManager: (cb) => ipcRenderer.on("trigger-column-manager", () => cb()),
-  onTriggerColorRules: (cb) => ipcRenderer.on("trigger-color-rules", () => cb()),
-  onTriggerShortcuts: (cb) => ipcRenderer.on("trigger-shortcuts", () => cb()),
-  onTriggerCrossFind: (cb) => ipcRenderer.on("trigger-crossfind", () => cb()),
-  onTriggerSaveSession: (cb) => ipcRenderer.on("trigger-save-session", () => cb()),
-  onTriggerLoadSession: (cb) => ipcRenderer.on("trigger-load-session", () => cb()),
-  onTriggerCloseTab: (cb) => ipcRenderer.on("trigger-close-tab", () => cb()),
-  onTriggerCloseAllTabs: (cb) => ipcRenderer.on("trigger-close-all-tabs", () => cb()),
-  onTriggerCheckForUpdates: (cb) => ipcRenderer.on("trigger-check-for-updates", () => cb()),
+  onTriggerOpen: (cb) => onIpcNoArgs("trigger-open", cb),
+  onTriggerExport: (cb) => onIpcNoArgs("trigger-export", cb),
+  onTriggerGenerateReport: (cb) => onIpcNoArgs("trigger-generate-report", cb),
+  onTriggerSearch: (cb) => onIpcNoArgs("trigger-search", cb),
+  onTriggerBookmarkToggle: (cb) => onIpcNoArgs("trigger-bookmark-toggle", cb),
+  onTriggerColumnManager: (cb) => onIpcNoArgs("trigger-column-manager", cb),
+  onTriggerColorRules: (cb) => onIpcNoArgs("trigger-color-rules", cb),
+  onTriggerShortcuts: (cb) => onIpcNoArgs("trigger-shortcuts", cb),
+  onTriggerCrossFind: (cb) => onIpcNoArgs("trigger-crossfind", cb),
+  onTriggerSaveSession: (cb) => onIpcNoArgs("trigger-save-session", cb),
+  onTriggerLoadSession: (cb) => onIpcNoArgs("trigger-load-session", cb),
+  onTriggerCloseTab: (cb) => onIpcNoArgs("trigger-close-tab", cb),
+  onTriggerCloseAllTabs: (cb) => onIpcNoArgs("trigger-close-all-tabs", cb),
+  onTriggerCheckForUpdates: (cb) => onIpcNoArgs("trigger-check-for-updates", cb),
 
   // Tools menu triggers
-  onSetDatetimeFormat: (cb) => ipcRenderer.on("set-datetime-format", (_, fmt) => cb(fmt)),
-  onSetTimezone: (cb) => ipcRenderer.on("set-timezone", (_, tz) => cb(tz)),
-  onSetFontSize: (cb) => ipcRenderer.on("set-font-size", (_, val) => cb(val)),
-  onTriggerResetColumns: (cb) => ipcRenderer.on("trigger-reset-columns", () => cb()),
-  onSetTheme: (cb) => ipcRenderer.on("set-theme", (_, name) => cb(name)),
-  onTriggerHistogram: (cb) => ipcRenderer.on("trigger-histogram", () => cb()),
-  onTriggerVtSettings: (cb) => ipcRenderer.on("trigger-vt-settings", () => cb()),
-
-  // Cleanup — remove all listeners for a channel
-  removeAllListeners: (channel) => ipcRenderer.removeAllListeners(channel),
+  onSetDatetimeFormat: (cb) => onIpc("set-datetime-format", cb, (_event, fmt) => fmt),
+  onSetTimezone: (cb) => onIpc("set-timezone", cb, (_event, tz) => tz),
+  onSetFontSize: (cb) => onIpc("set-font-size", cb, (_event, val) => val),
+  onTriggerResetColumns: (cb) => onIpcNoArgs("trigger-reset-columns", cb),
+  onSetTheme: (cb) => onIpc("set-theme", cb, (_event, name) => name),
+  onTriggerHistogram: (cb) => onIpcNoArgs("trigger-histogram", cb),
+  onTriggerVtSettings: (cb) => onIpcNoArgs("trigger-vt-settings", cb),
 });

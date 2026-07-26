@@ -1,4 +1,5 @@
 node_modules/
+.pnpm-store/
 dist/
 release/
 *.db
@@ -16,7 +17,11 @@ CLAUDE.md
 *.p12
 hayabusa/
 tools/bmc-tools/
+tools/prefetch-parser/
+tools/lnk-parser/
+tools/jumplist-parser/
+tools/shellbag-parser/
+tools/artemis/
 .claude/
 *.bak
 *.code-workspace
-electron/analyzers/network/

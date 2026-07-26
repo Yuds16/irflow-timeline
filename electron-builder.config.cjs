@@ -15,7 +15,7 @@ const config = {
   mac: {
     category: "public.app-category.developer-tools",
     icon: "assets/icon.icns",
-    // The bundled Hayabusa binary (extraResources) is a universal (arm64+x86_64)
+    // The bundled Hayabusa binary (extraResources) is universal (arm64+x86_64)
     // Mach-O, identical in both the x64 and arm64 sub-builds. @electron/universal
     // refuses to merge an identical Mach-O unless it's explicitly allowed here, so
     // this tells it to copy the (already-fat) binary through as-is. Without this the

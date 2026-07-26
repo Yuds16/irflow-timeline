@@ -1,3 +1,39 @@
+const { normalizeTimestamp } = require("../utils/forensic-normalize");
+const { AI_HISTORY_TOOLS } = require("../parsers/ai-history/schema");
+
+/** Max rows scanned for checkbox filter values on large, non-indexed columns. */
+const LARGE_FILE_UNIQUE_SAMPLE_ROWS = 500_000;
+/** Row-count floor before sampling kicks in (below this, full GROUP BY is fine). */
+const LARGE_FILE_UNIQUE_SAMPLE_MIN_ROWS = 250_000;
+const AI_HISTORY_TOOL_LABELS = [...new Set(Object.values(AI_HISTORY_TOOLS).map((t) => t.label))];
+const AI_HISTORY_TOOL_LABEL_SQL = AI_HISTORY_TOOL_LABELS
+  .map((v) => `'${String(v).replace(/'/g, "''")}'`)
+  .join(", ");
+
+function looksLikeAiHistoryMeta(meta) {
+  const cm = meta?.colMap || {};
+  return Boolean((cm.InvokedTool || cm.ToolName) && cm.Tool && cm.RecordType && cm.Summary && cm.SessionId);
+}
+
+function normalizedColumnExpr(meta, colName) {
+  const safeCol = meta?.colMap?.[colName];
+  if (!safeCol) return null;
+  const isInvokedToolCol = colName === "InvokedTool" || colName === "ToolName";
+  if (!isInvokedToolCol || !looksLikeAiHistoryMeta(meta) || !meta.colMap.Tool) return safeCol;
+  const toolCol = meta.colMap.Tool;
+  return `CASE WHEN TRIM(COALESCE(${safeCol}, '')) = TRIM(COALESCE(${toolCol}, '')) `
+    + `AND TRIM(COALESCE(${toolCol}, '')) IN (${AI_HISTORY_TOOL_LABEL_SQL}) `
+    + `THEN '' ELSE ${safeCol} END`;
+}
+
+function truncateRowStrings(row, truncateColumns) {
+  for (const [col, maxLen] of Object.entries(truncateColumns)) {
+    const v = row[col];
+    if (typeof v !== "string" || v.length <= maxLen) continue;
+    row[col] = maxLen > 1 ? `${v.slice(0, maxLen - 1)}…` : "";
+  }
+}
+
 /**
  * Query/filter methods mixed into TimelineDB.
  */
@@ -36,7 +72,8 @@ class QueryStoreMethods {
     if (groupCol && groupValue !== undefined) {
       const safeCol = meta.colMap[groupCol];
       if (safeCol) {
-        whereConditions.push(`${safeCol} = ?`);
+        const expr = normalizedColumnExpr(meta, groupCol);
+        whereConditions.push(`${expr} = ?`);
         params.push(groupValue);
       }
     }
@@ -45,7 +82,8 @@ class QueryStoreMethods {
     for (const gf of groupFilters) {
       const safeCol = meta.colMap[gf.col];
       if (safeCol) {
-        whereConditions.push(`${safeCol} = ?`);
+        const expr = normalizedColumnExpr(meta, gf.col);
+        whereConditions.push(`${expr} = ?`);
         params.push(gf.value);
       }
     }
@@ -72,31 +110,7 @@ class QueryStoreMethods {
       meta._countCache = { sig: filterSig, cnt: totalFiltered };
     }
 
-    // ── Sort ───────────────────────────────────────────────────
-    let orderClause = "ORDER BY data.rowid";
-    if (sortCol) {
-      if (sortCol === "__vt__") {
-        // Virtual VT column — sort by verdict tag priority (malicious first in ASC)
-        const dir = sortDir === "desc" ? "DESC" : "ASC";
-        orderClause = `ORDER BY COALESCE((SELECT MIN(CASE tag WHEN 'VT: Malicious' THEN 1 WHEN 'VT: Suspicious' THEN 2 WHEN 'VT: Clean' THEN 3 ELSE 4 END) FROM tags WHERE tags.rowid = data.rowid AND tag LIKE 'VT:%'), 5) ${dir}, data.rowid ASC`;
-      } else {
-        const safeCol = meta.colMap[sortCol];
-        if (safeCol) {
-          // Lazy-build index on first sort for this column
-          this._ensureIndex(tabId, sortCol);
-          const dir = sortDir === "desc" ? "DESC" : "ASC";
-          // Timestamp columns checked first (takes priority over numeric — prevents
-          // false-positive numeric detection from breaking timestamp sorting)
-          if (meta.tsColumns.has(sortCol)) {
-            orderClause = `ORDER BY sort_datetime(${safeCol}) ${dir}`;
-          } else if (meta.numericColumns.has(sortCol)) {
-            orderClause = `ORDER BY CAST(${safeCol} AS REAL) ${dir}`;
-          } else {
-            orderClause = `ORDER BY ${safeCol} COLLATE NOCASE ${dir}`;
-          }
-        }
-      }
-    }
+    const orderClause = this._buildOrderClause(meta, tabId, sortCol, sortDir);
 
     // ── Fetch window ───────────────────────────────────────────
     // Defensive cap: SQLite treats LIMIT -1 (the legacy default) as "no limit", so a
@@ -105,21 +119,29 @@ class QueryStoreMethods {
     // (including the intentional "load all in group" path), so an explicit non-negative
     // limit is honored as-is; only a missing/invalid one falls back to a bounded default.
     const effectiveLimit = Number.isInteger(limit) && limit >= 0 ? limit : 10000;
-    const colList = meta.safeCols.map((c) => c.safe).join(", ");
+    const omitSet = new Set(options.omitHeaders || []);
+    const colsForSelect = meta.safeCols.filter((c) => !omitSet.has(c.original));
+    const colList = colsForSelect.map((c) => {
+      const expr = normalizedColumnExpr(meta, c.original);
+      return expr === c.safe ? c.safe : `${expr} AS ${c.safe}`;
+    }).join(", ");
+    const truncateColumns = options.truncateColumns || null;
     const querySql = `SELECT data.rowid as _rowid, ${colList} FROM data ${whereClause} ${orderClause} LIMIT ? OFFSET ?`;
     const queryParams = [...params, effectiveLimit, offset];
 
     const rawRows = db.prepare(querySql).all(...queryParams);
 
     // Map back to original column names — tight loop, no closures
-    const colCount = meta.safeCols.length;
+    const colCount = colsForSelect.length;
     const rows = new Array(rawRows.length);
     for (let r = 0; r < rawRows.length; r++) {
       const raw = rawRows[r];
       const row = { __idx: raw._rowid };
       for (let c = 0; c < colCount; c++) {
-        row[meta.safeCols[c].original] = raw[meta.safeCols[c].safe] ?? "";
+        row[colsForSelect[c].original] = raw[colsForSelect[c].safe] ?? "";
       }
+      for (const h of omitSet) row[h] = "";
+      if (truncateColumns) truncateRowStrings(row, truncateColumns);
       rows[r] = row;
     }
 
@@ -153,6 +175,167 @@ class QueryStoreMethods {
       bookmarkedRows: [...bookmarkedSet],
       rowTags,
     };
+  }
+
+  /**
+   * Return stable SQLite row IDs for an absolute range in the current filtered
+   * and sorted view. This is used by Shift+Click and row navigation so neither
+   * workflow is limited to the renderer's 10,000-row cache.
+   */
+  getRowIdsInRange(tabId, options = {}) {
+    const meta = this.databases.get(tabId);
+    if (!meta) return { rowIds: [] };
+
+    const offset = Math.max(0, Number.isSafeInteger(options.offset) ? options.offset : 0);
+    const requestedLimit = Number.isSafeInteger(options.limit) ? options.limit : 1;
+    const limit = Math.max(0, requestedLimit);
+    if (limit === 0) return { rowIds: [] };
+
+    const params = [];
+    const whereConditions = [];
+    this._applyStandardFilters(options, meta, whereConditions, params);
+    const whereClause = whereConditions.length > 0
+      ? `WHERE ${whereConditions.join(" AND ")}`
+      : "";
+    const orderExpression = this._buildOrderExpression(
+      meta,
+      tabId,
+      options.sortCol || null,
+      options.sortDir || "asc",
+    );
+    const rows = meta.db.prepare(
+      `SELECT data.rowid AS _rowid FROM data ${whereClause} ORDER BY ${orderExpression} LIMIT ? OFFSET ?`
+    ).all(...params, limit, offset);
+    return { rowIds: rows.map((row) => Number(row._rowid)).filter(Number.isSafeInteger) };
+  }
+
+  /**
+   * Count how many explicit selected row IDs are still visible under the
+   * current filters. The renderer uses this to disclose hidden selections.
+   */
+  countRowsByIdsMatching(tabId, rowIds, options = {}) {
+    const meta = this.databases.get(tabId);
+    if (!meta) return { matching: 0 };
+
+    const params = [];
+    const whereConditions = [];
+    this._applyStandardFilters(options, meta, whereConditions, params);
+    this._applyRowIdFilter(rowIds, whereConditions);
+    const whereClause = whereConditions.length > 0
+      ? `WHERE ${whereConditions.join(" AND ")}`
+      : "";
+    const matching = meta.db.prepare(
+      `SELECT COUNT(*) AS cnt FROM data ${whereClause}`
+    ).get(...params)?.cnt || 0;
+    return { matching };
+  }
+
+  /**
+   * Find the next/previous global-search match in a highlighted (unfiltered)
+   * view. SQLite ranks the full filtered result set, so F3 can cross renderer
+   * cache boundaries and returns both the absolute row index and match count.
+   */
+  findSearchMatch(tabId, options = {}) {
+    const meta = this.databases.get(tabId);
+    if (!meta) return { index: -1, rowId: null, position: -1, totalMatches: 0 };
+
+    const matchSearchTerm = String(options.matchSearchTerm || "").trim();
+    if (!matchSearchTerm) {
+      return { index: -1, rowId: null, position: -1, totalMatches: 0 };
+    }
+
+    const baseOptions = { ...options, searchTerm: "" };
+    const baseParams = [];
+    const baseConditions = [];
+    this._applyStandardFilters(baseOptions, meta, baseConditions, baseParams);
+    const baseWhere = baseConditions.length > 0
+      ? `WHERE ${baseConditions.join(" AND ")}`
+      : "";
+
+    const matchParams = [];
+    const matchConditions = [];
+    this._applySearch(
+      matchSearchTerm,
+      options.matchSearchMode || options.searchMode || "mixed",
+      meta,
+      matchConditions,
+      matchParams,
+      options.matchSearchCondition || options.searchCondition || "contains",
+    );
+    if (matchConditions.length === 0) {
+      return { index: -1, rowId: null, position: -1, totalMatches: 0 };
+    }
+
+    const orderExpression = this._buildOrderExpression(
+      meta,
+      tabId,
+      options.sortCol || null,
+      options.sortDir || "asc",
+    );
+    const currentIndex = Number.isSafeInteger(options.currentIndex)
+      ? options.currentIndex
+      : -1;
+    const backwards = Number(options.direction) < 0;
+    const comparator = backwards ? "<" : ">";
+    const resultOrder = backwards ? "DESC" : "ASC";
+    const rankedSql = `
+      WITH ranked AS (
+        SELECT data.rowid AS _rowid,
+               ROW_NUMBER() OVER (ORDER BY ${orderExpression}) - 1 AS _index
+        FROM data
+        ${baseWhere}
+      ),
+      matches AS (
+        SELECT ranked._rowid,
+               ranked._index,
+               ROW_NUMBER() OVER (ORDER BY ranked._index) - 1 AS _position,
+               COUNT(*) OVER () AS _total
+        FROM ranked
+        JOIN data ON data.rowid = ranked._rowid
+        WHERE ${matchConditions.join(" AND ")}
+      )
+      SELECT _rowid, _index, _position, _total
+      FROM matches
+      WHERE _index ${comparator} ?
+      ORDER BY _index ${resultOrder}
+      LIMIT 1`;
+    const args = [...baseParams, ...matchParams, currentIndex];
+    let row = meta.db.prepare(rankedSql).get(...args);
+
+    // Wrap at either end, matching common F3 navigation behavior.
+    if (!row) {
+      const wrapSql = rankedSql.replace(
+        `WHERE _index ${comparator} ?`,
+        "WHERE ? IS NOT NULL",
+      );
+      row = meta.db.prepare(wrapSql).get(...baseParams, ...matchParams, currentIndex);
+    }
+    if (!row) return { index: -1, rowId: null, position: -1, totalMatches: 0 };
+    return {
+      index: Number(row._index),
+      rowId: Number(row._rowid),
+      position: Number(row._position),
+      totalMatches: Number(row._total),
+    };
+  }
+
+  _buildOrderExpression(meta, tabId, sortCol = null, sortDir = "asc") {
+    const dir = sortDir === "desc" ? "DESC" : "ASC";
+    if (sortCol === "__vt__") {
+      return `COALESCE((SELECT MIN(CASE tag WHEN 'VT: Malicious' THEN 1 WHEN 'VT: Suspicious' THEN 2 WHEN 'VT: Clean' THEN 3 ELSE 4 END) FROM tags WHERE tags.rowid = data.rowid AND tag LIKE 'VT:%'), 5) ${dir}, data.rowid ASC`;
+    }
+
+    const safeCol = sortCol ? meta.colMap[sortCol] : null;
+    if (!safeCol) return "data.rowid ASC";
+
+    this._ensureIndex(tabId, sortCol);
+    if (meta.tsColumns.has(sortCol)) {
+      return `sort_datetime(${safeCol}) ${dir}, data.rowid ASC`;
+    }
+    if (meta.numericColumns.has(sortCol)) {
+      return `CAST(${safeCol} AS REAL) ${dir}, data.rowid ASC`;
+    }
+    return `${safeCol} COLLATE NOCASE ${dir}, data.rowid ASC`;
   }
 
   /**
@@ -288,7 +471,7 @@ class QueryStoreMethods {
           const matchCol = meta.headers.find((h) => h.toLowerCase() === colPart.toLowerCase());
           const safeCol = matchCol ? meta.colMap[matchCol] : null;
           if (safeCol) {
-            sqlParts.push(`${safeCol} LIKE ?`);
+            sqlParts.push(`${normalizedColumnExpr(meta, matchCol)} LIKE ?`);
             params.push(`%${valPart}%`);
             // The value must appear in a specific column, so it appears in the row →
             // including it as a required term keeps the prefilter a valid superset.
@@ -343,14 +526,23 @@ class QueryStoreMethods {
       }
       const sc = meta.colMap[cn];
       if (!sc) continue;
-      whereConditions.push(`${sc} LIKE ?`);
+      const expr = normalizedColumnExpr(meta, cn);
+      whereConditions.push(`${expr} LIKE ?`);
       params.push(`%${fv}%`);
     }
   }
 
+  _normalizeCheckboxFilterValues(values) {
+    if (!values) return [];
+    if (Array.isArray(values)) return values;
+    if (values instanceof Set) return [...values];
+    return [];
+  }
+
   _applyCheckboxFilters(checkboxFilters, meta, whereConditions, params) {
     for (const [cn, values] of Object.entries(checkboxFilters)) {
-      if (!values || values.length === 0) continue;
+      const list = this._normalizeCheckboxFilterValues(values);
+      if (list.length === 0) continue;
       if (cn === "__vt__") {
         const ph = values.map(() => "?").join(",");
         whereConditions.push(`data.rowid IN (SELECT rowid FROM tags WHERE tag IN (${ph}))`);
@@ -359,22 +551,48 @@ class QueryStoreMethods {
       }
       const sc = meta.colMap[cn];
       if (!sc) continue;
-      const hasNull = values.some((v) => v === null || v === "");
-      const nonNull = values.filter((v) => v !== null && v !== "");
+      const expr = normalizedColumnExpr(meta, cn);
+      const hasNull = list.some((v) => v === null || v === "");
+      const nonNull = list.filter((v) => v !== null && v !== "");
       const parts = [];
-      if (hasNull) parts.push(`(${sc} IS NULL OR ${sc} = '')`);
-      if (nonNull.length === 1) { parts.push(`${sc} = ?`); params.push(nonNull[0]); }
-      else if (nonNull.length > 1) { parts.push(`${sc} IN (${nonNull.map(() => "?").join(",")})`); params.push(...nonNull); }
+      if (hasNull) parts.push(`(${expr} IS NULL OR ${expr} = '')`);
+      if (nonNull.length === 1) { parts.push(`${expr} = ?`); params.push(nonNull[0]); }
+      else if (nonNull.length > 1) { parts.push(`${expr} IN (${nonNull.map(() => "?").join(",")})`); params.push(...nonNull); }
       whereConditions.push(parts.length > 1 ? `(${parts.join(" OR ")})` : parts[0]);
     }
+  }
+
+  /**
+   * Normalize a date-range bound to the same canonical UTC sort key as sort_datetime().
+   */
+  _dateRangeBoundKey(value) {
+    if (value == null || value === "") return value;
+    const s = String(value).trim();
+    const ms = normalizeTimestamp(s);
+    if (Number.isFinite(ms)) {
+      const iso = new Date(ms).toISOString();
+      return iso.slice(0, 10) + " " + iso.slice(11, 23);
+    }
+    return s.replace("T", " ");
   }
 
   _applyDateRangeFilters(dateRangeFilters, meta, whereConditions, params) {
     for (const [cn, range] of Object.entries(dateRangeFilters)) {
       const sc = meta.colMap[cn];
       if (!sc) continue;
-      if (range.from) { whereConditions.push(`${sc} >= ?`); params.push(range.from); }
-      if (range.to) { whereConditions.push(`${sc} <= ?`); params.push(range.to); }
+      // datetime-local inputs use "T" while most forensic imports use a space.
+      // Raw TEXT comparison therefore excludes valid rows at the lower bound.
+      // Use the same canonical UDF as timestamp sorting so ranges also honor
+      // explicit offsets and mixed input formats.
+      const comparable = meta.tsColumns?.has(cn) ? `sort_datetime(${sc})` : sc;
+      if (range.from) {
+        whereConditions.push(`${comparable} >= sort_datetime(?)`);
+        params.push(range.from);
+      }
+      if (range.to) {
+        whereConditions.push(`${comparable} <= sort_datetime(?)`);
+        params.push(range.to);
+      }
     }
   }
 
@@ -428,6 +646,38 @@ class QueryStoreMethods {
     whereConditions.push(chunks.length === 1 ? chunks[0] : `(${chunks.join(" OR ")})`);
   }
 
+  _applyExcludedRowIds(excludedRowIds, whereConditions) {
+    const ids = this._normalizeRowIdFilter(excludedRowIds);
+    if (!ids || ids.length === 0) return;
+
+    const chunks = [];
+    const CHUNK_SIZE = 5000;
+    for (let i = 0; i < ids.length; i += CHUNK_SIZE) {
+      chunks.push(`data.rowid NOT IN (${ids.slice(i, i + CHUNK_SIZE).join(",")})`);
+    }
+    whereConditions.push(chunks.length === 1 ? chunks[0] : `(${chunks.join(" AND ")})`);
+  }
+
+  /**
+   * SQL sort key for a column (no ORDER BY / direction). Returns null if unknown.
+   */
+  _sortKeyExpression(meta, tabId, sortCol) {
+    if (!sortCol || sortCol === "__vt__") return null;
+    const safeCol = meta.colMap[sortCol];
+    if (!safeCol) return null;
+    this._ensureIndex(tabId, sortCol);
+    if (meta.tsColumns.has(sortCol)) return `sort_datetime(${safeCol})`;
+    if (meta.numericColumns.has(sortCol)) return `CAST(${safeCol} AS REAL)`;
+    return `${normalizedColumnExpr(meta, sortCol)} COLLATE NOCASE`;
+  }
+
+  /**
+   * ORDER BY clause matching the grid's current sort (shared by queryRows, export, column copy).
+   */
+  _buildOrderClause(meta, tabId, sortCol, sortDir) {
+    return `ORDER BY ${this._buildOrderExpression(meta, tabId, sortCol, sortDir)}`;
+  }
+
   /**
    * Apply the standard set of filters to a WHERE clause.
    * Centralizes the filter logic shared by queryRows, exportQuery,
@@ -440,8 +690,10 @@ class QueryStoreMethods {
       dateRangeFilters = {}, advancedFilters = [],
       searchTerm = "", searchMode = "mixed", searchCondition = "contains",
       rowIdFilter = null,
+      excludedRowIds = null,
     } = options;
     this._applyRowIdFilter(rowIdFilter, whereConditions);
+    this._applyExcludedRowIds(excludedRowIds, whereConditions);
     this._applyColumnFilters(columnFilters, meta, whereConditions, params);
     this._applyCheckboxFilters(checkboxFilters, meta, whereConditions, params);
     this._applyDateRangeFilters(dateRangeFilters, meta, whereConditions, params);
@@ -472,7 +724,7 @@ class QueryStoreMethods {
 
     // Build SQL for a single condition
     const buildCondition = (f) => {
-      const sc = meta.colMap[f.column];
+      const sc = normalizedColumnExpr(meta, f.column);
       switch (f.operator) {
         case "contains":
           params.push(`%${f.value}%`);
@@ -584,7 +836,7 @@ class QueryStoreMethods {
             const matchCol = meta.headers.find((h) => h.toLowerCase() === colPart.toLowerCase());
             const safeCol = matchCol ? meta.colMap[matchCol] : null;
             if (safeCol) {
-              result.colConditions.push({ sql: `${safeCol} LIKE ?`, param: `%${valPart}%` });
+              result.colConditions.push({ sql: `${normalizedColumnExpr(meta, matchCol)} LIKE ?`, param: `%${valPart}%` });
             }
           }
         } else if (token.startsWith("-")) {
@@ -622,8 +874,16 @@ class QueryStoreMethods {
     const { sortCol = null, sortDir = "asc", visibleHeaders = null } = options;
 
     const headers = visibleHeaders || meta.headers;
-    const safeCols = headers.map((h) => meta.colMap[h]).filter(Boolean);
-    const colList = safeCols.join(", ");
+    const safeCols = [];
+    const selectCols = [];
+    for (const h of headers) {
+      const safe = meta.colMap[h];
+      if (!safe) continue;
+      safeCols.push(safe);
+      const expr = normalizedColumnExpr(meta, h);
+      selectCols.push(expr === safe ? safe : `${expr} AS ${safe}`);
+    }
+    const colList = selectCols.join(", ");
 
     const params = [];
     const whereConditions = [];
@@ -634,20 +894,7 @@ class QueryStoreMethods {
         ? `WHERE ${whereConditions.join(" AND ")}`
         : "";
 
-    let orderClause = "ORDER BY data.rowid";
-    if (sortCol) {
-      const safeCol = meta.colMap[sortCol];
-      if (safeCol) {
-        const dir = sortDir === "desc" ? "DESC" : "ASC";
-        if (meta.tsColumns.has(sortCol)) {
-          orderClause = `ORDER BY sort_datetime(${safeCol}) ${dir}`;
-        } else if (meta.numericColumns.has(sortCol)) {
-          orderClause = `ORDER BY CAST(${safeCol} AS REAL) ${dir}`;
-        } else {
-          orderClause = `ORDER BY ${safeCol} COLLATE NOCASE ${dir}`;
-        }
-      }
-    }
+    const orderClause = this._buildOrderClause(meta, tabId, sortCol, sortDir);
 
     const sql = `SELECT ${colList} FROM data ${whereClause} ${orderClause}`;
     const stmt = meta.db.prepare(sql);
@@ -658,6 +905,35 @@ class QueryStoreMethods {
       iterator: iter,
       safeCols,
       reverseMap: meta.reverseColMap,
+    };
+  }
+
+  /**
+   * Distinct values for a column with row counts (for AI history source manifest).
+   */
+  getGroupedColumnCounts(tabId, colName, options = {}) {
+    const meta = this.databases.get(tabId);
+    if (!meta) return { groups: [], totalRows: 0 };
+
+    const safeCol = meta.colMap[colName];
+    if (!safeCol) return { groups: [], totalRows: 0 };
+
+    const params = [];
+    const whereConditions = [];
+    this._applyStandardFilters(options, meta, whereConditions, params);
+    const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
+
+    const valExpr = normalizedColumnExpr(meta, colName);
+    const groups = meta.db.prepare(
+      `SELECT ${valExpr} AS val, COUNT(*) AS cnt FROM data ${whereClause} `
+      + `GROUP BY ${valExpr} HAVING val IS NOT NULL AND val != '' ORDER BY cnt DESC`,
+    ).all(...params);
+
+    const totalRows = meta.db.prepare(`SELECT COUNT(*) AS cnt FROM data ${whereClause}`).get(...params).cnt;
+
+    return {
+      groups: groups.map((r) => ({ value: String(r.val), count: r.cnt })),
+      totalRows,
     };
   }
 
@@ -692,7 +968,8 @@ class QueryStoreMethods {
       // Combined stats query — 1 scan instead of 3 separate COUNT queries
       const isTs = meta.tsColumns.has(colName);
       const isNum = meta.numericColumns && meta.numericColumns.has(colName);
-      let statsSql = `SELECT COUNT(*) as total, SUM(CASE WHEN ${safeCol} IS NOT NULL AND ${safeCol} != '' THEN 1 ELSE 0 END) as nonEmpty, COUNT(DISTINCT CASE WHEN ${safeCol} IS NOT NULL AND ${safeCol} != '' THEN ${safeCol} END) as uniq`;
+      const valExpr = normalizedColumnExpr(meta, colName);
+      let statsSql = `SELECT COUNT(*) as total, SUM(CASE WHEN ${valExpr} IS NOT NULL AND ${valExpr} != '' THEN 1 ELSE 0 END) as nonEmpty, COUNT(DISTINCT CASE WHEN ${valExpr} IS NOT NULL AND ${valExpr} != '' THEN ${valExpr} END) as uniq`;
       if (isTs) statsSql += `, MIN(sort_datetime(${safeCol})) as earliest, MAX(sort_datetime(${safeCol})) as latest`;
       if (isNum) statsSql += `, MIN(CAST(${safeCol} AS REAL)) as minVal, MAX(CAST(${safeCol} AS REAL)) as maxVal, AVG(CAST(${safeCol} AS REAL)) as avgVal`;
       statsSql += ` FROM data ${whereClause}`;
@@ -706,10 +983,10 @@ class QueryStoreMethods {
 
       // Top 25 values (still needs separate GROUP BY query)
       const neWhere = whereConditions.length > 0
-        ? `WHERE ${whereConditions.join(" AND ")} AND ${safeCol} IS NOT NULL AND ${safeCol} != ''`
-        : `WHERE ${safeCol} IS NOT NULL AND ${safeCol} != ''`;
+        ? `WHERE ${whereConditions.join(" AND ")} AND ${valExpr} IS NOT NULL AND ${valExpr} != ''`
+        : `WHERE ${valExpr} IS NOT NULL AND ${valExpr} != ''`;
       const topValues = db.prepare(
-        `SELECT ${safeCol} as val, COUNT(*) as cnt FROM data ${neWhere} GROUP BY ${safeCol} ORDER BY cnt DESC LIMIT 25`
+        `SELECT ${valExpr} as val, COUNT(*) as cnt FROM data ${neWhere} GROUP BY ${valExpr} ORDER BY cnt DESC LIMIT 25`
       ).all(...params);
 
       const result = { totalRows, nonEmptyCount, emptyCount, uniqueCount, fillRate, topValues };
@@ -743,23 +1020,26 @@ class QueryStoreMethods {
   /**
    * Get columns that are entirely empty (NULL or '')
    */
-  getEmptyColumns(tabId) {
+  getEmptyColumns(tabId, options = {}) {
     const meta = this.databases.get(tabId);
     if (!meta) return [];
     const db = meta.db;
+    const omitSet = new Set(options.omitHeaders || []);
+    const colsToCheck = meta.safeCols.filter((c) => !omitSet.has(c.original));
+    if (!colsToCheck.length) return [];
+
     // Sample-based: check first 25K + last 25K rows instead of full table scan.
     // On 30M+ row tables, a full scan blocks the main thread for 10-30s.
-    const checks = meta.safeCols.map((c) => `MAX(CASE WHEN ${c.safe} IS NOT NULL AND ${c.safe} != '' THEN 1 ELSE 0 END) as ${c.safe}`);
-    const useFullScan = meta.rowCount <= 100000;
+    const checks = colsToCheck.map((c) => `MAX(CASE WHEN ${c.safe} IS NOT NULL AND ${c.safe} != '' THEN 1 ELSE 0 END) as ${c.safe}`);
+    const useFullScan = !options.forceSample && meta.rowCount <= 100000;
     const source = useFullScan
       ? "data"
       : `(SELECT * FROM (SELECT * FROM data LIMIT 25000) UNION ALL SELECT * FROM (SELECT * FROM data ORDER BY rowid DESC LIMIT 25000))`;
     const row = db.prepare(`SELECT ${checks.join(", ")} FROM ${source}`).get();
-    if (!row) return [...meta.headers];
-    return meta.headers.filter((h) => {
-      const sc = meta.colMap[h];
-      return sc && !row[sc];
-    });
+    if (!row) return [];
+    return colsToCheck
+      .filter((c) => !row[c.safe])
+      .map((c) => c.original);
   }
 
   /**
@@ -782,10 +1062,10 @@ class QueryStoreMethods {
    */
   getColumnUniqueValues(tabId, colName, options = {}) {
     const meta = this.databases.get(tabId);
-    if (!meta) return [];
+    if (!meta) return { values: [], totalDistinct: 0, truncated: false };
 
     const safeCol = meta.colMap[colName];
-    if (!safeCol) return [];
+    if (!safeCol) return { values: [], totalDistinct: 0, truncated: false };
 
     const {
       filterText = "",
@@ -805,21 +1085,55 @@ class QueryStoreMethods {
     this._applyStandardFilters(filteredOptions, meta, whereConditions, params);
 
     // Filter values list by search text (supports regex mode)
+    const valExpr = normalizedColumnExpr(meta, colName);
     if (filterText.trim()) {
       if (filterRegex) {
-        whereConditions.push(`${safeCol} REGEXP ?`);
+        whereConditions.push(`${valExpr} REGEXP ?`);
         params.push(filterText);
       } else {
-        whereConditions.push(`${safeCol} LIKE ?`);
+        whereConditions.push(`${valExpr} LIKE ?`);
         params.push(`%${filterText}%`);
       }
     }
 
     const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
-    const sql = `SELECT ${safeCol} as val, COUNT(*) as cnt FROM data ${whereClause} GROUP BY ${safeCol} ORDER BY cnt DESC LIMIT ?`;
+    const colIndexed = meta.indexedCols && meta.indexedCols.has(safeCol);
+    const rowCount = meta.rowCount || 0;
+    const useSample = meta.isLargeFile && !colIndexed && rowCount >= LARGE_FILE_UNIQUE_SAMPLE_MIN_ROWS;
+
+    let sql;
+    if (useSample) {
+      // Full-table GROUP BY on 6M+ rows can spike RSS and freeze the UI thread pool.
+      // Sample the first N rowids (stable, fast) — still honors active filters.
+      sql = `SELECT val, COUNT(*) as cnt FROM (
+        SELECT ${valExpr} as val FROM data ${whereClause} ORDER BY rowid LIMIT ${LARGE_FILE_UNIQUE_SAMPLE_ROWS}
+      ) GROUP BY val ORDER BY cnt DESC LIMIT ?`;
+    } else {
+      // Return the size of the complete value set as metadata instead of making
+      // the UI imply that the bounded result is exhaustive.
+      sql = `
+        SELECT val, cnt, COUNT(*) OVER() AS total_distinct
+        FROM (
+          SELECT ${valExpr} AS val, COUNT(*) AS cnt
+          FROM data ${whereClause}
+          GROUP BY ${valExpr}
+        )
+        ORDER BY cnt DESC
+        LIMIT ?
+      `;
+    }
     params.push(limit);
 
-    return db.prepare(sql).all(...params);
+    const rows = db.prepare(sql).all(...params);
+    const totalDistinct = useSample
+      ? rows.length
+      : Number(rows[0]?.total_distinct || 0);
+    return {
+      values: rows.map(({ val, cnt }) => ({ val, cnt })),
+      totalDistinct,
+      truncated: useSample || totalDistinct > rows.length,
+      ...(useSample ? { sampled: true } : {}),
+    };
   }
 
   /**
@@ -837,7 +1151,7 @@ class QueryStoreMethods {
     const safeCol = isTagCol ? null : meta.colMap[colName];
     if (!isTagCol && !safeCol) return { values: [], total: 0, truncated: false };
 
-    const { distinct = false, limit = 1000000 } = options;
+    const { distinct = false, limit = 1000000, sortCol = null, sortDir = "asc" } = options;
     const db = meta.db;
     const params = [];
     const whereConditions = [];
@@ -848,10 +1162,24 @@ class QueryStoreMethods {
     const fromExpr = isTagCol
       ? `data JOIN tags ON tags.rowid = data.rowid`
       : `data`;
-    const valExpr = isTagCol ? `tags.tag` : safeCol;
-    const sql = distinct
-      ? `SELECT DISTINCT ${valExpr} AS val FROM ${fromExpr} ${whereClause} ORDER BY val LIMIT ?`
-      : `SELECT ${valExpr} AS val FROM ${fromExpr} ${whereClause} ORDER BY data.rowid LIMIT ?`;
+    const valExpr = isTagCol ? `tags.tag` : normalizedColumnExpr(meta, colName);
+    const orderClause = this._buildOrderClause(meta, tabId, sortCol, sortDir);
+    const sortKey = this._sortKeyExpression(meta, tabId, sortCol);
+    const sortDirSql = sortDir === "desc" ? "DESC" : "ASC";
+    const isTsCol = !isTagCol && meta.tsColumns && meta.tsColumns.has(colName);
+    let sql;
+    if (distinct && isTsCol) {
+      // Same instant can appear as ISO T/Z, space-separated, fractional seconds, etc.
+      const tsKey = `sort_datetime(${safeCol})`;
+      sql = `SELECT MIN(${valExpr}) AS val FROM ${fromExpr} ${whereClause} GROUP BY ${tsKey} ORDER BY MIN(${tsKey}) ${sortDirSql} LIMIT ?`;
+    } else if (distinct && sortKey) {
+      // Text: trim + case-insensitive group; order follows the grid sort column.
+      sql = `SELECT MIN(${valExpr}) AS val FROM ${fromExpr} ${whereClause} GROUP BY TRIM(${valExpr}) COLLATE NOCASE ORDER BY MIN(${sortKey}) ${sortDirSql} LIMIT ?`;
+    } else if (distinct) {
+      sql = `SELECT MIN(${valExpr}) AS val FROM ${fromExpr} ${whereClause} GROUP BY TRIM(${valExpr}) COLLATE NOCASE ORDER BY MIN(${valExpr}) COLLATE NOCASE LIMIT ?`;
+    } else {
+      sql = `SELECT ${valExpr} AS val FROM ${fromExpr} ${whereClause} ${orderClause} LIMIT ?`;
+    }
     params.push(limit + 1); // fetch one extra to detect truncation
 
     try {
@@ -886,7 +1214,8 @@ class QueryStoreMethods {
     for (const pf of parentFilters) {
       const sc = meta.colMap[pf.col];
       if (sc) {
-        whereConditions.push(`${sc} = ?`);
+        const expr = normalizedColumnExpr(meta, pf.col);
+        whereConditions.push(`${expr} = ?`);
         params.push(pf.value);
       }
     }
@@ -894,7 +1223,8 @@ class QueryStoreMethods {
     this._applyStandardFilters(options, meta, whereConditions, params);
 
     const whereClause = whereConditions.length > 0 ? `WHERE ${whereConditions.join(" AND ")}` : "";
-    const sql = `SELECT ${safeCol} as val, COUNT(*) as cnt FROM data ${whereClause} GROUP BY ${safeCol} ORDER BY cnt DESC`;
+    const valExpr = normalizedColumnExpr(meta, groupCol);
+    const sql = `SELECT ${valExpr} as val, COUNT(*) as cnt FROM data ${whereClause} GROUP BY ${valExpr} ORDER BY cnt DESC`;
 
     return db.prepare(sql).all(...params);
   }
@@ -917,4 +1247,7 @@ class QueryStoreMethods {
 
 }
 
-module.exports = QueryStoreMethods.prototype;
+const proto = QueryStoreMethods.prototype;
+proto.LARGE_FILE_UNIQUE_SAMPLE_ROWS = LARGE_FILE_UNIQUE_SAMPLE_ROWS;
+proto.LARGE_FILE_UNIQUE_SAMPLE_MIN_ROWS = LARGE_FILE_UNIQUE_SAMPLE_MIN_ROWS;
+module.exports = proto;

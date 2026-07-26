@@ -214,12 +214,13 @@ Supported AI app families include:
 
 | App | Common artifacts |
 |-----|------------------|
-| **Claude Code** | `~/.claude/history.jsonl`, `~/.claude/projects/**/*.jsonl`, Claude Desktop `claude-code-sessions/` |
-| **OpenAI Codex** | `$CODEX_HOME` or `~/.codex/`, `sessions/**/rollout-*.jsonl`, `history.jsonl`, `state.sqlite` metadata |
-| **ChatGPT Desktop** | Local app LevelDB / SQLite stores under ChatGPT Desktop app-data folders |
-| **Gemini CLI** | `~/.gemini/tmp/<project_hash>/chats/session-*.json`, `checkpoint-*.json`, `logs.json` |
-| **Cursor** | `~/.cursor/projects/**/agent-transcripts/`, composer `store.db`, VS Code-family `state.vscdb` |
-| **GitHub Copilot** | VS Code-family `workspaceStorage/*/chatSessions/` and `emptyWindowChatSessions/` |
+| **Claude Code / Desktop** | `~/.claude/history.jsonl`, `~/.claude/projects/**/*.jsonl`, Desktop `claude-code-sessions/`, Cowork `local-agent-mode-sessions/**/{.claude/projects,audit*.jsonl}` |
+| **OpenAI Codex** | `$CODEX_HOME` or `~/.codex/`, `sessions/**/rollout-*.jsonl`, `history.jsonl`, versioned `state*.sqlite` metadata with WAL/SHM |
+| **Grok Build** | `$GROK_HOME` or `~/.grok/`, workspace `prompt_history.jsonl`, session `summary.json`, `updates.jsonl`, `chat_history.jsonl`, and `hunk_records.jsonl` |
+| **ChatGPT Desktop** | Local LevelDB / SQLite stores plus inventory of `conversations-v2-*` and `conversations-v3-*/*.data` bundles |
+| **Gemini CLI** | `~/.gemini/tmp/<project_hash>/chats/**/*.jsonl`, `~/.gemini/shell_history`, plus legacy session/checkpoint/log JSON |
+| **Cursor** | `~/.cursor/projects/**/agent-transcripts/`, composer `store.db`, VS Code-family `state.vscdb`, and Cursor `User/globalStorage/conversation-search.db` |
+| **GitHub Copilot** | `$COPILOT_HOME` / `~/.copilot` CLI sessions, commands, plans/checkpoints, safe session-store metadata, plus VS Code-family `workspaceStorage/*/chatSessions/` and `emptyWindowChatSessions/` |
 | **Windsurf** | `Windsurf/User/globalStorage/state.vscdb`, `workspaceStorage/*/state.vscdb` |
 | **Continue** | `~/.continue/sessions/*.json` |
 

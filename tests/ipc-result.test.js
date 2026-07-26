@@ -12,10 +12,10 @@ function loadModule() {
   const munged = src.replace(/^export\s+function\s+/gm, "function ");
   const ctx = {};
   vm.createContext(ctx);
-  vm.runInContext(munged + "\n;Object.assign(globalThis,{isIpcError,ipcErrorMessage});", ctx);
-  return { isIpcError: ctx.isIpcError, ipcErrorMessage: ctx.ipcErrorMessage };
+  vm.runInContext(munged + "\n;Object.assign(globalThis,{isIpcError,ipcErrorMessage,isIpcCancelled});", ctx);
+  return { isIpcError: ctx.isIpcError, ipcErrorMessage: ctx.ipcErrorMessage, isIpcCancelled: ctx.isIpcCancelled };
 }
-const { isIpcError, ipcErrorMessage } = loadModule();
+const { isIpcError, ipcErrorMessage, isIpcCancelled } = loadModule();
 
 test("isIpcError detects __ipcError (worker crash) and non-empty error strings", () => {
   assert.equal(isIpcError({ __ipcError: true }), true);
@@ -40,4 +40,11 @@ test("ipcErrorMessage prefers message, then error, then fallback", () => {
   assert.equal(ipcErrorMessage({ __ipcError: true }), "Analysis failed");
   assert.equal(ipcErrorMessage({ __ipcError: true }, "custom fallback"), "custom fallback");
   assert.equal(ipcErrorMessage(null), "Analysis failed");
+});
+
+test("isIpcCancelled detects safeHandle cancellation errors", () => {
+  assert.equal(isIpcCancelled({ __ipcError: true, message: "Job cancelled" }), true);
+  assert.equal(isIpcCancelled({ error: "Query canceled" }), true);
+  assert.equal(isIpcCancelled({ __ipcError: true, message: "Worker exited with code 1" }), false);
+  assert.equal(isIpcCancelled({ rows: [] }), false);
 });

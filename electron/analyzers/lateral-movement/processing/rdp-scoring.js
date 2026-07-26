@@ -12,9 +12,16 @@
  * @returns {{fid: number}}
  */
 const { DC_PAT: _DC_PAT, SRV_PAT: _SRV_PAT, MGMT_SRC_PAT: _MGMT_SRC_PAT, SEV_ORDER: sevOrder } = require("../constants");
+const { buildFindingPairs } = require("./triage-and-clustering");
+const { normalizeTimestamp } = require("../../../utils/forensic-normalize");
 
 function scoreRdpSessions(state) {
-  const { timeOrdered, edgeMap, rdpSessions, _findingPairs, _outlierHosts, findings } = state;
+  const { timeOrdered, edgeMap, rdpSessions, _outlierHosts, findings } = state;
+  // This stage now runs BEFORE triage scoring (so the Concurrent RDP findings it emits
+  // get a triageScore like everything else), which means the caller no longer has a
+  // pair index to hand over. Build one from the findings that exist at this point.
+  // The final index is rebuilt by correlateTriageAndCluster over the complete array.
+  const _findingPairs = state._findingPairs || buildFindingPairs(findings);
   let fid = state.fid;
 
       // === Episode Clustering per Edge ===
@@ -106,20 +113,24 @@ function scoreRdpSessions(state) {
           // Non-user-initiated disconnects are more interesting
           if (s.disconnectReasonCode === "2") { score += 5; flags.push("Admin-forced disconnect"); }
         }
-        // Off-hours scoring: RDP sessions starting outside business hours are more suspicious
+        // Off-hours scoring: RDP sessions starting outside business hours are more suspicious.
+        // Evaluated in UTC. `new Date(naive).getHours()` read BOTH the parse and the hour in
+        // the analyst's local zone, so the same evidence scored differently depending on where
+        // it was opened — an analyst in UTC+8 shifted every off-hours/weekend verdict by 8h.
+        // normalizeTimestamp treats a zone-less timestamp as UTC, matching the app convention.
         if (s.startTime) {
-          try {
-            const d = new Date(s.startTime);
-            if (!isNaN(d.getTime())) {
-              const hour = d.getHours();
-              const dow = d.getDay(); // 0=Sun, 6=Sat
-              const isWeekend = dow === 0 || dow === 6;
-              const isOffHours = hour < 6 || hour >= 22; // before 6 AM or after 10 PM
-              if (isWeekend && isOffHours) { score += 15; flags.push(`Weekend off-hours (${["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][dow]} ${hour}:00)`); }
-              else if (isWeekend) { score += 8; flags.push(`Weekend (${["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][dow]})`); }
-              else if (isOffHours) { score += 10; flags.push(`Off-hours (${hour}:00)`); }
-            }
-          } catch {}
+          const ms = normalizeTimestamp(s.startTime);
+          if (Number.isFinite(ms)) {
+            const d = new Date(ms);
+            const hour = d.getUTCHours();
+            const dow = d.getUTCDay(); // 0=Sun, 6=Sat
+            const isWeekend = dow === 0 || dow === 6;
+            const isOffHours = hour < 6 || hour >= 22; // before 6 AM or after 10 PM
+            const dayName = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][dow];
+            if (isWeekend && isOffHours) { score += 15; flags.push(`Weekend off-hours (${dayName} ${hour}:00 UTC)`); }
+            else if (isWeekend) { score += 8; flags.push(`Weekend (${dayName} UTC)`); }
+            else if (isOffHours) { score += 10; flags.push(`Off-hours (${hour}:00 UTC)`); }
+          }
         }
         // Missing expected events
         if (s.missingExpected && s.missingExpected.length > 0) { score += 5; flags.push(`Missing ${s.missingExpected.join(", ")}`); }
@@ -292,8 +303,6 @@ function scoreRdpSessions(state) {
             cs._session._concurrentTargets = targets.filter(t => t !== cs.target);
           }
         }
-        // Re-sort findings by severity after adding concurrent findings
-        findings.sort((a, b) => (sevOrder[a.severity] ?? 4) - (sevOrder[b.severity] ?? 4));
       }
 
 

@@ -673,6 +673,11 @@ const EVTX_WELL_KNOWN_DATA_FIELDS = [
   "TaskName", "TaskContent", "TaskContentNew",
   "ShareName", "ShareLocalPath", "RelativeTargetName", "AccessMask", "AccessList",
   "ClientName", "ClientAddress", "SessionID", "Param1", "Param2", "Param3",
+  // TerminalServices-LocalSessionManager UserData leaves. Unlike RemoteConnectionManager
+  // (which uses Param1/2/3), LSM names them directly, and EID 39/40 add Reason/Session.
+  // Without these, a TerminalServices tab whose first SAMPLE_LIMIT records happen to be
+  // some other event type loses its source address entirely.
+  "Address", "User", "Reason", "Session", "TargetSession",
 ];
 
 function unique(values) {
