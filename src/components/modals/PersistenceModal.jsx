@@ -9,6 +9,9 @@ import { DraggableResizableModal } from "../primitives/index.js";
 import useModalChrome from "../../hooks/useModalChrome.js";
 import { buildPillsByRowid } from "../../utils/evidence-pills.js";
 import { updateModal } from "../../modals/modalRegistry.js";
+import {
+  PA_EVTX_RULES, PA_REG_RULES, PA_EVTX_PRESETS, PA_REG_PRESETS, PA_INTENTS, paRuleLabel,
+} from "../../constants/persistenceRuleCatalog.mjs";
 
 // Animated count-up for the results stat cards — eases 0 → value on mount/value change.
 function CountUp({ value, duration = 550 }) {
@@ -76,6 +79,10 @@ export default function PersistenceModal() {
   // Shared modal styles (replicate the `ms` object from App.jsx)
   const ms = useModalChrome();
 
+  // Other imported tabs available to merge into a multi-source scan. A KAPE package is not
+  // one file: the 7045 lives in System.evtx, the 4688 that corroborates it in Security.evtx.
+  const otherTabs = tabs.filter((t) => t.dataReady && t.id !== ct?.id);
+
   // ── Guard: only render when persistence modal is active ────────────
   if (modal?.type !== "persistence" || !ct) return null;
 
@@ -90,6 +97,42 @@ export default function PersistenceModal() {
   // Evidence-pill colors: pure brand palette — accent for the strongest signal (execution
   // corroboration), neutral grays for the rest. No blue/green "mixing" (Unit 42 theme).
   const PA_PILL_COLORS = { execution: th.accent, context: th.textMuted, correlation: th.textMuted, target: th.textMuted };
+
+  // ── Typography scale for the findings table + detail panel ─────────────────
+  // ONE three-step size ramp (9 pill / 10 label / 11 value), TWO weights, THREE
+  // text colors. Everything in the table and the detail panel derives from here
+  // so rows can't drift into mixed sizes/weights/families again.
+  //
+  //   size    9 → pills & badges       10 → column headers, field labels
+  //          11 → every value (cells, detail values)
+  //   weight 600 → headers, labels, pill text, the risk number   400 → all values
+  //   color  th.text    → the value that carries the finding (detection, artifact)
+  //          th.textDim → supporting values (category, path, time, host, user)
+  //          th.textMuted → headers and labels
+  //
+  // Severity/risk color is confined to the severity pill, the risk number, and the
+  // row's left border. Value TEXT is never severity-colored — the row already shows
+  // severity three other ways, and coloring the artifact was the main source of the
+  // "some red, some white, some bold" inconsistency.
+  const PA_SANS = "-apple-system, BlinkMacSystemFont, sans-serif";
+  const PA_MONO = "SF Mono, Menlo, monospace";
+  const PA_SZ = { pill: 9, label: 10, value: 11 };
+  const PA_W = { strong: 600, normal: 400 };
+  // Machine data reads as monospace; prose (category, detection name) reads as sans.
+  const PA_MONO_COLS = new Set(["artifact", "command", "timestamp", "computer", "user", "source"]);
+  // The two columns that carry the finding get full-contrast text; the rest support it.
+  const PA_STRONG_COLS = new Set(["name", "artifact"]);
+  const paPill = (color, bg) => ({
+    fontSize: PA_SZ.pill, fontWeight: PA_W.strong, fontFamily: PA_SANS,
+    padding: "1px 5px", borderRadius: 3, whiteSpace: "nowrap", flexShrink: 0,
+    color, background: bg !== undefined ? bg : color + "1f",
+  });
+  const paLabel = { fontSize: PA_SZ.label, fontWeight: PA_W.strong, fontFamily: PA_SANS, color: th.textMuted, flexShrink: 0 };
+  const paValue = { fontSize: PA_SZ.value, fontWeight: PA_W.normal, fontFamily: PA_MONO, color: th.text };
+  const paMeta = { fontSize: PA_SZ.label, fontWeight: PA_W.normal, fontFamily: PA_SANS, color: th.textDim };
+  // Section caption — matches the existing "REGISTRY COVERAGE" captions in this modal.
+  const paCaption = { fontSize: PA_SZ.label, fontWeight: PA_W.strong, fontFamily: PA_SANS, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em" };
+  const paRiskColor = (n) => (n >= 8 ? th.sev.critical : n >= 6 ? th.sev.high : th.textMuted);
   const PA_CAT_MITRE = { "Services": "T1543.003", "Scheduled Tasks": "T1053.005", "WMI Persistence": "T1546.003", "Run Keys": "T1547.001", "Registry Autorun": "T1547.001", "Registry Modification": "T1547.001", "Winlogon": "T1547.004", "AppInit DLLs": "T1546.010", "IFEO": "T1546.012", "COM Hijacking": "T1546.015", "Shell Extensions": "T1546.015", "Boot Execute": "T1547.002", "BHO": "T1176", "LSA": "T1556.002", "Print Monitors": "T1547.010", "Active Setup": "T1547.014", "Startup Folder": "T1547.009", "DLL Hijacking": "T1574.001", "Driver Loading": "T1543.003", "Process Tampering": "T1055", "Account Persistence": "T1136", "Domain Persistence": "T1484", "Network Providers": "T1556", "Scheduled Tasks (Reg)": "T1053.005", "Registry Rename": "T1112", "Silent Process Exit": "T1546.012", "Logon Script": "T1037.001", "AppCert DLLs": "T1546.009", "Credential Providers": "T1556", "Command Processor": "T1547.001", "Explorer Autoruns": "T1547.001", "Netsh Helper DLLs": "T1546.007", "Screensaver": "T1546.002", "Office Add-ins": "T1137.006", "Time Providers": "T1547.003", "Terminal Server": "T1547", "File Association": "T1546.001", "Group Policy Scripts": "T1037.001", "Security Support Provider": "T1547.005", "Environment Hijack": "T1574.012", "Defender Tampering": "T1562.001" };
   const PA_MITRE_MAP = {
     "T1543.003": { name: "Create or Modify System Process: Windows Service", url: "https://attack.mitre.org/techniques/T1543/003/" },
@@ -149,43 +192,15 @@ export default function PersistenceModal() {
   };
   const formatItemText = (i) => `[${i.severity.toUpperCase()}] ${i.name}\t${i.detailsSummary}\t${i.timestamp || "N/A"}\t${i.computer || "N/A"}\t${i.user || "N/A"}\t${i.source}\t${i.riskScore}/10`;
 
-  // Rule summaries for display (source of truth is in db.js)
-  const EVTX_SUMMARIES = [
-    { cat: "Services", name: "Service Installed", sev: "high", hint: "7045" },
-    { cat: "Services", name: "Service Installed (Security)", sev: "high", hint: "4697" },
-    { cat: "Scheduled Tasks", name: "Task Created", sev: "high", hint: "4698" },
-    { cat: "Scheduled Tasks", name: "Task Deleted", sev: "medium", hint: "4699" },
-    { cat: "Scheduled Tasks", name: "Task Registered", sev: "medium", hint: "106" },
-    { cat: "Scheduled Tasks", name: "Task Updated", sev: "medium", hint: "140" },
-    { cat: "Scheduled Tasks", name: "Task Process Created", sev: "high", hint: "129" },
-    { cat: "Scheduled Tasks", name: "Task Action Started", sev: "medium", hint: "200" },
-    { cat: "WMI Persistence", name: "WMI Event Subscription", sev: "critical", hint: "5861" },
-    { cat: "WMI Persistence", name: "WMI EventFilter Created", sev: "critical", hint: "19" },
-    { cat: "WMI Persistence", name: "WMI EventConsumer Created", sev: "critical", hint: "20" },
-    { cat: "WMI Persistence", name: "WMI Binding Created", sev: "critical", hint: "21" },
-    { cat: "Registry Autorun", name: "Registry Value Set", sev: "high", hint: "13" },
-    { cat: "Registry Modification", name: "Registry Key Created/Deleted", sev: "medium", hint: "12" },
-    { cat: "Registry Rename", name: "Registry Key/Value Renamed", sev: "medium", hint: "14" },
-    { cat: "Startup Folder", name: "File Created in Startup", sev: "high", hint: "11" },
-    { cat: "DLL Hijacking", name: "Unsigned DLL Loaded", sev: "medium", hint: "7" },
-    { cat: "Driver Loading", name: "Suspicious Driver Loaded", sev: "critical", hint: "6" },
-    { cat: "Process Tampering", name: "Process Tampering Detected", sev: "critical", hint: "25" },
-    { cat: "Scheduled Tasks", name: "Task Deleted", sev: "high", hint: "141" },
-    { cat: "Scheduled Tasks", name: "Boot Trigger Fired", sev: "medium", hint: "118" },
-    { cat: "Scheduled Tasks", name: "Logon Trigger Fired", sev: "medium", hint: "119" },
-    { cat: "Account Persistence", name: "User Account Created", sev: "high", hint: "4720" },
-    { cat: "Account Persistence", name: "Member Added to Global Group", sev: "critical", hint: "4728" },
-    { cat: "Account Persistence", name: "Member Added to Local Group", sev: "high", hint: "4732" },
-    { cat: "Account Persistence", name: "Member Added to Universal Group", sev: "critical", hint: "4756" },
-    { cat: "Account Persistence", name: "User Password Reset", sev: "medium", hint: "4724" },
-    { cat: "Account Persistence", name: "User Account Changed", sev: "high", hint: "4738" },
-    { cat: "Domain Persistence", name: "AD Object Modified", sev: "high", hint: "5136" },
-    { cat: "Domain Persistence", name: "AD Object Created", sev: "medium", hint: "5137" },
-    { cat: "Domain Persistence", name: "AD Object Deleted", sev: "high", hint: "5141" },
-    { cat: "Registry Autorun", name: "Registry Value Modified (4657)", sev: "high", hint: "4657" },
-    { cat: "Services", name: "Service StartType Changed", sev: "high", hint: "7040" },
-    { cat: "Scheduled Tasks", name: "Task Updated (Security)", sev: "medium", hint: "4702" },
-  ];
+  // Rule catalog — MIRRORED from the analyzer via src/constants/persistenceRuleCatalog.mjs.
+  // Rules are addressed positionally (`evtx-<i>` / `reg-<i>`), so this list must stay
+  // index-for-index with electron/analyzers/persistence/rules.js; it used to be maintained
+  // by hand here and had drifted three rules out of alignment (unchecking "Registry Value
+  // Modified (4657)" disabled the 7040 service rule) while 13 rules had no entry at all and
+  // were therefore invisible and impossible to disable. tests/persistence-rule-catalog.test.js
+  // now fails the build on any drift.
+  const EVTX_SUMMARIES = PA_EVTX_RULES;
+  const REG_SUMMARIES = PA_REG_RULES;
   // Default display order for the EVTX rule catalog: severity-first (Critical → High →
   // Medium → Low). Each entry keeps its ORIGINAL index `i` because the enable/disable
   // toggle, presets, and intents key off positional `evtx-${i}` IDs — reordering only the
@@ -195,30 +210,6 @@ export default function PersistenceModal() {
   const EVTX_SUMMARIES_SORTED = EVTX_SUMMARIES
     .map((r, i) => ({ r, i }))
     .sort((a, b) => (_evtxSevRank[a.r.sev] ?? 9) - (_evtxSevRank[b.r.sev] ?? 9));
-  const REG_SUMMARIES = [
-    { cat: "Run Keys", name: "Run/RunOnce Autostart", sev: "high", hint: "Run, RunOnce" },
-    { cat: "Services", name: "Service ImagePath/ServiceDll", sev: "high", hint: "Services\\" },
-    { cat: "Winlogon", name: "Winlogon Shell/Userinit", sev: "critical", hint: "Winlogon" },
-    { cat: "AppInit DLLs", name: "AppInit_DLLs", sev: "critical", hint: "AppInit_DLLs" },
-    { cat: "IFEO", name: "IFEO Debugger", sev: "critical", hint: "Image File Exec Opts" },
-    { cat: "COM Hijacking", name: "COM Object Server", sev: "high", hint: "InprocServer32" },
-    { cat: "Shell Extensions", name: "Shell Extension Handler", sev: "medium", hint: "Shell handlers" },
-    { cat: "Boot Execute", name: "Session Manager BootExecute", sev: "critical", hint: "Session Manager" },
-    { cat: "BHO", name: "Browser Helper Object", sev: "medium", hint: "Browser Helper" },
-    { cat: "LSA", name: "LSA Security/Auth Packages", sev: "critical", hint: "Lsa" },
-    { cat: "Print Monitors", name: "Print Monitor DLL", sev: "high", hint: "Print\\Monitors" },
-    { cat: "Active Setup", name: "Active Setup StubPath", sev: "high", hint: "Active Setup" },
-    { cat: "Startup Folder", name: "Startup Folder Registry Path", sev: "high", hint: "Shell Folders" },
-    { cat: "Scheduled Tasks (Reg)", name: "Scheduled Task in Registry", sev: "medium", hint: "TaskCache" },
-    { cat: "Network Providers", name: "Network Provider Order", sev: "high", hint: "NetworkProvider" },
-    { cat: "Logon Script", name: "User Logon Script (Environment)", sev: "high", hint: "UserInitMprLogonScript" },
-    { cat: "AppCert DLLs", name: "AppCert DLL", sev: "critical", hint: "AppCertDlls" },
-    { cat: "Silent Process Exit", name: "Silent Process Exit Monitor", sev: "critical", hint: "SilentProcessExit" },
-    { cat: "Credential Providers", name: "Credential Provider Registration", sev: "high", hint: "Credential Providers" },
-    { cat: "Command Processor", name: "Command Processor AutoRun", sev: "high", hint: "Command Processor" },
-    { cat: "Explorer Autoruns", name: "ShellServiceObjectDelayLoad", sev: "high", hint: "ShellServiceObjectDelayLoad" },
-    { cat: "Netsh Helper DLLs", name: "Netsh Helper DLL", sev: "high", hint: "Netsh" },
-  ];
   const toggleRule = (key) => setModal((p) => { const s = new Set(p.disabledRules || []); s.has(key) ? s.delete(key) : s.add(key); return { ...p, disabledRules: s }; });
   const deleteCustomRule = (idx) => setModal((p) => ({ ...p, customRules: (p.customRules || []).filter((_, i) => i !== idx) }));
   const addCustomRule = () => {
@@ -236,28 +227,24 @@ export default function PersistenceModal() {
   const customCount = (modal.customRules || []).length;
 
   // --- Technique Preset Cards ---
-  const PA_EVTX_PRESETS = [
-    { id: "svc", name: "Services & Drivers", desc: "Service install + driver load + start type change — flags non-standard paths, RMM tools, PsExec",
-      rules: [0, 1, 17, 32], icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9"/></svg> },
-    { id: "task", name: "Scheduled Tasks", desc: "Task creation, deletion, triggers — GUID tasks, LOLBin actions, boot/logon triggers",
-      rules: [2, 3, 4, 5, 6, 7, 19, 20, 21, 33], icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> },
-    { id: "wmi", name: "WMI Persistence", desc: "Event consumers/subscriptions — high-confidence persistence indicator",
-      rules: [8, 9, 10, 11], icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg> },
-    { id: "regsys", name: "Registry & Startup", desc: "Autorun value sets, key changes, startup folder drops via Sysmon",
-      rules: [12, 13, 14, 15], icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg> },
-    { id: "adv", name: "Advanced Detection", desc: "DLL hijacking + process tampering — noisier but catches stealth techniques",
-      rules: [16, 18], icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg> },
-  ];
-  const PA_REG_PRESETS = [
-    { id: "core", name: "Core Autoruns", desc: "Run/RunOnce, service ImagePath, Winlogon shell/userinit, boot execute",
-      rules: [0, 1, 2, 7], icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg> },
-    { id: "stealth", name: "Stealth Locations", desc: "AppInit DLLs, IFEO debugger hijack, COM, LSA packages, print monitors, network providers, cmd AutoRun, Netsh helpers",
-      rules: [3, 4, 5, 9, 10, 14, 19, 21], icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg> },
-    { id: "shell", name: "Shell & Browser", desc: "Explorer shell extensions, browser helper objects, ShellServiceObjectDelayLoad",
-      rules: [6, 8, 20], icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg> },
-    { id: "supp", name: "Supplementary", desc: "Active Setup stub paths, startup folder registry, task definitions",
-      rules: [11, 12, 13], icon: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg> },
-  ];
+  // Which rules each card selects lives in the shared catalog next to the rule list, so
+  // a rule change and its preset wiring are reviewed together and index drift is caught
+  // by tests/persistence-rule-catalog.test.js. Only the artwork stays here.
+  const PA_PRESET_ICONS = {
+    svc: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9"/></svg>,
+    task: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>,
+    wmi: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><path d="M2 17l10 5 10-5M2 12l10 5 10-5"/></svg>,
+    regsys: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/><path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/></svg>,
+    adv: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>,
+    remote: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="2" y="3" width="20" height="7" rx="1"/><rect x="2" y="14" width="20" height="7" rx="1"/><line x1="6" y1="6.5" x2="6.01" y2="6.5"/><line x1="6" y1="17.5" x2="6.01" y2="17.5"/></svg>,
+    defender: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><line x1="9" y1="12" x2="15" y2="12"/></svg>,
+    core: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/></svg>,
+    stealth: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>,
+    shell: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>,
+    supp: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><line x1="8" y1="6" x2="21" y2="6"/><line x1="8" y1="12" x2="21" y2="12"/><line x1="8" y1="18" x2="21" y2="18"/><line x1="3" y1="6" x2="3.01" y2="6"/><line x1="3" y1="12" x2="3.01" y2="12"/><line x1="3" y1="18" x2="3.01" y2="18"/></svg>,
+    hijack: <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71"/></svg>,
+  };
+  const withIcon = (presets) => presets.map((p) => ({ ...p, icon: PA_PRESET_ICONS[p.id] }));
   const paPresetState = (presetRules, prefix, disSet) => {
     const offCount = presetRules.filter(i => disSet.has(`${prefix}-${i}`)).length;
     return offCount === 0 ? "on" : offCount === presetRules.length ? "off" : "partial";
@@ -270,13 +257,7 @@ export default function PersistenceModal() {
     return { ...p, disabledRules: s };
   });
 
-  // --- Intent Selector ---
-  const PA_INTENTS = [
-    { id: "low-noise", label: "Low-noise triage", desc: "High-confidence only — services, WMI, core autoruns, account creation, high-value AD changes",
-      disabled: new Set(["evtx-3","evtx-4","evtx-5","evtx-7","evtx-13","evtx-14","evtx-16","evtx-19","evtx-20","evtx-21","evtx-26","evtx-27","evtx-29","evtx-31","reg-6","reg-8","reg-11","reg-12","reg-13"]) },
-    { id: "balanced", label: "Balanced", desc: "Recommended — all detection categories enabled", disabled: new Set() },
-    { id: "broad", label: "Broad hunt", desc: "Maximum coverage — includes DLL hijacking and task lifecycle", disabled: new Set() },
-  ];
+  // --- Intent Selector (rule ids live in the shared catalog) ---
   const applyPaIntent = (intent) => setModal((p) => ({ ...p, disabledRules: new Set(intent.disabled), paIntent: intent.id }));
   const resetPaRules = () => setModal((p) => ({ ...p, disabledRules: new Set(), paIntent: "balanced" }));
 
@@ -294,7 +275,12 @@ export default function PersistenceModal() {
     { label: "AD Objects", eids: ["5136","5137","5141"], detector: "Domain persistence (AD object changes)" },
     { label: "Reg 4657", eids: ["4657"], detector: "Registry autorun (Security 4657 fallback)" },
     { label: "PS 4104", eids: ["4104"], detector: "PowerShell script block persistence" },
+    { label: "Defender", eids: ["5001", "5007", "5010", "5012", "5101"], detector: "Defender tampering (exclusions, protection disabled)" },
+    { label: "Remote Exec", eids: ["5857", "5858", "5860", "145", "161", "169"], detector: "WinRM / WMI operations attributed to another machine" },
+    { label: "Inbound Logon", eids: ["4624"], detector: "Network/RDP logons — used to attribute persistence to the pivot that planted it" },
   ];
+  // Registry coverage chips. Each label must exist as a group label in the analyzer's
+  // previewPersistenceAnalysis regGroups, or the chip can only ever render 0.
   const PA_REG_GROUPS = [
     { label: "Run Keys" }, { label: "Services" }, { label: "Winlogon" }, { label: "IFEO" },
     { label: "COM Objects" }, { label: "Scheduled Tasks" }, { label: "Boot Execute" },
@@ -302,6 +288,9 @@ export default function PersistenceModal() {
     { label: "Print Monitors" }, { label: "Active Setup" }, { label: "BHO" }, { label: "Network Providers" },
     { label: "Logon Script" }, { label: "AppCert DLLs" }, { label: "Silent Process Exit" }, { label: "Credential Providers" },
     { label: "Command Processor" }, { label: "Explorer Autoruns" }, { label: "Netsh Helper DLLs" },
+    { label: "Screensaver" }, { label: "Office Add-ins" }, { label: "Time Providers" }, { label: "Terminal Server" },
+    { label: "File Association" }, { label: "Group Policy Scripts" }, { label: "Security Support Provider" },
+    { label: "COM TreatAs" }, { label: "Defender Tampering" },
   ];
 
   // --- Skip/Reduced-Confidence Warnings ---
@@ -319,6 +308,7 @@ export default function PersistenceModal() {
       if (!has(["4104"])) warnings.push({ level: "info", text: "No PowerShell 4104 (ScriptBlock) events — PowerShell persistence detection unavailable" });
       if (!has(["5136","5137","5141"])) warnings.push({ level: "info", text: "No AD object events (5136/5137/5141) — domain persistence detection unavailable" });
       if (!has(["4738"])) warnings.push({ level: "info", text: "No 4738 events — user account modification detection unavailable" });
+      if (!has(["5001", "5007", "5010", "5012", "5101"])) warnings.push({ level: "info", text: "No Defender events (5001/5007/5010/5012/5101) — AV tampering detection unavailable" });
     }
     if (mode === "registry" || mode === "auto") {
       if (evCounts && Object.values(evCounts).every(v => v === 0)) warnings.push({ level: "error", text: "No persistence-related registry keys found in dataset" });
@@ -389,6 +379,48 @@ export default function PersistenceModal() {
     refreshPaPreview();
   }
 
+  // Multi-source preview: what each selected tab contributes (shape + which correlation
+  // events only it can supply). Refreshed whenever the tab selection changes.
+  if (modal._paNeedsMultiPreview) {
+    setModal((p) => ({ ...p, _paNeedsMultiPreview: false }));
+    if (tle?.previewMultiSourcePersistence && ct) {
+      const ids = [ct.id, ...(modal.paSelectedTabIds || [])];
+      const tabLabels = {};
+      for (const t of tabs) tabLabels[t.id] = t.name;
+      tle.previewMultiSourcePersistence(ids, { _tabLabels: tabLabels })
+        .then((prev) => setModal(updateModal("persistence", () => (isIpcError(prev) ? null : { paMultiPreview: prev }))))
+        .catch(() => { /* preview is advisory — a failure must not block the scan */ });
+    }
+  }
+
+  // Shared completion path for both the job-backed and the direct-invoke route.
+  const applyPersistenceResult = async (payload, pInt) => {
+    clearInterval(pInt);
+    tle?.removeAllListeners?.("persistence-analysis-complete");
+    if (payload?.cancelled) {
+      setModal(updateModal("persistence", { phase: "config", loading: false, progress: 0, _paJobId: null }));
+      return;
+    }
+    const result = payload?.result ?? payload;
+    const errMsg = payload?.error || (isIpcError(result) ? ipcErrorMessage(result) : null);
+    if (errMsg) {
+      setModal(updateModal("persistence", (p) => !p._cancelled ? { phase: "config", loading: false, error: errMsg, progress: 0, _paJobId: null } : null));
+      return;
+    }
+    setModal(updateModal("persistence", (p) => !p._cancelled ? { progress: 100, phaseIdx: 3 } : null));
+    await new Promise((r) => setTimeout(r, 250));
+    setModal(updateModal("persistence", (p) => !p._cancelled ? { phase: "results", data: result, loading: false, _paJobId: null } : null));
+    // Distribute incident-level evidence pills to per-row map so the main
+    // grid can render an Evidence column. Replaces any prior persistence
+    // pill state on this tab — re-running re-derives from fresh results.
+    //
+    // Skipped for a merged run: every tab's rowids start at 1, so a pill keyed on rowid
+    // alone would decorate whichever unrelated row happens to share that number in the
+    // current tab. Clear instead of mis-attributing.
+    const pillsMap = result?.multiSource ? {} : buildPillsByRowid(result?.incidents || []);
+    useTabStore.getState().updateTab(ct.id, { evidencePillsByRowid: pillsMap });
+  };
+
   const handleAnalyze = async () => {
     const t0 = Date.now();
     const pInt = setInterval(() => {
@@ -400,10 +432,10 @@ export default function PersistenceModal() {
         return { ...p, progress: prog, phaseIdx: pi };
       });
     }, 150);
-    setModal((p) => ({ ...p, phase: "loading", loading: true, error: null, progress: 0, phaseIdx: 0, _cancelled: false }));
+    setModal((p) => ({ ...p, phase: "loading", loading: true, error: null, progress: 0, phaseIdx: 0, _cancelled: false, _paJobId: null }));
     try {
       const af = activeFilters(ct);
-      const result = await tle.getPersistenceAnalysis(ct.id, {
+      const options = {
         mode: pMode === "auto" ? "auto" : pMode,
         columns: modal.columns || {},
         searchTerm: ct.searchHighlight ? "" : ct.searchTerm, searchMode: ct.searchMode, searchCondition: ct.searchCondition || "contains",
@@ -411,23 +443,93 @@ export default function PersistenceModal() {
         bookmarkedOnly: ct.showBookmarkedOnly, dateRangeFilters: ct.dateRangeFilters || {}, advancedFilters: ct.advancedFilters || [],
         disabledRules: [...(modal.disabledRules || [])],
         customRules: modal.customRules || [],
-      });
-      clearInterval(pInt);
-      if (isIpcError(result)) {
-        setModal(updateModal("persistence", (p) => !p._cancelled ? { phase: "config", loading: false, error: ipcErrorMessage(result), progress: 0 } : null));
+      };
+
+      // A collection scan reads a FOLDER, not this tab, so nothing tab-scoped applies.
+      const collectionDir = modal.paCollection?.dir && !modal.paCollection?.scan?.error ? modal.paCollection.dir : null;
+
+      // Multi-source merges several tabs into one analysis so a finding in one file can be
+      // corroborated by events in another. Row-level column overrides and this tab's grid
+      // filters are single-tab concepts, so they are not forwarded.
+      const multiTabIds = (!collectionDir && modal.paMultiSource && (modal.paSelectedTabIds || []).length > 0)
+        ? [ct.id, ...modal.paSelectedTabIds]
+        : null;
+      if (collectionDir) {
+        delete options.columns;
+        for (const k of ["searchTerm", "searchMode", "searchCondition", "columnFilters",
+          "checkboxFilters", "bookmarkedOnly", "dateRangeFilters", "advancedFilters"]) {
+          delete options[k];
+        }
+      }
+      if (multiTabIds) {
+        const tabLabels = {};
+        for (const t of tabs) tabLabels[t.id] = t.name;
+        options._tabLabels = tabLabels;
+        // Column overrides and this tab's grid scope (search, column/date filters,
+        // bookmarks) describe ONE tab. Applied across a merge they would quietly shrink
+        // every other tab's contribution by a predicate that means nothing there — and the
+        // corroborating 4688 you filtered out is exactly what the merge exists to find.
+        delete options.columns;
+        for (const k of ["searchTerm", "searchMode", "searchCondition", "columnFilters",
+          "checkboxFilters", "bookmarkedOnly", "dateRangeFilters", "advancedFilters"]) {
+          delete options[k];
+        }
+      }
+
+      // Prefer the job-backed route: it hands back a jobId so Cancel can actually
+      // terminate the analyzer worker instead of only hiding the modal.
+      if (tle?.startPersistenceAnalysis && tle?.onPersistenceAnalysisComplete) {
+        tle.removeAllListeners?.("persistence-analysis-complete");
+        tle.onPersistenceAnalysisComplete((payload = {}) => {
+          const currentModal = useUIStore.getState?.().modal;
+          if (currentModal?.type !== "persistence") return;
+          if (currentModal._paJobId && payload.jobId && currentModal._paJobId !== payload.jobId) return;
+          applyPersistenceResult(payload, pInt);
+        });
+        const started = collectionDir && tle.analyzeKapeCollection
+          ? await tle.analyzeKapeCollection(collectionDir, options)
+          : multiTabIds && tle.startMultiSourcePersistence
+            ? await tle.startMultiSourcePersistence(multiTabIds, options)
+            : await tle.startPersistenceAnalysis(ct.id, options);
+        if (isIpcError(started)) throw new Error(ipcErrorMessage(started));
+        // No worker available in this build — the handler ran it inline and returned it.
+        if (started?.result || started?.error) {
+          await applyPersistenceResult(started, pInt);
+          return;
+        }
+        if (!started?.jobId) throw new Error("Persistence analysis job did not start");
+        setModal((p) => p?.type === "persistence" ? { ...p, _paJobId: started.jobId } : p);
       } else {
-        setModal(updateModal("persistence", (p) => !p._cancelled ? { progress: 100, phaseIdx: 3 } : null));
-        await new Promise((r) => setTimeout(r, 250));
-        setModal(updateModal("persistence", (p) => !p._cancelled ? { phase: "results", data: result, loading: false } : null));
-        // Distribute incident-level evidence pills to per-row map so the main
-        // grid can render an Evidence column. Replaces any prior persistence
-        // pill state on this tab — re-running re-derives from fresh results.
-        const pillsMap = buildPillsByRowid(result.incidents || []);
-        useTabStore.getState().updateTab(ct.id, { evidencePillsByRowid: pillsMap });
+        const result = collectionDir && tle.analyzeKapeCollection
+          ? (await tle.analyzeKapeCollection(collectionDir, options))?.result
+          : multiTabIds && tle.getMultiSourcePersistence
+            ? await tle.getMultiSourcePersistence(multiTabIds, options)
+            : await tle.getPersistenceAnalysis(ct.id, options);
+        await applyPersistenceResult({ result }, pInt);
       }
     } catch (e) {
       clearInterval(pInt);
-      setModal(updateModal("persistence", { phase: "config", loading: false, error: e.message, progress: 0 }));
+      tle?.removeAllListeners?.("persistence-analysis-complete");
+      setModal(updateModal("persistence", { phase: "config", loading: false, error: e.message, progress: 0, _paJobId: null }));
+    }
+  };
+
+  // Auto-run when Process Inspector (or another feature) hands off with _paAutoRun.
+  if (modal._paAutoRun && modal.phase === "config" && !modal.loading) {
+    setModal((p) => ({ ...p, _paAutoRun: false }));
+    setTimeout(() => handleAnalyze(), 80);
+  }
+
+  // Stop the analyzer worker, don't just navigate away from it.
+  const handleCancelAnalyze = async () => {
+    const currentModal = useUIStore.getState?.().modal;
+    const jobId = (currentModal?.type === "persistence" ? currentModal._paJobId : null) || modal._paJobId;
+    tle?.removeAllListeners?.("persistence-analysis-complete");
+    setModal((p) => p?.type === "persistence"
+      ? { ...p, phase: "config", loading: false, progress: 0, phaseIdx: 0, _cancelled: true, _paJobId: null }
+      : p);
+    if (jobId && tle?.cancelJob) {
+      try { await tle.cancelJob(jobId); } catch { /* worker already finished or gone */ }
     }
   };
 
@@ -487,6 +589,29 @@ export default function PersistenceModal() {
     }
     paGroupedEntries = [...gm.entries()].sort((a, b) => Math.max(...b[1].map(i => i.triageScore || 0)) - Math.max(...a[1].map(i => i.triageScore || 0)));
   }
+
+  // The results toolbar must act on what is actually on screen. The default landing view
+  // (Alerts + Grouped) lists INCIDENTS; every other view lists items. Exporting/selecting
+  // filteredItems regardless meant "Select All (N)" showed an item count next to a list of
+  // incidents, and "↓ CSV" wrote a different set of rows than the analyst was looking at.
+  const paShowingIncidents = paFindingsView === "alerts" && viewTab === "grouped";
+  const paVisibleRows = paShowingIncidents ? sortedIncidents : filteredItems;
+  // Checkbox state is per-item (rowid|name|timestamp), so selecting a visible incident
+  // means selecting the items it clustered.
+  const paSelectableItems = paShowingIncidents
+    ? sortedIncidents.flatMap((inc) => inc.items || [])
+    : filteredItems;
+  // Row -> flat export record. Incidents and items expose different field names for the
+  // same concepts (title/name, firstSeen/timestamp, triageScore/riskScore), so both shapes
+  // map onto one CSV schema.
+  const paExportRow = (row) => ({
+    Severity: row.severity || "", Category: row.category || "", Name: row.name || row.title || "",
+    Computer: row.computer || "", User: row.user || "", Timestamp: row.timestamp || row.firstSeen || "",
+    Artifact: row.artifact || "", Command: row.command || "", Source: row.source || "",
+    RiskScore: row.triageScore ?? row.riskScore ?? "", Occurrences: row.occurrenceCount ?? "",
+    Description: row.detailsSummary || row.description || "",
+    SuspiciousReasons: Array.isArray(row.suspiciousReasons) ? row.suspiciousReasons.join("; ") : "",
+  });
 
   // --- Pivot handlers ---
   const _paBtnS = { padding: "2px 8px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 4, fontSize: 9, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 };
@@ -677,6 +802,148 @@ export default function PersistenceModal() {
                 );
               })()}
 
+              {/* Analyze a whole KAPE collection folder */}
+              {tle?.selectKapeCollection && (
+                <div style={{ padding: "10px 14px", background: modal.paCollection ? `${th.accent}08` : `${th.panelBg}55`, border: `1px solid ${modal.paCollection ? th.accent + "33" : th.border + "22"}`, borderRadius: 10, marginBottom: 12, transition: "all var(--m-base)" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 10 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={modal.paCollection ? th.accent : th.textDim} strokeWidth="2" strokeLinecap="round">
+                        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"/>
+                      </svg>
+                      <div style={{ minWidth: 0 }}>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif" }}>Analyze KAPE Collection</div>
+                        <div style={{ fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif", marginTop: 1 }}>
+                          Point at a triage folder to read the scheduled-task definitions on disk — every registered task, including ones that never fired, with Hidden/RunLevel/COM-handler/triggers read rather than inferred.
+                        </div>
+                      </div>
+                    </div>
+                    <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
+                      {modal.paCollection && (
+                        <button onClick={() => setModal((p) => ({ ...p, paCollection: null }))}
+                          style={{ fontSize: 9, padding: "3px 8px", borderRadius: 5, background: "transparent", color: th.textMuted, border: `1px solid ${th.border}44`, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}>Clear</button>
+                      )}
+                      <button onClick={async () => {
+                        try {
+                          const res = await tle.selectKapeCollection();
+                          if (isIpcError(res)) { toast.error("Could not open that folder", { detail: ipcErrorMessage(res) }); return; }
+                          if (res?.canceled) return;
+                          setModal(updateModal("persistence", () => ({ paCollection: { dir: res.dir, scan: res.scan } })));
+                        } catch (e) { toast.error("Could not open that folder", { detail: e.message }); }
+                      }} style={{ fontSize: 10, padding: "5px 12px", borderRadius: 6, background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 600 }}>
+                        {modal.paCollection ? "Change folder…" : "Choose folder…"}
+                      </button>
+                    </div>
+                  </div>
+                  {modal.paCollection?.scan && (
+                    <div style={{ borderTop: `1px solid ${th.border}22`, marginTop: 8, paddingTop: 8 }}>
+                      <div style={{ fontSize: 10, color: th.textDim, fontFamily: "'SF Mono',Menlo,monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", marginBottom: 5 }}>
+                        {modal.paCollection.dir}
+                      </div>
+                      {modal.paCollection.scan.error ? (
+                        <div style={{ fontSize: 10, color: th.danger, fontFamily: "-apple-system, sans-serif" }}>{modal.paCollection.scan.error}</div>
+                      ) : (() => {
+                        const a = modal.paCollection.scan.artifacts || {};
+                        const chip = (label, n, readable) => (
+                          <span key={label} title={readable ? "Read by this scan" : "Found, but needs importing as a tab"}
+                            style={{ fontSize: 9, padding: "2px 7px", borderRadius: 5, fontFamily: "'SF Mono',Menlo,monospace",
+                              background: n > 0 && readable ? `${th.accent}15` : `${th.border}22`,
+                              color: n > 0 && readable ? th.accent : th.textMuted,
+                              border: `1px solid ${n > 0 && readable ? th.accent + "33" : th.border + "22"}` }}>
+                            {label} {n.toLocaleString()}{n > 0 && !readable ? " ·not read" : ""}
+                          </span>
+                        );
+                        return (
+                          <div style={{ display: "flex", gap: 4, flexWrap: "wrap", alignItems: "center" }}>
+                            <span style={{ fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>
+                              {modal.paCollection.scan.host ? `${modal.paCollection.scan.host} · ` : ""}{modal.paCollection.scan.layout || "unrecognized"} layout
+                            </span>
+                            {chip("tasks", (a.taskXml || []).length, true)}
+                            {chip("registry CSV", (a.moduleCsv || []).filter((c) => c.kind === "recmd-batch" || c.projects).length, true)}
+                            {chip("evtx", (a.evtx || []).length, false)}
+                            {chip("hives", (a.hives || []).length, false)}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {/* Multi-source correlation */}
+              {otherTabs.length > 0 && (
+                <div style={{ padding: "10px 14px", background: modal.paMultiSource ? `${th.accent}08` : `${th.panelBg}55`, border: `1px solid ${modal.paMultiSource ? th.accent + "33" : th.border + "22"}`, borderRadius: 10, marginBottom: 12, transition: "all var(--m-base)" }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: modal.paMultiSource ? 8 : 0 }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={modal.paMultiSource ? th.accent : th.textDim} strokeWidth="2" strokeLinecap="round">
+                        <circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/>
+                        <line x1="9" y1="6" x2="15" y2="6"/><line x1="6" y1="9" x2="6" y2="15"/><line x1="18" y1="9" x2="18" y2="15"/><line x1="9" y1="18" x2="15" y2="18"/>
+                      </svg>
+                      <div>
+                        <div style={{ fontSize: 11, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif" }}>Multi-source Correlation</div>
+                        <div style={{ fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif", marginTop: 1 }}>
+                          A persistence artifact and its corroboration live in different files. Merge Security (4688), Sysmon (1/13), PowerShell (4104) and hive exports so a service install can be confirmed, not just observed.
+                        </div>
+                      </div>
+                    </div>
+                    <button onClick={() => setModal((p) => ({ ...p, paMultiSource: !p.paMultiSource, paSelectedTabIds: p.paSelectedTabIds || [], _paNeedsMultiPreview: !p.paMultiSource }))}
+                      style={{ width: 36, height: 20, borderRadius: 10, border: "none", background: modal.paMultiSource ? th.accent : th.btnBg, cursor: "pointer", position: "relative", transition: "background var(--m-base)", flexShrink: 0 }}>
+                      <div style={{ width: 16, height: 16, borderRadius: 8, background: "#fff", position: "absolute", top: 2, left: modal.paMultiSource ? 18 : 2, transition: "left var(--m-base)", boxShadow: "0 1px 3px rgba(0,0,0,0.3)" }} />
+                    </button>
+                  </div>
+                  {modal.paMultiSource && (
+                    <div style={{ borderTop: `1px solid ${th.border}22`, paddingTop: 8 }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                        <span style={{ fontSize: 9, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "-apple-system, sans-serif" }}>
+                          Select tabs to merge ({(modal.paSelectedTabIds || []).length + 1} of {otherTabs.length + 1})
+                        </span>
+                        <button onClick={() => setModal((p) => ({ ...p, paSelectedTabIds: otherTabs.map((t) => t.id), _paNeedsMultiPreview: true }))}
+                          style={{ fontSize: 9, padding: "2px 7px", borderRadius: 4, background: `${th.accent}12`, color: th.accent, border: `1px solid ${th.accent}25`, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 }}>Select all</button>
+                      </div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 140, overflow: "auto" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 8px", background: `${th.accent}12`, borderRadius: 6, border: `1px solid ${th.accent}22` }}>
+                          <span style={{ color: th.accent, fontSize: 12, width: 14, textAlign: "center" }}>{"✓"}</span>
+                          <span style={{ fontSize: 11, color: th.text, fontFamily: "-apple-system, sans-serif", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{ct.name}</span>
+                          <span style={{ fontSize: 8, color: th.accent, fontFamily: "-apple-system, sans-serif", padding: "1px 5px", background: `${th.accent}15`, borderRadius: 4 }}>current</span>
+                        </div>
+                        {otherTabs.map((t) => {
+                          const sel = (modal.paSelectedTabIds || []).includes(t.id);
+                          // What the preview says this tab brings: its shape, plus which
+                          // correlation events only it can supply.
+                          const info = (modal.paMultiPreview?.tabs || []).find((x) => x.tabId === t.id);
+                          return (
+                            <button key={t.id} onClick={() => setModal((p) => {
+                              const ids = [...(p.paSelectedTabIds || [])];
+                              const idx = ids.indexOf(t.id);
+                              if (idx >= 0) ids.splice(idx, 1); else ids.push(t.id);
+                              return { ...p, paSelectedTabIds: ids, _paNeedsMultiPreview: true };
+                            })}
+                              style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 8px", background: sel ? `${th.accent}08` : "transparent", borderRadius: 6, border: `1px solid ${sel ? th.accent + "22" : th.border + "11"}`, cursor: "pointer", textAlign: "left", transition: "all var(--m-base)" }}>
+                              <span style={{ color: sel ? th.accent : th.textMuted, fontSize: 12, width: 14, textAlign: "center" }}>{sel ? "✓" : "○"}</span>
+                              <span style={{ fontSize: 11, color: sel ? th.text : th.textDim, fontFamily: "-apple-system, sans-serif", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name}</span>
+                              {info?.error && <span title={info.error} style={{ fontSize: 8, color: th.warning, fontFamily: "-apple-system, sans-serif", padding: "1px 5px", background: `${th.warning}15`, borderRadius: 4 }}>unusable</span>}
+                              {info?.mode && <span style={{ fontSize: 8, color: th.textDim, fontFamily: "-apple-system, sans-serif", padding: "1px 5px", background: `${th.border}22`, borderRadius: 4 }}>{info.format || info.mode}</span>}
+                              {(info?.correlationEids || []).length > 0 && (
+                                <span title={`Supplies correlation events ${info.correlationEids.join(", ")}`} style={{ fontSize: 8, color: th.accent, fontFamily: "'SF Mono',Menlo,monospace", padding: "1px 5px", background: `${th.accent}15`, borderRadius: 4 }}>
+                                  +{info.correlationEids.join(",")}
+                                </span>
+                              )}
+                              <span style={{ fontSize: 9, color: th.textMuted, fontFamily: "'SF Mono',Menlo,monospace" }}>{(t.totalRows || 0).toLocaleString()} rows</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      {(modal.paSelectedTabIds || []).length === 0 ? (
+                        <div style={{ fontSize: 10, color: th.warning, marginTop: 6, fontFamily: "-apple-system, sans-serif" }}>Select at least one additional tab — with one tab this is the normal single-tab scan.</div>
+                      ) : (
+                        <div style={{ fontSize: 9, color: th.textMuted, marginTop: 6, fontFamily: "-apple-system, sans-serif" }}>
+                          A merged scan ignores this tab's grid filters and column overrides — they describe one tab, and filtering out the corroborating events is what the merge exists to avoid.
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {/* Intent selector + Reset */}
               <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 14 }}>
                 {PA_INTENTS.map((intent) => (
@@ -697,7 +964,7 @@ export default function PersistenceModal() {
               <div style={{ marginBottom: 14 }}>
                 <div style={{ fontSize: 10, fontWeight: 700, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8, fontFamily: "-apple-system, sans-serif" }}>Detection Techniques</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
-                  {((pMode === "registry") ? PA_REG_PRESETS : PA_EVTX_PRESETS).map((preset) => {
+                  {withIcon((pMode === "registry") ? PA_REG_PRESETS : PA_EVTX_PRESETS).map((preset) => {
                     const prefix = pMode === "registry" ? "reg" : "evtx";
                     const state = paPresetState(preset.rules, prefix, disabledSet);
                     const activeCount = preset.rules.filter(i => !disabledSet.has(`${prefix}-${i}`)).length;
@@ -782,9 +1049,19 @@ export default function PersistenceModal() {
                 {/* Skip + sanity warnings */}
                 {modal.paPreview && !modal.paPreviewLoading && (() => {
                   const dm = modal.paPreview.detectedMode || pMode;
-                  const skipW = paSkipWarnings(modal.paPreview.eventCounts || {}, dm);
+                  // A preview-level error means the dataset cannot be analyzed at all (e.g. a
+                  // RECmd execution-evidence plugin CSV). Say so here rather than letting the
+                  // analyst run a scan that can only come back empty.
+                  const previewErr = modal.paPreview.error
+                    ? [{ level: "error", text: modal.paPreview.error }]
+                    : [];
+                  const plugin = modal.paPreview.registryPlugin;
+                  const pluginW = plugin?.projects
+                    ? [{ level: "info", text: `Detected ${plugin.label} — a full-state inventory. Routine system entries are filtered; only rows with a hunting signal are listed.` }]
+                    : [];
+                  const skipW = modal.paPreview.error ? [] : paSkipWarnings(modal.paPreview.eventCounts || {}, dm);
                   const sanityW = paSanityWarnings(modal.paPreview.columnQuality, dm);
-                  const allW = [...skipW, ...sanityW];
+                  const allW = [...previewErr, ...pluginW, ...skipW, ...sanityW];
                   if (allW.length === 0) return null;
                   const wColors = { error: th.danger, warn: th.sev.med, info: th.textMuted };
                   return (
@@ -831,7 +1108,7 @@ export default function PersistenceModal() {
                             const key = `evtx-${i}`;
                             const off = disabledSet.has(key);
                             const evCount = countFor(r);
-                            const blurb = PA_DETECTOR_BLURBS[r.name];
+                            const blurb = PA_DETECTOR_BLURBS[paRuleLabel(r)] || PA_DETECTOR_BLURBS[r.name];
                             const sevColor = SEVERITY_COLORS[r.sev] || th.textMuted;
                             const isHi = Array.isArray(modal.paHilite) && r.hint.split(",").map((s) => s.trim()).some((e) => modal.paHilite.includes(e));
                             if (r.sev !== prevSev) {
@@ -851,7 +1128,7 @@ export default function PersistenceModal() {
                                 <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
                                   <input type="checkbox" checked={!off} onChange={() => toggleRule(key)} style={{ accentColor: th.accent, margin: 0, flexShrink: 0 }} />
                                   <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 3, background: sevColor + "22", color: sevColor, fontWeight: 600, fontFamily: "-apple-system, sans-serif", minWidth: 42, textAlign: "center", textTransform: "uppercase" }}>{r.sev}</span>
-                                  <span style={{ fontSize: 11, color: th.text, fontFamily: "-apple-system, sans-serif", flex: 1 }}>{r.cat} — {r.name}</span>
+                                  <span style={{ fontSize: 11, color: th.text, fontFamily: "-apple-system, sans-serif", flex: 1 }}>{r.cat} — {paRuleLabel(r)}</span>
                                   <span title={`${evCount.toLocaleString()} events`} style={{ width: 36, height: 4, borderRadius: 2, background: th.border + "33", overflow: "hidden", flexShrink: 0 }}>
                                     <span style={{ display: "block", height: "100%", width: `${evCount > 0 ? Math.max(6, Math.round((evCount / maxCount) * 100)) : 0}%`, background: sevColor, borderRadius: 2, transition: "width var(--m-base)" }} />
                                   </span>
@@ -879,7 +1156,7 @@ export default function PersistenceModal() {
                             <label key={key} style={{ display: "flex", alignItems: "center", gap: 8, padding: "3px 0", cursor: "pointer", opacity: off ? 0.45 : 1, transition: "opacity var(--m-base)" }}>
                               <input type="checkbox" checked={!off} onChange={() => toggleRule(key)} style={{ accentColor: th.accent, margin: 0, flexShrink: 0 }} />
                               <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 3, background: SEVERITY_COLORS[r.sev] + "22", color: SEVERITY_COLORS[r.sev], fontWeight: 600, fontFamily: "-apple-system, sans-serif", minWidth: 42, textAlign: "center", textTransform: "uppercase" }}>{r.sev}</span>
-                              <span style={{ fontSize: 11, color: th.text, fontFamily: "-apple-system, sans-serif", flex: 1 }}>{r.cat} — {r.name}</span>
+                              <span style={{ fontSize: 11, color: th.text, fontFamily: "-apple-system, sans-serif", flex: 1 }}>{r.cat} — {paRuleLabel(r)}</span>
                               <span style={{ fontSize: 10, color: th.textDim, fontFamily: "SF Mono, monospace" }}>{r.hint}</span>
                             </label>
                           );
@@ -979,6 +1256,71 @@ export default function PersistenceModal() {
           {/* Results phase */}
           {phase === "results" && data && (
             <div>
+              {/* Collection scan provenance — what was read off disk, and what was found
+                  but left unread. Coverage is stated, never implied. */}
+              {data.collectionScan && data.collection && (
+                <div style={{ padding: "7px 10px", background: `${th.accent}0d`, border: `1px solid ${th.accent}26`, borderRadius: 8, marginBottom: 10, fontFamily: "-apple-system, sans-serif" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, color: th.accent, textTransform: "uppercase", letterSpacing: "0.06em" }}>Collection</span>
+                    <span style={{ fontSize: 10, color: th.textDim }}>
+                      {data.collection.host || "unknown host"}
+                      {data.collection.hostSource && data.collection.hostSource !== "user" && <span style={{ color: th.textMuted }}> ({data.collection.hostSource.replace(/-/g, " ")})</span>}
+                      {" · "}{(data.stats?.taskDefinitionsRead || 0).toLocaleString()} task definitions read
+                      {data.stats?.registryRowsRead > 0 && <> · {data.stats.registryRowsRead.toLocaleString()} registry rows</>}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 9, color: th.textMuted, fontFamily: "'SF Mono',Menlo,monospace", marginTop: 4, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {data.collection.root}
+                  </div>
+                </div>
+              )}
+
+              {/* Merge provenance — which tabs contributed, and how many findings only
+                  exist because more than one of them was in scope. */}
+              {data.multiSource && (data.tabSummaries || []).length > 0 && (
+                <div style={{ padding: "7px 10px", background: `${th.accent}0d`, border: `1px solid ${th.accent}26`, borderRadius: 8, marginBottom: 10, fontFamily: "-apple-system, sans-serif" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 10, fontWeight: 700, color: th.accent, textTransform: "uppercase", letterSpacing: "0.06em" }}>Merged</span>
+                    <span style={{ fontSize: 10, color: th.textDim }}>
+                      {(data.stats?.totalMergedRows || 0).toLocaleString()} rows from {data.stats?.tabCount || 0} tabs
+                      {data.stats?.crossSourceIncidents > 0 && <> · <b style={{ color: th.accent }}>{data.stats.crossSourceIncidents}</b> alert{data.stats.crossSourceIncidents === 1 ? "" : "s"} corroborated across sources</>}
+                    </span>
+                  </div>
+                  <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 5 }}>
+                    {data.tabSummaries.map((t) => (
+                      <span key={t.tabId} title={t.error || t.format || ""}
+                        style={{ fontSize: 9, padding: "2px 7px", borderRadius: 5, fontFamily: "'SF Mono',Menlo,monospace",
+                          background: t.skipped ? `${th.border}22` : `${th.accent}12`,
+                          color: t.skipped ? th.textMuted : th.textDim,
+                          border: `1px solid ${t.skipped ? th.border + "22" : th.accent + "22"}`,
+                          textDecoration: t.skipped ? "line-through" : "none" }}>
+                        {t.label} {!t.skipped && <span style={{ color: th.textMuted }}>({t.rowCount.toLocaleString()})</span>}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+              {/* Pivot attribution — persistence that can be tied to the remote session
+                  that planted it. The headline answer for a triage package: this host was
+                  reached AND kept. */}
+              {data.stats?.remoteOriginItems > 0 && (() => {
+                const attributed = (data.incidents || []).filter((i) => i.remoteOrigin);
+                const sources = [...new Set(attributed.map((i) => i.remoteOrigin.sourceHost || i.remoteOrigin.sourceIp).filter(Boolean))];
+                return (
+                  <div style={{ padding: "7px 10px", background: `${th.sev.high}12`, border: `1px solid ${th.sev.high}33`, borderRadius: 8, marginBottom: 10, fontFamily: "-apple-system, sans-serif" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                      <span style={{ fontSize: 10, fontWeight: 700, color: th.sev.high, textTransform: "uppercase", letterSpacing: "0.06em" }}>Remotely planted</span>
+                      <span style={{ fontSize: 10, color: th.textDim }}>
+                        <b style={{ color: th.text }}>{attributed.length || data.stats.remoteOriginItems}</b> finding{(attributed.length || data.stats.remoteOriginItems) === 1 ? "" : "s"} tied to an inbound session
+                        {sources.length > 0 && <> from <b style={{ color: th.text }}>{sources.slice(0, 4).join(", ")}</b>{sources.length > 4 ? ` +${sources.length - 4}` : ""}</>}
+                      </span>
+                    </div>
+                    <div style={{ fontSize: 9, color: th.textMuted, marginTop: 3 }}>
+                      Each carries the source host, IP and logon session id — the join key into the lateral-movement graph.
+                    </div>
+                  </div>
+                );
+              })()}
               {(data.warnings || []).length > 0 && <div style={{ padding: "6px 10px", background: (th.warning) + "12", border: `1px solid ${(th.warning)}30`, borderRadius: 6, color: th.warning, fontSize: 10, marginBottom: 10, fontFamily: "-apple-system, sans-serif", lineHeight: 1.5 }}>
                 <span style={{ fontWeight: 600 }}>Data quality:</span> {data.warnings.map((w, i) => <span key={i}>{i > 0 && " | "}{w}</span>)}
               </div>}
@@ -1082,26 +1424,24 @@ export default function PersistenceModal() {
                   ))}
                 </div>
                 <div style={{ display: "flex", gap: 4, marginLeft: "auto", alignItems: "center" }}>
-                  <button onClick={() => {
+                  <button title={paShowingIncidents ? `Select the ${paSelectableItems.length.toLocaleString()} events behind these alerts` : "Select every listed item"}
+                    onClick={() => {
                     setModal((p) => {
                       const s = new Set(p.checkedItems || []);
-                      filteredItems.forEach((i) => s.add(persistItemKey(i)));
+                      paSelectableItems.forEach((i) => s.add(persistItemKey(i)));
                       return { ...p, checkedItems: s };
                     });
-                  }} style={{ padding: "3px 8px", fontSize: 10, background: "transparent", color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 6, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 }}>Select All ({filteredItems.length})</button>
+                  }} style={{ padding: "3px 8px", fontSize: 10, background: "transparent", color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 6, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 }}>Select All ({paVisibleRows.length})</button>
                   {checkedItems.size > 0 && <button onClick={() => setModal((p) => ({ ...p, checkedItems: new Set() }))} style={{ padding: "3px 8px", fontSize: 10, background: "transparent", color: th.textMuted, border: `1px solid ${th.border}`, borderRadius: 6, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}>Clear ({checkedItems.size})</button>}
                 <div style={{ width: 1, height: 14, background: th.border + "55", margin: "0 2px" }} />
                 <button onClick={() => {
-                  const rows = filteredItems.map((item) => ({
-                    Severity: item.severity || "", Category: item.category || "", Name: item.name || item.title || "",
-                    Computer: item.computer || "", User: item.user || "", Timestamp: item.timestamp || item.firstSeen || "",
-                    Artifact: item.artifact || "", Command: item.command || "", Source: item.source || "",
-                    RiskScore: item.triageScore ?? item.riskScore ?? "", Occurrences: item.occurrenceCount ?? "",
-                    Description: item.detailsSummary || item.description || "",
-                    SuspiciousReasons: Array.isArray(item.suspiciousReasons) ? item.suspiciousReasons.join("; ") : "",
-                  }));
-                  _downloadFile(_toCSV(rows), "persistence-findings.csv", "text/csv");
-                }} style={{ padding: "3px 8px", fontSize: 10, background: "transparent", color: th.textMuted, border: `1px solid ${th.border}`, borderRadius: 6, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 }} title="Export current filtered results as CSV">↓ CSV</button>
+                  _downloadFile(
+                    _toCSV(paVisibleRows.map(paExportRow)),
+                    paShowingIncidents ? "persistence-alerts.csv" : "persistence-items.csv",
+                    "text/csv",
+                  );
+                }} style={{ padding: "3px 8px", fontSize: 10, background: "transparent", color: th.textMuted, border: `1px solid ${th.border}`, borderRadius: 6, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 }}
+                  title={`Export the ${paVisibleRows.length.toLocaleString()} ${paShowingIncidents ? "alerts" : "items"} currently listed as CSV`}>↓ CSV</button>
                 <button onClick={() => {
                   const payload = { exportedAt: new Date().toISOString(), stats: data.stats, incidents: data.incidents || [], items: data.items || [] };
                   _downloadFile(JSON.stringify(payload, null, 2), "persistence-findings.json", "application/json");
@@ -1109,7 +1449,7 @@ export default function PersistenceModal() {
                 </div>
               </div>
 
-              {filteredItems.length === 0 && (
+              {paVisibleRows.length === 0 && (
                 <div style={{ textAlign: "center", padding: "40px 20px", color: th.textMuted, fontSize: 13, fontFamily: "-apple-system, sans-serif" }}>
                   No persistence mechanisms found{searchText || severityFilter !== "all" || categoryFilter !== "all" ? " matching filters" : ""}
                 </div>
@@ -1761,9 +2101,9 @@ export default function PersistenceModal() {
                   setModal((p) => ({ ...p, colFilterOpen: colKey, colFilterPos: { x: rect.left, y: rect.bottom + 2 }, colFilterVals: allVals, colFilterCounts: counts, colFilterSel: selected, colFilterSearch: "" }));
                 };
                 const renderCell = (item, col) => {
-                  if (col.key === "riskScore") return <span style={{ fontWeight: 700, color: item.riskScore >= 8 ? th.sev.critical : item.riskScore >= 6 ? th.sev.high : th.textMuted, display: "flex", alignItems: "center", gap: 3 }}>{item.riskScore}{item.isSuspicious && <span title={item.suspiciousReasons?.join(", ")} style={{ fontSize: 8, color: th.sev.critical }}>!</span>}{item.confidence === "confirmed" ? <span style={{ fontSize: 6, color: th.sev.clean }}>●</span> : item.confidence === "likely" ? <span style={{ fontSize: 6, color: th.sev.high }}>●</span> : null}</span>;
-                  if (col.key === "severity") return <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 3, background: (SEVERITY_COLORS[item.severity] || th.textMuted) + "20", color: SEVERITY_COLORS[item.severity] || th.textMuted, fontWeight: 700, textTransform: "uppercase" }}>{item.severity}</span>;
-                  if (col.key === "name") return <span style={{ display: "flex", alignItems: "center", gap: 4 }}>{item.name}{item.rmmTool && <span title="Remote Management tool" style={{ fontSize: 7, padding: "1px 4px", borderRadius: 2, background: th.sev.high + "22", color: th.sev.high, fontWeight: 700, textTransform: "uppercase" }}>RMM</span>}</span>;
+                  if (col.key === "riskScore") return <span style={{ fontWeight: PA_W.strong, fontFamily: PA_MONO, color: paRiskColor(item.riskScore || 0), display: "flex", alignItems: "center", gap: 3 }}>{item.riskScore}{item.isSuspicious && <span title={item.suspiciousReasons?.join(", ")} style={{ fontSize: PA_SZ.pill, color: th.sev.critical }}>!</span>}{item.confidence === "confirmed" ? <span title="Execution corroborated" style={{ fontSize: 7, color: th.sev.clean }}>●</span> : item.confidence === "likely" ? <span title="Likely corroborated" style={{ fontSize: 7, color: th.sev.high }}>●</span> : null}</span>;
+                  if (col.key === "severity") return <span style={{ ...paPill(SEVERITY_COLORS[item.severity] || th.textMuted), textTransform: "uppercase" }}>{item.severity}</span>;
+                  if (col.key === "name") return <span style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{item.name}</span>{item.rmmTool && <span title="Remote Management tool" style={{ ...paPill(th.sev.high), textTransform: "uppercase" }}>RMM</span>}</span>;
                   if (col.key === "timestamp") return item.timestamp ? String(item.timestamp).substring(0, 19) : "";
                   return item[col.key] || "";
                 };
@@ -1772,17 +2112,17 @@ export default function PersistenceModal() {
                 const renderIncCell = (inc, col) => {
                   const rep = inc.items?.reduce((best, it) => (it.riskScore || 0) > (best.riskScore || 0) ? it : best, inc.items[0]);
                   const maxConf = inc.items?.reduce((best, it) => (_confOrd[it.confidence] || 0) > (_confOrd[best] || 0) ? it.confidence : best, "") || "";
-                  if (col.key === "riskScore") return <span style={{ fontWeight: 700, color: (inc.triageScore || 0) >= 8 ? th.sev.critical : (inc.triageScore || 0) >= 6 ? th.sev.high : th.textMuted, display: "flex", alignItems: "center", gap: 3 }}>{inc.triageScore || 0}{inc.isSuspicious && <span title={inc.suspiciousReasons?.join(", ")} style={{ fontSize: 8, color: th.sev.critical }}>!</span>}{maxConf === "confirmed" ? <span style={{ fontSize: 6, color: th.sev.clean }}>●</span> : maxConf === "likely" ? <span style={{ fontSize: 6, color: th.sev.high }}>●</span> : null}</span>;
-                  if (col.key === "severity") return <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 3, background: (SEVERITY_COLORS[inc.severity] || th.textMuted) + "20", color: SEVERITY_COLORS[inc.severity] || th.textMuted, fontWeight: 700, textTransform: "uppercase" }}>{inc.severity}</span>;
+                  if (col.key === "riskScore") return <span style={{ fontWeight: PA_W.strong, fontFamily: PA_MONO, color: paRiskColor(inc.triageScore || 0), display: "flex", alignItems: "center", gap: 3 }}>{inc.triageScore || 0}{inc.isSuspicious && <span title={inc.suspiciousReasons?.join(", ")} style={{ fontSize: PA_SZ.pill, color: th.sev.critical }}>!</span>}{maxConf === "confirmed" ? <span title="Execution corroborated" style={{ fontSize: 7, color: th.sev.clean }}>●</span> : maxConf === "likely" ? <span title="Likely corroborated" style={{ fontSize: 7, color: th.sev.high }}>●</span> : null}</span>;
+                  if (col.key === "severity") return <span style={{ ...paPill(SEVERITY_COLORS[inc.severity] || th.textMuted), textTransform: "uppercase" }}>{inc.severity}</span>;
                   if (col.key === "name") {
                     const pillPrio = ["execution", "correlation", "context"];
                     const topPills = (inc.evidencePills || []).filter(p => p.type !== "target").sort((a, b) => pillPrio.indexOf(a.type) - pillPrio.indexOf(b.type)).slice(0, 2);
                     return <span style={{ display: "flex", alignItems: "center", gap: 4 }}>
-                      <span style={{ fontSize: 8, color: th.textMuted, flexShrink: 0 }}>{modal._expandedCluster === inc.id ? "\u25BC" : "\u25B6"}</span>
+                      <span style={{ fontSize: PA_SZ.pill, color: th.textMuted, flexShrink: 0 }}>{modal._expandedCluster === inc.id ? "\u25BC" : "\u25B6"}</span>
                       <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{rep?.name || inc.category}</span>
-                      {inc.occurrenceCount > 1 && <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: `${th.accent}15`, color: th.accent, fontWeight: 600, flexShrink: 0 }}>{inc.occurrenceCount}x</span>}
-                      {inc.rmmTool && <span style={{ fontSize: 7, padding: "1px 4px", borderRadius: 2, background: th.sev.high + "22", color: th.sev.high, fontWeight: 700, textTransform: "uppercase", flexShrink: 0 }}>RMM</span>}
-                      {topPills.map((p, i) => <span key={i} style={{ fontSize: 7, padding: "1px 4px", borderRadius: 2, background: (PA_PILL_COLORS[p.type] || th.sev.low) + "15", color: PA_PILL_COLORS[p.type] || th.sev.low, fontWeight: 500, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap", flexShrink: 0 }}>{p.text}</span>)}
+                      {inc.occurrenceCount > 1 && <span title={`${inc.occurrenceCount} occurrences in this cluster`} style={paPill(th.accent)}>{inc.occurrenceCount}x</span>}
+                      {inc.rmmTool && <span title="Remote Management tool" style={{ ...paPill(th.sev.high), textTransform: "uppercase" }}>RMM</span>}
+                      {topPills.map((p, i) => <span key={i} style={paPill(PA_PILL_COLORS[p.type] || th.sev.low)}>{p.text}</span>)}
                     </span>;
                   }
                   if (col.key === "timestamp") {
@@ -1806,17 +2146,17 @@ export default function PersistenceModal() {
                     <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderBottom: `1px solid ${th.border}22` }}>
                       {Object.entries(TBL_MODES).map(([k, m]) => (
                         <button key={k} onClick={() => setModal((p) => ({ ...p, tblMode: k, _expandedCluster: null }))} title={m.desc}
-                          style={{ padding: "3px 10px", fontSize: 10, fontWeight: tblMode === k ? 700 : 500, background: tblMode === k ? th.accent : `${th.accent}15`, color: tblMode === k ? "#fff" : th.accent, border: `1px solid ${tblMode === k ? th.accent : th.accent + "33"}`, borderRadius: 4, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}>{m.label}</button>
+                          style={{ padding: "3px 10px", fontSize: PA_SZ.label, fontWeight: PA_W.strong, background: tblMode === k ? th.accent : `${th.accent}15`, color: tblMode === k ? "#fff" : th.accent, border: `1px solid ${tblMode === k ? th.accent : th.accent + "33"}`, borderRadius: 4, cursor: "pointer", fontFamily: PA_SANS }}>{m.label}</button>
                       ))}
-                      {tblMode === "custom" && <span style={{ fontSize: 9, color: th.textMuted, fontStyle: "italic", fontFamily: "-apple-system, sans-serif" }}>Custom</span>}
+                      {tblMode === "custom" && <span style={paMeta}>Custom</span>}
                       <button onClick={() => setModal(p => ({ ...p, _tblHideExpected: !p._tblHideExpected }))} title="Hide expected/whitelisted items"
-                        style={{ padding: "2px 8px", fontSize: 9, fontWeight: hideExpected ? 600 : 400, background: hideExpected ? `${th.accent}15` : "transparent", color: hideExpected ? th.accent : th.textMuted, border: `1px solid ${hideExpected ? th.accent + "33" : th.border + "33"}`, borderRadius: 3, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}>
+                        style={{ padding: "3px 10px", fontSize: PA_SZ.label, fontWeight: PA_W.strong, background: hideExpected ? `${th.accent}15` : "transparent", color: hideExpected ? th.accent : th.textMuted, border: `1px solid ${hideExpected ? th.accent + "33" : th.border + "33"}`, borderRadius: 4, cursor: "pointer", fontFamily: PA_SANS }}>
                         {hideExpected ? "Expected Hidden" : "Hide Expected"}
                       </button>
-                      {expectedHiddenCount > 0 && <span style={{ fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif", fontStyle: "italic" }}>{expectedHiddenCount} hidden</span>}
-                      <span style={{ marginLeft: "auto", fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>
+                      {expectedHiddenCount > 0 && <span style={paMeta}>{expectedHiddenCount} hidden</span>}
+                      <span style={{ ...paMeta, marginLeft: "auto" }}>
                         {useCollapse ? `${sortedIncidentsTable.length} clusters` : `${tableFiltered.length} items`}
-                        {useCollapse && sortedIncidentsTable.filter(i => i.isSuspicious).length > 0 && <span style={{ color: th.danger, fontWeight: 600 }}> | {sortedIncidentsTable.filter(i => i.isSuspicious).length} suspicious</span>}
+                        {useCollapse && sortedIncidentsTable.filter(i => i.isSuspicious).length > 0 && <span style={{ color: th.sev.critical, fontWeight: PA_W.strong }}> · {sortedIncidentsTable.filter(i => i.isSuspicious).length} suspicious</span>}
                       </span>
                     </div>
                     <div style={{ overflow: "auto", maxHeight: 440 }}>
@@ -1837,7 +2177,7 @@ export default function PersistenceModal() {
                           </div>
                           {orderedCols.map((c) => (
                             <div key={c.key} draggable onDragStart={(e) => onColDragStart(e, c.key)} onDragOver={(e) => e.preventDefault()} onDrop={(e) => onColDrop(e, c.key)} onDragEnd={() => setModal((p) => ({ ...p, dragCol: null }))}
-                              style={{ width: gw(c.key), flexShrink: 0, padding: "6px 8px", fontSize: 10, fontWeight: 600, color: sortCol === c.key ? th.accent : th.textMuted, cursor: "grab", fontFamily: "-apple-system, sans-serif", userSelect: "none", position: "relative", opacity: modal.dragCol === c.key ? 0.4 : 1, transition: "opacity var(--m-base)", display: "flex", alignItems: "center", gap: 2 }}>
+                              style={{ width: gw(c.key), flexShrink: 0, padding: "6px 8px", fontSize: PA_SZ.label, fontWeight: PA_W.strong, letterSpacing: "0.03em", color: sortCol === c.key ? th.accent : th.textMuted, cursor: "grab", fontFamily: PA_SANS, userSelect: "none", position: "relative", opacity: modal.dragCol === c.key ? 0.4 : 1, transition: "opacity var(--m-base)", display: "flex", alignItems: "center", gap: 2 }}>
                               <span onClick={() => toggleSort(c.key)} style={{ cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                                 {c.label}{sortCol === c.key ? (sortDir === "asc" ? " \u25B2" : " \u25BC") : ""}
                               </span>
@@ -1858,13 +2198,13 @@ export default function PersistenceModal() {
                           const repItem = inc.items?.[0];
                           return (
                             <div key={inc.id}>
-                              <div style={{ display: "flex", borderBottom: `1px solid ${th.border}11`, borderLeft: inc.isSuspicious ? `3px solid ${th.danger}` : "3px solid transparent", transition: "background var(--m-fast)", background: inc.isSuspicious ? `${(th.danger)}06` : "transparent", cursor: "pointer" }}
+                              <div style={{ display: "flex", borderBottom: `1px solid ${th.border}11`, borderLeft: inc.isSuspicious ? `3px solid ${th.sev.critical}` : "3px solid transparent", transition: "background var(--m-fast)", background: inc.isSuspicious ? `${th.sev.critical}0d` : "transparent", cursor: "pointer" }}
                                 onClick={() => setModal((p) => ({ ...p, _expandedCluster: p._expandedCluster === inc.id ? null : inc.id, selectedPersistKey: repItem ? persistItemKey(repItem) : p.selectedPersistKey }))}
                                 onMouseEnter={(e) => e.currentTarget.style.background = `${th.accent}06`}
-                                onMouseLeave={(e) => e.currentTarget.style.background = inc.isSuspicious ? `${(th.danger)}06` : "transparent"}>
+                                onMouseLeave={(e) => e.currentTarget.style.background = inc.isSuspicious ? `${th.sev.critical}0d` : "transparent"}>
                                 <div style={{ width: 30, flexShrink: 0, padding: "5px 8px" }} />
                                 {orderedCols.map((col) => (
-                                  <div key={col.key} style={{ width: gw(col.key), flexShrink: 0, padding: "5px 8px", fontSize: col.key === "riskScore" ? 11 : 10, color: col.key === "name" || col.key === "category" ? th.text : col.key === "artifact" && inc.isSuspicious ? (th.danger) : th.textMuted, fontWeight: col.key === "name" ? 500 : col.key === "artifact" && inc.isSuspicious ? 600 : 400, fontFamily: col.key === "artifact" || col.key === "command" || col.key === "timestamp" ? "SF Mono, Menlo, monospace" : "-apple-system, sans-serif", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                  <div key={col.key} style={{ width: gw(col.key), flexShrink: 0, padding: "5px 8px", fontSize: PA_SZ.value, fontWeight: PA_W.normal, color: PA_STRONG_COLS.has(col.key) ? th.text : th.textDim, fontFamily: PA_MONO_COLS.has(col.key) ? PA_MONO : PA_SANS, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                                     {renderIncCell(inc, col)}
                                   </div>
                                 ))}
@@ -1880,14 +2220,14 @@ export default function PersistenceModal() {
                                       <input type="checkbox" checked={isChecked(item)} onChange={(e) => toggleCheck(item, e)} onClick={(e) => e.stopPropagation()} style={{ width: 13, height: 13, cursor: "pointer", accentColor: th.accent }} />
                                     </div>
                                     {orderedCols.map((col) => (
-                                      <div key={col.key} style={{ width: gw(col.key), flexShrink: 0, padding: "5px 8px", fontSize: 10, opacity: 0.75, color: th.textDim, fontFamily: col.key === "artifact" || col.key === "command" || col.key === "timestamp" ? "SF Mono, Menlo, monospace" : "-apple-system, sans-serif", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                                      <div key={col.key} style={{ width: gw(col.key), flexShrink: 0, padding: "5px 8px", fontSize: PA_SZ.value, fontWeight: PA_W.normal, color: th.textDim, fontFamily: PA_MONO_COLS.has(col.key) ? PA_MONO : PA_SANS, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                                         {renderCell(item, col)}
                                       </div>
                                     ))}
                                   </div>
                                 );
                               })}
-                              {isExp && inc.items.length > 50 && <div style={{ padding: "4px 42px", fontSize: 9, color: th.textMuted, fontStyle: "italic" }}>...and {inc.items.length - 50} more</div>}
+                              {isExp && inc.items.length > 50 && <div style={{ ...paMeta, padding: "4px 42px" }}>…and {inc.items.length - 50} more</div>}
                             </div>
                           );
                         })}
@@ -1895,15 +2235,15 @@ export default function PersistenceModal() {
                         {!useCollapse && sorted.slice(0, modal._tblLimit || 500).map((item, idx) => {
                           const isSelItem = isSelPersist(item);
                           return (
-                          <div key={idx} style={{ display: "flex", borderBottom: `1px solid ${th.border}11`, borderLeft: item.isSuspicious ? `3px solid ${th.danger}` : "3px solid transparent", transition: "background var(--m-fast)", background: isSelItem ? `${th.accent}14` : isChecked(item) ? `${th.accent}0a` : item.isSuspicious ? `${(th.danger)}06` : "transparent", cursor: "pointer" }}
+                          <div key={idx} style={{ display: "flex", borderBottom: `1px solid ${th.border}11`, borderLeft: item.isSuspicious ? `3px solid ${th.sev.critical}` : "3px solid transparent", transition: "background var(--m-fast)", background: isSelItem ? `${th.accent}14` : isChecked(item) ? `${th.accent}0a` : item.isSuspicious ? `${th.sev.critical}0d` : "transparent", cursor: "pointer" }}
                             onClick={() => toggleSelPersist(item)}
                             onMouseEnter={(e) => { if (!isSelItem && !isChecked(item)) e.currentTarget.style.background = `${th.accent}06`; }}
-                            onMouseLeave={(e) => { if (!isSelItem) e.currentTarget.style.background = isChecked(item) ? `${th.accent}0a` : item.isSuspicious ? `${(th.danger)}06` : "transparent"; }}>
+                            onMouseLeave={(e) => { if (!isSelItem) e.currentTarget.style.background = isChecked(item) ? `${th.accent}0a` : item.isSuspicious ? `${th.sev.critical}0d` : "transparent"; }}>
                             <div style={{ width: 30, flexShrink: 0, padding: "5px 8px", display: "flex", alignItems: "center" }}>
                               <input type="checkbox" checked={isChecked(item)} onChange={(e) => toggleCheck(item, e)} onClick={(e) => e.stopPropagation()} style={{ width: 13, height: 13, cursor: "pointer", accentColor: th.accent }} />
                             </div>
                             {orderedCols.map((col) => (
-                              <div key={col.key} title={col.key === "artifact" && item.isSuspicious ? item.suspiciousReasons?.join(", ") : undefined} style={{ width: gw(col.key), flexShrink: 0, padding: "5px 8px", fontSize: col.key === "riskScore" ? 11 : 10, color: col.key === "name" || col.key === "category" ? th.text : col.key === "artifact" && item.isSuspicious ? (th.danger) : th.textMuted, fontWeight: col.key === "name" ? 500 : col.key === "artifact" && item.isSuspicious ? 600 : 400, fontFamily: col.key === "artifact" || col.key === "command" || col.key === "timestamp" ? "SF Mono, Menlo, monospace" : "-apple-system, sans-serif", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                              <div key={col.key} title={col.key === "artifact" && item.isSuspicious ? item.suspiciousReasons?.join(", ") : undefined} style={{ width: gw(col.key), flexShrink: 0, padding: "5px 8px", fontSize: PA_SZ.value, fontWeight: PA_W.normal, color: PA_STRONG_COLS.has(col.key) ? th.text : th.textDim, fontFamily: PA_MONO_COLS.has(col.key) ? PA_MONO : PA_SANS, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                                 {renderCell(item, col)}
                               </div>
                             ))}
@@ -1911,11 +2251,11 @@ export default function PersistenceModal() {
                         ); })}
                       </div>
                     </div>
-                    {displayData.length > (modal._tblLimit || 500) && <div style={{ padding: "6px 10px", fontSize: 10, color: th.textMuted, borderTop: `1px solid ${th.border}11`, display: "flex", alignItems: "center", gap: 8 }}>
-                      <span style={{ fontStyle: "italic" }}>Showing {modal._tblLimit || 500} of {displayData.length} {useCollapse ? "clusters" : "items"}</span>
-                      <button onClick={() => setModal(p => ({ ...p, _tblLimit: (p._tblLimit || 500) + 500 }))} style={{ padding: "2px 10px", fontSize: 9, background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 3, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}>Load more</button>
+                    {displayData.length > (modal._tblLimit || 500) && <div style={{ padding: "6px 10px", borderTop: `1px solid ${th.border}11`, display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={paMeta}>Showing {modal._tblLimit || 500} of {displayData.length} {useCollapse ? "clusters" : "items"}</span>
+                      <button onClick={() => setModal(p => ({ ...p, _tblLimit: (p._tblLimit || 500) + 500 }))} style={{ padding: "3px 10px", fontSize: PA_SZ.label, fontWeight: PA_W.strong, background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 4, cursor: "pointer", fontFamily: PA_SANS }}>Load more</button>
                     </div>}
-                    {displayData.length === 0 && <div style={{ padding: "20px 10px", fontSize: 11, color: th.textMuted, textAlign: "center", fontFamily: "-apple-system, sans-serif" }}>No items match current filters{tblMode === "triage" ? " \u2014 try Review or Raw mode" : ""}</div>}
+                    {displayData.length === 0 && <div style={{ padding: "20px 10px", fontSize: PA_SZ.value, fontWeight: PA_W.normal, color: th.textMuted, textAlign: "center", fontFamily: PA_SANS }}>No items match current filters{tblMode === "triage" ? " \u2014 try Review or Raw mode" : ""}</div>}
                     {/* Column filter dropdown popup */}
                     {filterOpen && (
                       <>
@@ -1996,14 +2336,14 @@ export default function PersistenceModal() {
             <div style={{ borderTop: `2px solid ${sevCol}44`, background: `linear-gradient(135deg, ${sevCol}06, ${th.panelBg}ee)`, padding: "14px 16px", display: "flex", flexDirection: "column", gap: 10, flexShrink: 0, maxHeight: 280, overflow: "auto" }}>
               {/* Header row */}
               <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: sevCol + "20", color: sevCol, fontWeight: 700, textTransform: "uppercase" }}>{selItem.severity}</span>
-                {selItem.isSuspicious && <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: `${th.danger}22`, color: th.danger, fontWeight: 700, textTransform: "uppercase" }}>SUSPICIOUS</span>}
-                {selItem.rmmTool && <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: th.sev.high + "22", color: th.sev.high, fontWeight: 700, textTransform: "uppercase" }}>RMM</span>}
-                {(selItem.tags || []).filter(t => t !== "RMM Tool").map((t, i) => <span key={i} style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: `${th.accent}22`, color: th.accent, fontWeight: 600, textTransform: "uppercase" }}>{t}</span>)}
+                <span style={{ ...paPill(sevCol), textTransform: "uppercase" }}>{selItem.severity}</span>
+                {selItem.isSuspicious && <span style={{ ...paPill(th.sev.critical), textTransform: "uppercase" }}>SUSPICIOUS</span>}
+                {selItem.rmmTool && <span title="Remote Management tool" style={{ ...paPill(th.sev.high), textTransform: "uppercase" }}>RMM</span>}
+                {(selItem.tags || []).filter(t => t !== "RMM Tool").map((t, i) => <span key={i} style={{ ...paPill(th.accent), textTransform: "uppercase" }}>{t}</span>)}
                 <PaMitreBadge category={selItem.category} />
-                <span style={{ fontSize: 13, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif" }}>{selItem.name}</span>
-                <span style={{ fontSize: 10, color: th.textMuted, marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>Risk Score: <span style={{ fontWeight: 700, color: selItem.riskScore >= 8 ? th.sev.critical : selItem.riskScore >= 6 ? th.sev.high : th.textMuted }}>{selItem.riskScore}/10</span>
-                  {selItem.confidence && <span style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, fontWeight: 600, fontFamily: "-apple-system, sans-serif", textTransform: "capitalize", background: selItem.confidence === "confirmed" ? th.sev.clean + "20" : selItem.confidence === "likely" ? th.sev.high + "20" : (th.textMuted + "15"), color: selItem.confidence === "confirmed" ? th.sev.clean : selItem.confidence === "likely" ? th.sev.high : th.textMuted }}>{selItem.confidence}</span>}
+                <span style={{ fontSize: 13, fontWeight: PA_W.strong, color: th.text, fontFamily: PA_SANS }}>{selItem.name}</span>
+                <span style={{ ...paLabel, marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>Risk Score: <span style={{ fontSize: PA_SZ.value, fontFamily: PA_MONO, fontWeight: PA_W.strong, color: paRiskColor(selItem.riskScore || 0) }}>{selItem.riskScore}/10</span>
+                  {selItem.confidence && <span style={{ ...paPill(selItem.confidence === "confirmed" ? th.sev.clean : selItem.confidence === "likely" ? th.sev.high : th.textMuted), textTransform: "capitalize" }}>{selItem.confidence}</span>}
                 </span>
                 <button onClick={() => setModal((p) => ({ ...p, selectedPersistKey: null }))} style={{ background: "none", border: "none", color: th.textMuted, cursor: "pointer", fontSize: 14, padding: "0 4px", lineHeight: 1 }} title="Close">&times;</button>
               </div>
@@ -2018,8 +2358,8 @@ export default function PersistenceModal() {
                   { label: "Confidence", value: selItem.confidence ? selItem.confidence.charAt(0).toUpperCase() + selItem.confidence.slice(1) : "" },
                 ].filter(f => f.value).map((f, i) => (
                   <div key={i} style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
-                    <span style={{ fontSize: 10, color: th.accent, fontWeight: 600, fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>{f.label}:</span>
-                    <span style={{ fontSize: 10, color: th.text, fontFamily: "SF Mono, Menlo, monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.value}</span>
+                    <span style={paLabel}>{f.label}:</span>
+                    <span style={{ ...paValue, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.value}</span>
                   </div>
                 ))}
               </div>
@@ -2035,16 +2375,16 @@ export default function PersistenceModal() {
                 if (sameAH.length <= 1 && otherCats.length === 0 && userOther.length === 0) return null;
                 return (
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap", padding: "6px 0", borderTop: `1px solid ${th.border}15`, borderBottom: `1px solid ${th.border}15` }}>
-                    {sameAH.length > 1 && <span style={{ fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>
-                      <span style={{ fontWeight: 600, color: th.accent }}>{sameAH.length}</span> occurrences on {ctxHost}
-                      {sahFirst && sahLast && sahFirst !== sahLast && <span style={{ marginLeft: 4, fontFamily: "SF Mono, Menlo, monospace", fontSize: 8 }}>({String(sahFirst).substring(0, 10)} \u2014 {String(sahLast).substring(0, 10)})</span>}
+                    {sameAH.length > 1 && <span style={paMeta}>
+                      <span style={{ fontWeight: PA_W.strong, color: th.text }}>{sameAH.length}</span> occurrences on {ctxHost}
+                      {sahFirst && sahLast && sahFirst !== sahLast && <span style={{ marginLeft: 4, fontFamily: PA_MONO, fontSize: PA_SZ.label }}>({String(sahFirst).substring(0, 10)} \u2014 {String(sahLast).substring(0, 10)})</span>}
                     </span>}
-                    {otherCats.length > 0 && <span style={{ fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>
-                      Also in: {otherCats.map((c, i) => <span key={i} style={{ fontSize: 8, padding: "1px 4px", borderRadius: 3, marginLeft: 2, background: `${th.accent}12`, color: th.accent, fontWeight: 500 }}>{c}</span>)}
+                    {otherCats.length > 0 && <span style={paMeta}>
+                      Also in: {otherCats.map((c, i) => <span key={i} style={{ ...paPill(th.accent), marginLeft: 2 }}>{c}</span>)}
                     </span>}
-                    {userOther.length > 0 && <span style={{ fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>
+                    {userOther.length > 0 && <span style={paMeta}>
                       {ctxUser} \u2192 <span style={{ fontWeight: 600, color: th.text }}>{userOther.length}</span> other artifact{userOther.length !== 1 ? "s" : ""}
-                      {userOther.length <= 3 && <span style={{ fontFamily: "SF Mono, Menlo, monospace", fontSize: 8, marginLeft: 4, color: th.textDim }}>({userOther.map(a => (a || "").split("\\").pop()).join(", ")})</span>}
+                      {userOther.length <= 3 && <span style={{ fontFamily: PA_MONO, fontSize: PA_SZ.label, marginLeft: 4, color: th.textDim }}>({userOther.map(a => (a || "").split("\\").pop()).join(", ")})</span>}
                     </span>}
                   </div>
                 );
@@ -2052,25 +2392,55 @@ export default function PersistenceModal() {
               {/* Artifact + Command */}
               {selItem.artifact && (
                 <div style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
-                  <span style={{ fontSize: 10, color: th.accent, fontWeight: 600, fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>Artifact:</span>
-                  <span style={{ fontSize: 10, color: selItem.isSuspicious ? (th.danger) : th.text, fontWeight: selItem.isSuspicious ? 600 : 400, fontFamily: "SF Mono, Menlo, monospace", wordBreak: "break-all" }}>{selItem.artifact}</span>
+                  <span style={paLabel}>Artifact:</span>
+                  <span style={{ ...paValue, wordBreak: "break-all" }}>{selItem.artifact}</span>
                 </div>
               )}
               {selItem.command && (
                 <div style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
-                  <span style={{ fontSize: 10, color: th.accent, fontWeight: 600, fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>Command:</span>
-                  <span style={{ fontSize: 10, color: th.text, fontFamily: "SF Mono, Menlo, monospace", wordBreak: "break-all", maxHeight: 60, overflow: "auto" }}>{selItem.command}</span>
+                  <span style={paLabel}>Command:</span>
+                  <span style={{ ...paValue, wordBreak: "break-all", maxHeight: 60, overflow: "auto" }}>{selItem.command}</span>
+                </div>
+              )}
+              {/* Remote origin — who planted this. The single most actionable fact a
+                  persistence finding can carry, so it gets its own block rather than
+                  being buried in the extracted-fields dump. */}
+              {selItem.remoteOrigin && (
+                <div style={{ background: `${th.accent}0e`, border: `1px solid ${th.accent}2e`, borderRadius: 6, padding: "8px 10px" }}>
+                  <div style={{ ...paCaption, marginBottom: 5, color: th.accent }}>Remote origin</div>
+                  <div style={{ display: "flex", gap: 6, alignItems: "baseline", flexWrap: "wrap" }}>
+                    <span style={{ ...paValue, fontWeight: 600 }}>
+                      {selItem.remoteOrigin.sourceHost || selItem.remoteOrigin.sourceIp || "unknown source"}
+                    </span>
+                    <span style={{ ...paLabel, color: th.textMuted }}>→</span>
+                    <span style={paValue}>{selItem.computer || "this host"}</span>
+                    <span style={{ ...paLabel, color: th.textMuted }}>via {selItem.remoteOrigin.via}</span>
+                  </div>
+                  <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginTop: 4 }}>
+                    {selItem.remoteOrigin.sourceIp && <span style={paLabel}>IP: <span style={paValue}>{selItem.remoteOrigin.sourceIp}</span></span>}
+                    {selItem.remoteOrigin.user && <span style={paLabel}>User: <span style={paValue}>{selItem.remoteOrigin.user}</span></span>}
+                    {selItem.remoteOrigin.logonId && <span style={paLabel}>Logon ID: <span style={paValue}>{selItem.remoteOrigin.logonId}</span></span>}
+                    <span style={paLabel}>{Math.round((selItem.remoteOrigin.gapMs || 0) / 60000)} min before</span>
+                  </div>
+                  {(selItem.remoteOrigin.sourceHost || selItem.remoteOrigin.sourceIp) && (
+                    <button onClick={() => setModal((p) => ({
+                      ...p, searchTerm: selItem.remoteOrigin.sourceHost || selItem.remoteOrigin.sourceIp,
+                      tableColFilters: {}, viewTab: "timeline", tlMode: "chronology", tlCatFilter: null,
+                    }))} style={{ marginTop: 6, fontSize: PA_SZ.label, fontWeight: PA_W.strong, padding: "3px 10px", borderRadius: 6, background: `${th.accent}18`, color: th.accent, border: `1px solid ${th.accent}33`, cursor: "pointer", fontFamily: PA_SANS }}>
+                      Trace this source
+                    </button>
+                  )}
                 </div>
               )}
               {/* All extracted details */}
               {selItem.details && Object.keys(selItem.details).length > 0 && (
                 <div style={{ background: `${th.modalBg}cc`, borderRadius: 6, padding: "8px 10px", border: `1px solid ${th.border}22` }}>
-                  <div style={{ fontSize: 9, color: th.textMuted, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.05em", marginBottom: 4, fontFamily: "-apple-system, sans-serif" }}>Extracted Fields</div>
+                  <div style={{ ...paCaption, marginBottom: 6 }}>Extracted Fields</div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(250px, 1fr))", gap: "3px 16px" }}>
                     {Object.entries(selItem.details).filter(([k]) => !k.startsWith("_")).map(([k, v]) => (
                       <div key={k} style={{ display: "flex", gap: 6, alignItems: "baseline" }}>
-                        <span style={{ fontSize: 10, color: th.accent + "cc", fontWeight: 500, fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>{k}:</span>
-                        <span style={{ fontSize: 10, color: th.text, fontFamily: "SF Mono, Menlo, monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={v}>{v}</span>
+                        <span style={paLabel}>{k}:</span>
+                        <span style={{ ...paValue, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={v}>{v}</span>
                       </div>
                     ))}
                   </div>
@@ -2080,16 +2450,16 @@ export default function PersistenceModal() {
               {selItem.isSuspicious && selItem.suspiciousReasons?.length > 0 && (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
                   {selItem.suspiciousReasons.map((r, i) => (
-                    <span key={i} style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: `${th.danger}15`, color: th.danger, fontFamily: "-apple-system, sans-serif" }}>{r}</span>
+                    <span key={i} style={paPill(th.sev.critical)}>{r}</span>
                   ))}
                 </div>
               )}
               {/* Evidence pills */}
               {selItem.evidencePills?.length > 0 && (
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 4 }}>
-                  <span style={{ fontSize: 9, color: th.textMuted, fontWeight: 600, fontFamily: "-apple-system, sans-serif", marginRight: 2 }}>Evidence:</span>
+                  <span style={{ ...paLabel, marginRight: 2, alignSelf: "center" }}>Evidence:</span>
                   {selItem.evidencePills.filter(p => p.type !== "target").map((p, i) => (
-                    <span key={i} style={{ fontSize: 9, padding: "2px 6px", borderRadius: 4, background: (PA_PILL_COLORS[p.type] || th.sev.low) + "18", color: PA_PILL_COLORS[p.type] || th.sev.low, fontWeight: 500, fontFamily: "-apple-system, sans-serif" }}>{p.text}</span>
+                    <span key={i} style={paPill(PA_PILL_COLORS[p.type] || th.sev.low)}>{p.text}</span>
                   ))}
                 </div>
               )}
@@ -2098,13 +2468,13 @@ export default function PersistenceModal() {
                 {selItem.artifact && <button onClick={() => {
                   const leaf = (selItem.artifact || "").split(/[/\\]/).pop().replace(/\{[0-9a-f-]+\}$/i, "").trim();
                   setModal((p) => ({ ...p, searchTerm: leaf || selItem.artifact, tableColFilters: {}, viewTab: "timeline", tlMode: "chronology", tlCatFilter: null }));
-                }} style={{ fontSize: 9, padding: "3px 8px", borderRadius: 4, background: `${th.accent}11`, color: th.accent, border: `1px solid ${th.accent}22`, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 }}>Same Artifact</button>}
+                }} style={{ fontSize: PA_SZ.label, fontWeight: PA_W.strong, padding: "3px 10px", borderRadius: 6, background: `${th.accent}11`, color: th.accent, border: `1px solid ${th.accent}22`, cursor: "pointer", fontFamily: PA_SANS }}>Same Artifact</button>}
                 {selItem.computer && <button onClick={() => {
                   setModal((p) => ({ ...p, tableColFilters: { computer: [selItem.computer] }, searchTerm: "", viewTab: "timeline", tlMode: "chronology", tlCatFilter: null }));
-                }} style={{ fontSize: 9, padding: "3px 8px", borderRadius: 4, background: `${th.accent}11`, color: th.accent, border: `1px solid ${th.accent}22`, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 }}>Same Host</button>}
+                }} style={{ fontSize: PA_SZ.label, fontWeight: PA_W.strong, padding: "3px 10px", borderRadius: 6, background: `${th.accent}11`, color: th.accent, border: `1px solid ${th.accent}22`, cursor: "pointer", fontFamily: PA_SANS }}>Same Host</button>}
                 {selItem.user && <button onClick={() => {
                   setModal((p) => ({ ...p, tableColFilters: { user: [selItem.user] }, searchTerm: "", viewTab: "timeline", tlMode: "chronology", tlCatFilter: null }));
-                }} style={{ fontSize: 9, padding: "3px 8px", borderRadius: 4, background: `${th.accent}11`, color: th.accent, border: `1px solid ${th.accent}22`, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 }}>Same User</button>}
+                }} style={{ fontSize: PA_SZ.label, fontWeight: PA_W.strong, padding: "3px 10px", borderRadius: 6, background: `${th.accent}11`, color: th.accent, border: `1px solid ${th.accent}22`, cursor: "pointer", fontFamily: PA_SANS }}>Same User</button>}
                 <button onClick={() => {
                   const lines = [`[${selItem.severity.toUpperCase()}] ${selItem.name}`, `Category: ${selItem.category}`, `Source: ${selItem.source}`, `Timestamp: ${selItem.timestamp}`, `Computer: ${selItem.computer}`, `User: ${selItem.user}`];
                   if (selItem.artifact) lines.push(`Artifact: ${selItem.artifact}`);
@@ -2117,7 +2487,7 @@ export default function PersistenceModal() {
                   const mitre = PA_CAT_MITRE[selItem.category];
                   if (mitre) lines.push(`MITRE ATT&CK: ${mitre}`);
                   navigator.clipboard?.writeText?.(lines.join("\n"));
-                }} style={{ fontSize: 10, padding: "3px 10px", borderRadius: 6, background: th.accent + "18", color: th.accent, border: `1px solid ${th.accent}33`, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 }}>Copy Details</button>
+                }} style={{ fontSize: PA_SZ.label, fontWeight: PA_W.strong, padding: "3px 10px", borderRadius: 6, background: th.accent + "18", color: th.accent, border: `1px solid ${th.accent}33`, cursor: "pointer", fontFamily: PA_SANS }}>Copy Details</button>
               </div>
             </div>
           );
@@ -2134,7 +2504,7 @@ export default function PersistenceModal() {
           {phase === "loading" && (
             <div style={{ display: "flex", justifyContent: "space-between", width: "100%", alignItems: "center" }}>
               <span style={{ color: th.textMuted, fontSize: 11, fontFamily: "-apple-system, sans-serif" }}>{Math.round(modal.progress || 0)}% complete</span>
-              <button onClick={() => setModal((p) => ({ ...p, phase: "config", loading: false, progress: 0, _cancelled: true }))} style={{ ...ms.bs, borderRadius: 8 }}>Cancel</button>
+              <button onClick={handleCancelAnalyze} style={{ ...ms.bs, borderRadius: 8 }}>Cancel</button>
             </div>
           )}
           {phase === "results" && (
@@ -2152,9 +2522,12 @@ export default function PersistenceModal() {
                     <button onClick={() => setModal((p) => ({ ...p, checkedItems: new Set() }))} style={{ ...ms.bs, borderRadius: 8 }}>Clear</button>
                   </>
                 )}
-                <button onClick={() => {
+                <button title={`Copy the ${paVisibleRows.length.toLocaleString()} ${paShowingIncidents ? "alerts" : "items"} currently listed`} onClick={() => {
                   const hdr = "Risk\tSeverity\tCategory\tDetection\tArtifact\tCommand/Path\tDetails\tTimestamp\tComputer\tUser\tSource\tSuspicious\n";
-                  const body = filteredItems.map((i) => `${i.riskScore}\t${i.severity}\t${i.category}\t${i.name}\t${i.artifact || ""}\t${i.command || ""}\t${i.detailsSummary}\t${i.timestamp}\t${i.computer}\t${i.user}\t${i.source}\t${i.suspiciousReasons?.join("; ") || ""}`).join("\n");
+                  const body = paVisibleRows.map((r) => {
+                    const c = paExportRow(r);
+                    return `${c.RiskScore}\t${c.Severity}\t${c.Category}\t${c.Name}\t${c.Artifact}\t${c.Command}\t${c.Description}\t${c.Timestamp}\t${c.Computer}\t${c.User}\t${c.Source}\t${c.SuspiciousReasons}`;
+                  }).join("\n");
                   navigator.clipboard?.writeText?.(hdr + body);
                 }} style={{ ...ms.bs, borderRadius: 8 }}>Copy All</button>
                 <button onClick={() => setModal(null)} style={{ ...ms.bp, borderRadius: 8, boxShadow: `0 2px 8px ${th.accent}33` }}>Done</button>

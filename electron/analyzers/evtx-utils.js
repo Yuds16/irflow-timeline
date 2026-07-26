@@ -126,6 +126,7 @@ function _normalizeEvtxChannel(channel) {
   if (raw === "tasksch" || raw.includes("taskscheduler") || raw.includes("task scheduler")) return "taskscheduler";
   if (raw === "pwsh" || raw.includes("powershell")) return "powershell";
   if (raw === "wmi" || raw.includes("wmi-activity")) return "wmi-activity";
+  if (raw === "winrm" || raw.includes("winrm")) return "winrm";
   if (raw.includes("localsessionmanager")) return "localsessionmanager";
   if (raw.includes("remoteconnectionmanager")) return "remoteconnectionmanager";
   return raw;
@@ -152,7 +153,12 @@ function _resolveEventChannel(row) {
   // analyzer's channel gate silently DROPS the entire Defender-tamper + critical WMI-subscription
   // rules. These EIDs are unambiguous, so map them by event id when the channel is missing.
   if (["5001", "5007", "5010", "5012", "5101"].includes(eventId)) return "defender";
-  if (eventId === "5861") return "wmi-activity";
+  // WMI-Activity and WinRM Operational. Same reasoning as Defender above: a raw-EVTX or
+  // Chainsaw export with a blank <Channel> would otherwise resolve to "" and the
+  // channel gate would drop the remote-execution rules entirely. Only consulted when the
+  // channel is genuinely absent, so a differently-provided 145/169 is unaffected.
+  if (["5857", "5858", "5860", "5861"].includes(eventId)) return "wmi-activity";
+  if (["142", "145", "161", "169"].includes(eventId)) return "winrm";
   return "";
 }
 
@@ -170,6 +176,7 @@ function _evtxChannelMatches(channel, wantedChannels = []) {
     if (needle === "taskscheduler" && norm === "taskscheduler") return true;
     if (needle === "powershell" && norm === "powershell") return true;
     if (needle === "wmi-activity" && norm === "wmi-activity") return true;
+    if (needle === "winrm" && norm === "winrm") return true;
     return false;
   });
 }
@@ -250,6 +257,69 @@ const RAW_EVTX_HAYSTACK_FIELDS = [
   { key: "evScriptPath", label: "ScriptPath", aliases: [/^ScriptPath$/i] },
   { key: "evNewUacValue", label: "NewUacValue", aliases: [/^NewUacValue$/i] },
   { key: "evUserAccountControl", label: "UserAccountControl", aliases: [/^UserAccountControl$/i] },
+  // --- Task Scheduler (Microsoft-Windows-TaskScheduler/Operational) ---
+  // Raw .evtx puts the task identity in TaskName (106/140/141/129/200/118/119) and the
+  // action in Path (129) / ActionName (200). Without these the persistence rules'
+  // P("Task")/P("TaskName")/P("Name") extractors match nothing and EVERY scheduled-task
+  // finding comes back with an empty artifact — which also defeats the
+  // LEGIT_TASK_PREFIXES suppression (an empty artifact can never match ^\Microsoft\),
+  // so thousands of benign taskhostw runs surface at high severity.
+  { key: "evTaskName", label: "TaskName", aliases: [/^TaskName$/i] },
+  { key: "evTaskPath", label: "Path", aliases: [/^Path$/i] },
+  { key: "evActionName", label: "ActionName", aliases: [/^ActionName$/i] },
+  { key: "evTaskInstanceId", label: "TaskInstanceId", aliases: [/^TaskInstanceId$/i, /^InstanceId$/i] },
+  { key: "evTaskProcessId", label: "ProcessID", aliases: [/^ProcessID$/i] },
+  { key: "evUserContext", label: "UserContext", aliases: [/^UserContext$/i] },
+  { key: "evTaskContent", label: "TaskContent", aliases: [/^TaskContent$/i] },
+  { key: "evTaskContentNew", label: "TaskContentNew", aliases: [/^TaskContentNew$/i] },
+  // --- Service Control Manager (System log, EID 7040/7036/7035/7000) ---
+  // 7040 carries the display name in param1, the old/new start type in param2/param3 and
+  // the SERVICE name in param4; 7036/7035 carry the display name in param1. These are the
+  // only fields those events have, so without them a raw-EVTX 7040 produces an anonymous
+  // high-severity item and the 7036 service-start correlation never matches.
+  { key: "evParam1", label: "param1", aliases: [/^param1$/i] },
+  { key: "evParam2", label: "param2", aliases: [/^param2$/i] },
+  { key: "evParam3", label: "param3", aliases: [/^param3$/i] },
+  { key: "evParam4", label: "param4", aliases: [/^param4$/i] },
+  // --- Process creation (Security 4688, Sysmon 1) ---
+  // These are correlation-only events: the persistence analyzer never reports them, it uses
+  // them to promote a service install from "present" to "confirmed". Without the image and
+  // parent in the haystack that promotion can never happen on raw .evtx, no matter how many
+  // files are merged — the correlation regexes have nothing to match.
+  { key: "evNewProcessName", label: "NewProcessName", aliases: [/^NewProcessName$/i] },
+  { key: "evParentProcessName", label: "ParentProcessName", aliases: [/^ParentProcessName$/i] },
+  { key: "evParentImage", label: "ParentImage", aliases: [/^ParentImage$/i] },
+  { key: "evParentCommandLine", label: "ParentCommandLine", aliases: [/^ParentCommandLine$/i] },
+  // --- PowerShell script block logging (4104) ---
+  // Reassembly keys on ScriptBlockId + MessageNumber/MessageTotal; the text is the evidence.
+  { key: "evScriptBlockText", label: "ScriptBlockText", aliases: [/^ScriptBlockText$/i] },
+  { key: "evScriptBlockId", label: "ScriptBlockId", aliases: [/^ScriptBlockId$/i] },
+  { key: "evMessageNumber", label: "MessageNumber", aliases: [/^MessageNumber$/i] },
+  { key: "evMessageTotal", label: "MessageTotal", aliases: [/^MessageTotal$/i] },
+  { key: "evHostApplication", label: "HostApplication", aliases: [/^HostApplication$/i] },
+  // --- Remote execution context (WinRM Operational, WMI-Activity, Security logons) ---
+  // These name the machine on the OTHER end of a remote operation. They are what turns
+  // "a service was installed here" into "a service was installed here BY that host", which
+  // is the join key between a persistence artifact and a lateral-movement edge.
+  { key: "evClientMachine", label: "ClientMachine", aliases: [/^ClientMachine$/i] },
+  { key: "evClientMachineFqdn", label: "ClientMachineFQDN", aliases: [/^ClientMachineFQDN$/i] },
+  { key: "evClientProcessId", label: "ClientProcessId", aliases: [/^ClientProcessId$/i] },
+  { key: "evProviderName", label: "ProviderName", aliases: [/^ProviderName$/i] },
+  { key: "evPossibleCause", label: "PossibleCause", aliases: [/^PossibleCause$/i] },
+  { key: "evAuthMechanism", label: "AuthenticationMechanism", aliases: [/^AuthenticationMechanism$/i] },
+  { key: "evTargetLogonId", label: "TargetLogonId", aliases: [/^TargetLogonId$/i] },
+  { key: "evSubjectLogonId", label: "SubjectLogonId", aliases: [/^SubjectLogonId$/i] },
+  { key: "evLogonProcessName", label: "LogonProcessName", aliases: [/^LogonProcessName$/i] },
+  { key: "evOperationName", label: "operationName", aliases: [/^operationName$/i] },
+  // --- WMI (Sysmon 19/20/21, WMI-Activity 5861) ---
+  { key: "evWmiName", label: "Name", aliases: [/^Name$/i] },
+  { key: "evWmiQuery", label: "Query", aliases: [/^Query$/i] },
+  { key: "evWmiConsumer", label: "Consumer", aliases: [/^Consumer$/i] },
+  { key: "evWmiFilter", label: "Filter", aliases: [/^Filter$/i] },
+  { key: "evWmiDestination", label: "Destination", aliases: [/^Destination$/i] },
+  { key: "evWmiNamespace", label: "EventNamespace", aliases: [/^EventNamespace$/i] },
+  { key: "evWmiOperation", label: "Operation", aliases: [/^Operation$/i] },
+  { key: "evWmiType", label: "Type", aliases: [/^Type$/i] },
 ];
 
 function _buildRawEvtxFieldBlob(row) {
