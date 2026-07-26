@@ -1,7 +1,7 @@
 {
   "name": "irflow-timeline",
-  "version": "1.0.7",
-  "description": "IRFlow Timeline — High-performance DFIR timeline viewer for macOS (30-50GB+ CSV/XLSX)",
+  "version": "1.0.8",
+  "description": "IRFlow Timeline is a high-performance, SQLite-backed DFIR investigation workspace for macOS that turns large forensic datasets, native artifacts, and AI application histories into searchable timelines with source provenance.",
   "main": "electron/main.js",
   "author": "DFIR Community",
   "license": "Apache-2.0",
@@ -22,6 +22,7 @@
     "docs:dev": "vitepress dev docs",
     "docs:build": "vitepress build docs",
     "docs:preview": "vitepress preview docs",
+    "build": "vite build",
     "test": "node --test tests/*.test.js"
   },
   "devDependencies": {
