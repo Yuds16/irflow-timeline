@@ -4,12 +4,12 @@ import {
   applyDetectionSettingsToModal,
   buildDetectionSettingsFromModal,
 } from "./sigmaModalHelpers.js";
+import { clearIpcSubscription } from "../../../utils/ipc-subscriptions.js";
 
 export default function useSigmaModalBootstrap({ modal, setModal, tle }) {
   useEffect(() => {
     return () => {
-      const allChannels = ["sigma-progress"];
-      if (tle) allChannels.forEach((ch) => tle.removeAllListeners?.(ch));
+      clearIpcSubscription("sigma-progress");
     };
   }, [tle]);
 

@@ -193,6 +193,22 @@ export function openProcessTreeModal(columns = {}, extra = {}) {
   };
 }
 
+export function openTriageCollectionModal(extra = {}) {
+  return {
+    type: "triageCollection",
+    phase: "picking",        // picking -> scanning -> manifest -> importing
+    dir: "",
+    manifest: null,
+    error: null,
+    selected: null,          // Set<path>; null until the manifest seeds the defaults
+    includeSigmaLane: false,
+    analyzeAfter: true,
+    showAllEvtx: false,
+    batch: null,
+    ...extra,
+  };
+}
+
 export function openLateralMovementModal(columns = {}, extra = {}) {
   return {
     type: "lateralMovement",

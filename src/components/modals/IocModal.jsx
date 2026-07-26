@@ -5,6 +5,7 @@ import useCurrentTab from "../../hooks/useCurrentTab.js";
 import useTheme from "../../hooks/useTheme.js";
 import { formatNumber } from "../../utils/format.js";
 import { parseIocText, escapeIocForRegex } from "../../utils/ioc-parsing.js";
+import { clearIpcSubscription, replaceIpcSubscription } from "../../utils/ipc-subscriptions.js";
 import { VT_COMPATIBLE_RE } from "../../constants/grid.js";
 import { Modal } from "../primitives/index.js";
 import useModalChrome from "../../hooks/useModalChrome.js";
@@ -173,8 +174,8 @@ export default function IocModal() {
           </div>
           <button onClick={() => {
             if (vtEnriching && vtRequestId) tle.vtCancel(vtRequestId);
-            tle.removeAllListeners("vt-progress");
-            tle.removeAllListeners("vt-complete");
+            clearIpcSubscription("vt-progress");
+            clearIpcSubscription("vt-complete");
             if (vtResults && Object.keys(vtResults).length > 0 && results) {
               up("vtEnrichment", { results: vtResults, perIocResults: results.perIocResults, parsedIocs, matchedCount: results.matchedCount, allIocTags: results.allIocTags });
             }
@@ -424,8 +425,8 @@ export default function IocModal() {
               const activeRequestId = `vt-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
               setModal((p) => ({ ...p, vtEnriching: true, vtRequestId: activeRequestId, vtResults: vtAccum, vtProgress: { completed: 0, total: iocs.length, currentIoc: "" } }));
 
-              tle.removeAllListeners("vt-progress");
-              tle.removeAllListeners("vt-complete");
+              clearIpcSubscription("vt-progress");
+              clearIpcSubscription("vt-complete");
 
               const onProgress = (data) => {
                 if (!data || data.requestId !== activeRequestId) return;
@@ -447,26 +448,26 @@ export default function IocModal() {
                     if (count > 0) { setCopiedMsg(`Auto-tagged ${count} rows by VT verdict`); setTimeout(() => setCopiedMsg(false), 2500); }
                   });
                 }
-                tle.removeAllListeners("vt-progress");
-                tle.removeAllListeners("vt-complete");
+                clearIpcSubscription("vt-progress");
+                clearIpcSubscription("vt-complete");
               };
 
-              tle.onVtProgress(onProgress);
-              tle.onVtComplete(onComplete);
+              replaceIpcSubscription("vt-progress", tle.onVtProgress, onProgress);
+              replaceIpcSubscription("vt-complete", tle.onVtComplete, onComplete);
 
               const resp = await tle.vtBulkLookup(iocs, activeRequestId);
               if (resp?.error) {
                 setModal((p) => p?.type === "ioc" ? { ...p, vtEnriching: false, vtRequestId: null, error: resp.error } : p);
-                tle.removeAllListeners("vt-progress");
-                tle.removeAllListeners("vt-complete");
+                clearIpcSubscription("vt-progress");
+                clearIpcSubscription("vt-complete");
               }
             };
 
             const handleVtCancel = () => {
               if (vtRequestId) tle.vtCancel(vtRequestId);
               setModal((p) => p?.type === "ioc" ? { ...p, vtEnriching: false, vtRequestId: null } : p);
-              tle.removeAllListeners("vt-progress");
-              tle.removeAllListeners("vt-complete");
+              clearIpcSubscription("vt-progress");
+              clearIpcSubscription("vt-complete");
             };
 
             return (<>
@@ -724,8 +725,8 @@ export default function IocModal() {
               {(results.matchedCount > 0 || (results.matchedCount == null && results.allIocTags?.length > 0)) && (
                 <button onClick={() => {
                   if (vtEnriching && vtRequestId) tle.vtCancel(vtRequestId);
-                  tle.removeAllListeners("vt-progress");
-                  tle.removeAllListeners("vt-complete");
+                  clearIpcSubscription("vt-progress");
+                  clearIpcSubscription("vt-complete");
                   if (vtResults && Object.keys(vtResults).length > 0) {
                     up("vtEnrichment", { results: vtResults, perIocResults: results.perIocResults, parsedIocs, matchedCount: results.matchedCount, allIocTags: results.allIocTags });
                   }
@@ -734,8 +735,8 @@ export default function IocModal() {
               )}
               <button onClick={() => {
                 if (vtEnriching && vtRequestId) tle.vtCancel(vtRequestId);
-                tle.removeAllListeners("vt-progress");
-                tle.removeAllListeners("vt-complete");
+                clearIpcSubscription("vt-progress");
+                clearIpcSubscription("vt-complete");
                 if (vtResults && Object.keys(vtResults).length > 0) {
                   up("vtEnrichment", { results: vtResults, perIocResults: results.perIocResults, parsedIocs, matchedCount: results.matchedCount, allIocTags: results.allIocTags });
                 }

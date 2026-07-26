@@ -10,8 +10,10 @@ import {
   aiHistoryDetailPinnedFields,
   aiHistoryDetailHeaderOrder,
 } from "../utils/ai-history-profile.js";
+import { HISTOGRAM_GRANULARITIES } from "../constants/ui-controls.js";
 import { ROW_HEIGHT, HEADER_HEIGHT, FILTER_HEIGHT, BKMK_COL_WIDTH, CHECKBOX_COL_WIDTH, TAG_COL_WIDTH_MIN, VT_COL_WIDTH, EVIDENCE_COL_WIDTH, EVIDENCE_COL_MIN_WIDTH } from "../constants/grid.js";
 import { pillToneFor } from "../utils/evidence-pills.js";
+import { isRowSelected } from "../utils/row-selection.js";
 import { Badge, Tooltip, Loading } from "./primitives/index.js";
 
 export default function VirtualGrid({
@@ -21,13 +23,13 @@ export default function VirtualGrid({
   displayRows, rows, visible, skeletonIndices,
   totalCount, totalH, physicalH, pageOffset, si, tw, rowOffset,
   allVisH, pinnedH, scrollH, pinnedOffsets,
-  selectedRows, setSelectedRows, lastClickedRow, setLastClickedRow,
+  selectedRows, allRowsSelected, selectionCount,
   selectedColumn, setSelectedColumn,
   selectedRow, selectedRowData, detailVisible,
   compiledColors,
   // Handlers
   handleScroll, scrollRef, handleSort, handleHeaderDblClick, handleBookmark,
-  handleRowClick, handleCheckboxToggle, openGridContextMenu,
+  handleRowClick, handleCheckboxToggle, handleSelectAllRows, openGridContextMenu,
   handleGroupSelectAll, getGroupCheckState,
   expandGroup, collapseGroup, loadMoreGroupRows, getRowAt,
   pinColumn, unpinColumn, addGroupBy, removeGroupBy, reorderColumn, autoFitColumn,
@@ -42,7 +44,6 @@ export default function VirtualGrid({
   resizingCol, setResizingCol, resizeX, setResizeX, resizeW, setResizeW,
   tagColWidth, setTagColWidth,
   // Search
-  searchMatchIdx, hlMatchIndices,
   // Histogram
   histogramVisible, histogramCol, setHistogramCol,
   histogramData, histogramLoaded,
@@ -81,10 +82,20 @@ export default function VirtualGrid({
   const vtW = ct?.columnWidths?.["__vt__"] || VT_COL_WIDTH;
   const bkmkBase = isGrouped ? (16 + 26 + CHECKBOX_COL_WIDTH) : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH);
   const leftBase = bkmkBase + tagColWidth + (ct?.vtEnrichment ? vtW : 0);
+  // Sticky cells need an opaque base in both axes. Translucent backgrounds let
+  // horizontally scrolled columns and vertically scrolled rows remain legible
+  // underneath, which looks like duplicated/overlapping header content.
+  const stickyHeaderBg = th.headerBg;
+  const stickyFilterBg = th.bg;
   // Structural (non-data) sticky columns rendered in each data row, for an accurate
   // aria-colcount: bookmark + checkbox + tags, plus VT and Evidence when present.
   const _hasEvidenceCol = !!(ct?.evidencePillsByRowid && Object.keys(ct.evidencePillsByRowid).length > 0);
   const _structuralColCount = 3 + (ct?.vtEnrichment ? 1 : 0) + (_hasEvidenceCol ? 1 : 0);
+  const activateOnKey = (event, action) => {
+    if (event.key !== "Enter" && event.key !== " ") return;
+    event.preventDefault();
+    action(event);
+  };
 
   return (
     <>
@@ -171,21 +182,21 @@ export default function VirtualGrid({
             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 3, height: HEADER_BAR - 6 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "2px 8px", background: `${th.panelBg}88`, borderRadius: 6, border: `1px solid ${th.border}33` }}>
                 <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={th.accent} strokeWidth="2"><rect x="3" y="12" width="4" height="9" rx="1" /><rect x="10" y="6" width="4" height="15" rx="1" /><rect x="17" y="3" width="4" height="18" rx="1" /></svg>
-                <span style={{ color: th.textDim, fontSize: 10, fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>Timeline</span>
+                <span style={{ color: th.textDim, fontSize: 11, fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>Timeline</span>
               </div>
               <select value={effectiveHistCol || ""} onChange={(e) => { setHistogramCol(e.target.value); histBrushRef.current = { startIdx: null, endIdx: null, active: false }; hideBrushDOM(); }}
-                style={{ background: th.bgInput, border: `1px solid ${th.btnBorder}`, color: th.textDim, fontSize: 10, padding: "2px 6px", borderRadius: 4, cursor: "pointer", outline: "none" }}>
+                style={{ background: th.bgInput, border: `1px solid ${th.btnBorder}`, color: th.textDim, fontSize: 11, padding: "3px 6px", borderRadius: 4, cursor: "pointer", outline: "none" }}>
                 {[...ct.tsColumns].map((c) => <option key={c} value={c}>{c}</option>)}
               </select>
               {/* Granularity toggle */}
               <div style={{ display: "flex", background: th.btnBg, borderRadius: 6, border: `1px solid ${th.btnBorder}`, overflow: "hidden" }}>
-                {["day", "hour"].map((g) => (
-                  <button key={g} onClick={() => { setHistGranularity(g); histBrushRef.current = { startIdx: null, endIdx: null, active: false }; hideBrushDOM(); }}
-                    style={{ padding: "2px 8px", fontSize: 9, fontWeight: histGranularity === g ? 600 : 400, background: histGranularity === g ? th.accent + "22" : "transparent", color: histGranularity === g ? th.accent : th.textMuted, border: "none", cursor: "pointer", fontFamily: "-apple-system,sans-serif", textTransform: "capitalize" }}>{g}</button>
+                {HISTOGRAM_GRANULARITIES.map((granularity) => (
+                  <button key={granularity.value} onClick={() => { setHistGranularity(granularity.value); histBrushRef.current = { startIdx: null, endIdx: null, active: false }; hideBrushDOM(); }}
+                    style={{ minHeight: 24, padding: "2px 8px", fontSize: 11, fontWeight: histGranularity === granularity.value ? 600 : 400, background: histGranularity === granularity.value ? th.accent + "22" : "transparent", color: histGranularity === granularity.value ? th.accent : th.textMuted, border: "none", cursor: "pointer", fontFamily: "-apple-system,sans-serif" }}>{granularity.label}</button>
                 ))}
               </div>
               {histogramData.length > 0 && (
-                <span style={{ color: th.textMuted, fontSize: 9, fontFamily: "-apple-system, sans-serif" }}>
+                <span style={{ color: th.textMuted, fontSize: 11, fontFamily: "-apple-system, sans-serif" }}>
                   {histogramData[0]?.day} — {histogramData[histogramData.length - 1]?.day} ({histogramData.length} {bucketLabel}{histogramData.length !== 1 ? "s" : ""})
                 </span>
               )}
@@ -194,11 +205,11 @@ export default function VirtualGrid({
                   const next = { ...(ct.dateRangeFilters || {}) };
                   delete next[effectiveHistCol];
                   up("dateRangeFilters", next);
-                }} style={{ background: `${th.warning}22`, border: `1px solid ${th.warning}4D`, color: th.warning, cursor: "pointer", fontSize: 9, padding: "1px 8px", borderRadius: 3, marginLeft: "auto", fontFamily: "-apple-system,sans-serif" }}>
+                }} style={{ minHeight: 24, background: `${th.warning}22`, border: `1px solid ${th.warning}4D`, color: th.warning, cursor: "pointer", fontSize: 11, padding: "2px 8px", borderRadius: 3, marginLeft: "auto", fontFamily: "-apple-system,sans-serif" }}>
                   Clear filter
                 </button>
               )}
-              <button onClick={() => setHistogramVisible(false)} aria-label="Hide histogram" title="Hide histogram" style={{ background: "none", border: "none", color: th.textMuted, cursor: "pointer", fontSize: 10, marginLeft: ct.dateRangeFilters?.[effectiveHistCol] ? 4 : "auto", padding: "0 4px" }}>{"\u2715"}</button>
+              <button onClick={() => setHistogramVisible(false)} aria-label="Hide histogram" title="Hide histogram" style={{ width: 26, height: 26, background: "none", border: "none", color: th.textMuted, cursor: "pointer", fontSize: 11, marginLeft: ct.dateRangeFilters?.[effectiveHistCol] ? 4 : "auto", padding: 0 }}>{"\u2715"}</button>
             </div>
             {histogramData.length > 0 ? (
               <svg width="100%" height={svgH} style={{ display: "block", overflow: "visible", cursor: "crosshair", userSelect: "none" }}
@@ -277,7 +288,7 @@ export default function VirtualGrid({
               </svg>
             ) : (
               <div style={{ height: svgH, display: "flex", alignItems: "center", justifyContent: "center" }}>
-                <span style={{ color: th.textMuted, fontSize: 10, fontFamily: "-apple-system, sans-serif" }}>{histogramLoaded ? "No timestamp data to display" : "Loading histogram..."}</span>
+                <span style={{ color: th.textMuted, fontSize: 11, fontFamily: "-apple-system, sans-serif" }}>{histogramLoaded ? "No timestamp data to display" : "Loading histogram..."}</span>
               </div>
             )}
             {/* Drag handle */}
@@ -295,11 +306,13 @@ export default function VirtualGrid({
         <>
           {/* Grid */}
           <div
+            id="timeline-grid"
             role="grid"
             aria-label="Timeline events"
             aria-rowcount={(ct?.totalFiltered || 0) + 1}
             aria-colcount={_structuralColCount + pinnedH.length + scrollH.length}
             aria-multiselectable={true}
+            tabIndex={selectedRow === null ? 0 : -1}
             style={{ flex: 1, overflow: "auto", position: "relative", WebkitAppRegion: "no-drag", contain: "layout style paint", willChange: "transform" }}
             ref={scrollRef}
             onScroll={handleScroll}
@@ -315,7 +328,7 @@ export default function VirtualGrid({
                 <span style={{ color: th.text, fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}>
                   {indexTotal ? `Building column indexes… ${ct.indexesBuilt || 0}/${indexTotal}` : "Preparing column indexes…"}
                 </span>
-                <span style={{ color: th.textMuted, fontSize: 10, whiteSpace: "nowrap" }}>grid is usable now</span>
+                <span style={{ color: th.textMuted, fontSize: 11, whiteSpace: "nowrap" }}>grid is usable now</span>
                 {indexTotal > 0 && (
                   <div style={{ width: 70, height: 3, borderRadius: 2, background: (th.textMuted) + "33", overflow: "hidden", flexShrink: 0 }}>
                     <div style={{ height: "100%", borderRadius: 2, background: th.accent, transition: "width var(--m-slow) ease", width: `${indexPct}%` }} />
@@ -334,7 +347,7 @@ export default function VirtualGrid({
                 <span style={{ color: th.text, fontSize: 12, fontWeight: 600, whiteSpace: "nowrap" }}>
                   {ct.ftsOptimizing ? "Optimizing search index…" : `Building search index… ${ftsPct}%`}
                 </span>
-                <span style={{ color: th.textMuted, fontSize: 10, whiteSpace: "nowrap" }}>search uses substring scan meanwhile</span>
+                <span style={{ color: th.textMuted, fontSize: 11, whiteSpace: "nowrap" }}>search uses substring scan meanwhile</span>
                 <div style={{ width: 70, height: 3, borderRadius: 2, background: (th.textMuted) + "33", overflow: "hidden", flexShrink: 0 }}>
                   <div style={{ height: "100%", borderRadius: 2, background: th.accent, transition: "width var(--m-slow) ease", width: `${ftsPct}%` }} />
                 </div>
@@ -367,23 +380,31 @@ export default function VirtualGrid({
             )}
             <div style={{ minWidth: tw }}>
               {/* Header */}
-              <div role="row" aria-rowindex={1} style={{ display: "flex", position: "sticky", top: 0, zIndex: 10, background: th.headerBg + "cc", backdropFilter: "blur(12px) saturate(180%)", WebkitBackdropFilter: "blur(12px) saturate(180%)", borderBottom: `2px solid ${th.borderAccent}` }}>
+              <div role="row" aria-rowindex={1} style={{ display: "flex", position: "sticky", top: 0, zIndex: 10, background: stickyHeaderBg, borderBottom: `2px solid ${th.borderAccent}` }}>
                 {/* # column - always sticky */}
-                <div role="columnheader" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 2, width: isGrouped ? (16 + 26 + CHECKBOX_COL_WIDTH) : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH), minWidth: isGrouped ? (16 + 26 + CHECKBOX_COL_WIDTH) : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH), height: HEADER_HEIGHT, color: th.textMuted, fontSize: 10, fontWeight: 600, position: "sticky", left: 0, zIndex: 13, background: th.headerBg + "cc" }}>
+                <div role="columnheader" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 2, width: isGrouped ? (16 + 26 + CHECKBOX_COL_WIDTH) : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH), minWidth: isGrouped ? (16 + 26 + CHECKBOX_COL_WIDTH) : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH), height: HEADER_HEIGHT, color: th.textMuted, fontSize: 11, fontWeight: 600, position: "sticky", left: 0, zIndex: 13, background: stickyHeaderBg }}>
                   <span>#</span>
-                  {!isGrouped && <span style={{ cursor: "pointer", marginLeft: 2 }} onClick={() => { const allVis = new Set(); for (let i = 0; i < displayRows.length; i++) allVis.add(rowOffset + i); setSelectedRows(selectedRows.size === displayRows.length ? new Set() : allVis); }} title={selectedRows.size === displayRows.length ? "Deselect all" : "Select all"}><CheckboxIcon checked={selectedRows.size > 0 && selectedRows.size === displayRows.length} indeterminate={selectedRows.size > 0 && selectedRows.size < displayRows.length} /></span>}
+                  {!isGrouped && <button type="button" onClick={handleSelectAllRows}
+                    aria-label={selectionCount > 0 && allRowsSelected && selectedRows.size === 0 ? "Deselect all filtered rows" : "Select all filtered rows"}
+                    aria-pressed={selectionCount > 0 && allRowsSelected && selectedRows.size === 0}
+                    title={selectionCount > 0 && allRowsSelected && selectedRows.size === 0 ? "Deselect all filtered rows" : "Select all filtered rows"}
+                    style={{ width: 26, height: 26, display: "inline-flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", cursor: "pointer", marginLeft: 2, padding: 0 }}>
+                    <CheckboxIcon checked={selectionCount > 0 && allRowsSelected && selectedRows.size === 0} indeterminate={selectionCount > 0 && !(allRowsSelected && selectedRows.size === 0)} />
+                  </button>}
                 </div>
                 {/* Tags column header — sticky, resizable, standard style */}
                 <div
                   data-col-header="__tags__"
                   role="columnheader"
                   aria-sort={ct.sortCol === "__tags__" ? (ct.sortDir === "asc" ? "ascending" : "descending") : "none"}
+                  tabIndex={0}
+                  onKeyDown={(e) => activateOnKey(e, () => handleSort("__tags__"))}
                   onClick={(e) => { if (e.metaKey || e.ctrlKey) { e.preventDefault(); e.stopPropagation(); setContextMenu({ x: e.clientX, y: e.clientY, colName: "__tags__" }); return; } handleSort("__tags__"); }}
                   onDoubleClick={() => { clearTimeout(sortTimerRef.current); }}
                   onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                  style={{ display: "flex", alignItems: "center", height: HEADER_HEIGHT, width: tagColWidth, minWidth: tagColWidth, boxSizing: "border-box", padding: "0 8px", cursor: "pointer", userSelect: "none", fontWeight: 600, color: th.headerText, fontSize: 11, borderRight: `1px solid ${th.border}`, position: "sticky", left: isGrouped ? (16 + 26 + CHECKBOX_COL_WIDTH) : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH), zIndex: 12, background: th.headerBg + "cc", overflow: "hidden" }}>
+                  style={{ display: "flex", alignItems: "center", height: HEADER_HEIGHT, width: tagColWidth, minWidth: tagColWidth, boxSizing: "border-box", padding: "0 8px", cursor: "pointer", userSelect: "none", fontWeight: 600, color: th.headerText, fontSize: 11, borderRight: `1px solid ${th.border}`, position: "sticky", left: isGrouped ? (16 + 26 + CHECKBOX_COL_WIDTH) : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH), zIndex: 12, background: stickyHeaderBg, overflow: "hidden" }}>
                   <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>Tags</span>
-                  {ct.sortCol === "__tags__" && <span style={{ fontSize: 9, color: th.accent, marginLeft: 3 }}>{ct.sortDir === "asc" ? "▲" : "▼"}</span>}
+                  {ct.sortCol === "__tags__" && <span style={{ fontSize: 11, color: th.accent, marginLeft: 3 }}>{ct.sortDir === "asc" ? "▲" : "▼"}</span>}
                   <div onMouseDown={(e) => {
                     e.preventDefault(); e.stopPropagation();
                     const startX = e.clientX, startW = tagColWidth;
@@ -401,10 +422,12 @@ export default function VirtualGrid({
                   return <div title="VirusTotal verdict (from IOC enrichment)"
                     role="columnheader"
                     aria-sort={ct.sortCol === "__vt__" ? (ct.sortDir === "asc" ? "ascending" : "descending") : "none"}
+                    tabIndex={0}
+                    onKeyDown={(e) => activateOnKey(e, () => handleSort("__vt__"))}
                     onClick={() => handleSort("__vt__")}
-                    style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 2, height: HEADER_HEIGHT, width: vtW, minWidth: 40, boxSizing: "border-box", fontWeight: 600, color: th.headerText, fontSize: 10, borderRight: `1px solid ${th.border}`, position: "sticky", left: (isGrouped ? (16 + 26 + CHECKBOX_COL_WIDTH) : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH)) + tagColWidth, zIndex: 12, background: th.headerBg + "cc", cursor: "pointer", userSelect: "none", overflow: "hidden" }}>
+                    style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 2, height: HEADER_HEIGHT, width: vtW, minWidth: 40, boxSizing: "border-box", fontWeight: 600, color: th.headerText, fontSize: 11, borderRight: `1px solid ${th.border}`, position: "sticky", left: (isGrouped ? (16 + 26 + CHECKBOX_COL_WIDTH) : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH)) + tagColWidth, zIndex: 12, background: stickyHeaderBg, cursor: "pointer", userSelect: "none", overflow: "hidden" }}>
                     VirusTotal
-                    {ct.sortCol === "__vt__" && <span style={{ fontSize: 9, color: th.accent }}>{ct.sortDir === "asc" ? "▲" : "▼"}</span>}
+                    {ct.sortCol === "__vt__" && <span style={{ fontSize: 11, color: th.accent }}>{ct.sortDir === "asc" ? "▲" : "▼"}</span>}
                     <div onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); setResizingCol("__vt__"); setResizeX(e.clientX); setResizeW(vtW); }}
                       style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: 5, cursor: "col-resize", background: resizingCol === "__vt__" ? th.borderAccent : "transparent" }} />
                   </div>;
@@ -418,13 +441,13 @@ export default function VirtualGrid({
                   
                   return <div title={`Evidence pills (${Object.keys(pillsMap).length} rows tagged) — derived from analysis modal output`}
                     role="columnheader"
-                    style={{ display: "flex", alignItems: "center", gap: 4, height: HEADER_HEIGHT, width: evW, minWidth: EVIDENCE_COL_MIN_WIDTH, boxSizing: "border-box", padding: "0 8px", fontWeight: 600, color: th.headerText, fontSize: 10, borderRight: `1px solid ${th.border}`, position: "sticky", left: leftBase, zIndex: 12, background: th.headerBg + "cc", userSelect: "none", overflow: "hidden" }}>
+                    style={{ display: "flex", alignItems: "center", gap: 4, height: HEADER_HEIGHT, width: evW, minWidth: EVIDENCE_COL_MIN_WIDTH, boxSizing: "border-box", padding: "0 8px", fontWeight: 600, color: th.headerText, fontSize: 11, borderRight: `1px solid ${th.border}`, position: "sticky", left: leftBase, zIndex: 12, background: stickyHeaderBg, userSelect: "none", overflow: "hidden" }}>
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>
                       Evidence
-                      {ct.evidencePillFilter && <span style={{ marginLeft: 4, fontSize: 8, padding: "1px 4px", borderRadius: 3, background: th.accent + "22", color: th.accent, fontWeight: 500 }}>{ct.evidencePillFilter}</span>}
+                      {ct.evidencePillFilter && <span style={{ marginLeft: 4, fontSize: 11, padding: "1px 4px", borderRadius: 3, background: th.accent + "22", color: th.accent, fontWeight: 500 }}>{ct.evidencePillFilter}</span>}
                     </span>
                     {ct.evidencePillFilter && <button onClick={(e) => { e.stopPropagation(); up("evidencePillFilter", null); }}
-                      style={{ background: "none", border: "none", color: th.accent, cursor: "pointer", fontSize: 10, padding: "0 2px", flexShrink: 0, lineHeight: 1 }} aria-label="Clear pill focus" title="Clear pill focus">✕</button>}
+                      style={{ width: 24, height: 24, background: "none", border: "none", color: th.accent, cursor: "pointer", fontSize: 11, padding: 0, flexShrink: 0, lineHeight: 1 }} aria-label="Clear pill focus" title="Clear pill focus">✕</button>}
                     <button onClick={(e) => { e.stopPropagation(); up("evidencePillsByRowid", {}); up("evidencePillFilter", null); }}
                       style={{ background: "none", border: "none", color: th.textMuted, cursor: "pointer", fontSize: 11, padding: "0 2px", flexShrink: 0, lineHeight: 1 }} aria-label="Clear all evidence pills" title="Clear all evidence pills">✕</button>
                     <div onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); setResizingCol("__evidence__"); setResizeX(e.clientX); setResizeW(evW); }}
@@ -433,18 +456,21 @@ export default function VirtualGrid({
                 })()}
                 {/* Pinned columns */}
                 {pinnedH.map((h) => (
-                  <div key={h} data-col-header={h} role="columnheader" aria-sort={ct?.sortCol === h ? (ct?.sortDir === "asc" ? "ascending" : "descending") : "none"} draggable onDragStart={(e) => { if (e.button === 2) { e.preventDefault(); return; } e.dataTransfer.setData("text/column-name", h); e.dataTransfer.effectAllowed = "move"; }}
+                  <div key={h} data-col-header={h} role="columnheader" aria-sort={ct?.sortCol === h ? (ct?.sortDir === "asc" ? "ascending" : "descending") : "none"} tabIndex={0}
+                    onKeyDown={(e) => activateOnKey(e, () => handleSort(h))}
+                    draggable onDragStart={(e) => { if (e.button === 2) { e.preventDefault(); return; } e.dataTransfer.setData("text/column-name", h); e.dataTransfer.effectAllowed = "move"; }}
                     onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setHeaderDragOver(h); }}
                     onDragLeave={() => setHeaderDragOver((prev) => prev === h ? null : prev)}
                     onDrop={(e) => { e.preventDefault(); e.stopPropagation(); setHeaderDragOver(null); const src = e.dataTransfer.getData("text/column-name"); if (src && src !== h) reorderColumn(src, h); }}
                     onClick={(e) => { if (e.metaKey || e.ctrlKey) { e.preventDefault(); e.stopPropagation(); setContextMenu({ x: e.clientX, y: e.clientY, colName: h }); return; } if (e.altKey) { e.preventDefault(); e.stopPropagation(); setSelectedColumn?.(selectedColumn === h ? null : h); return; } handleSort(h); }}
                     onDoubleClick={() => handleHeaderDblClick(h)}
                     onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                    style={{ display: "flex", alignItems: "center", height: HEADER_HEIGHT, width: gw(h), minWidth: gw(h), boxSizing: "border-box", padding: "0 8px", cursor: "pointer", userSelect: "none", fontWeight: 600, color: th.headerText, fontSize: 11, borderRight: h === pinnedH[pinnedH.length - 1] ? `2px solid ${th.borderAccent}` : `1px solid ${th.border}`, borderLeft: selectedColumn === h ? `2px solid ${th.accent}` : headerDragOver === h ? `2px solid ${th.accent}` : "2px solid transparent", position: "sticky", left: pinnedOffsets.offsets[h], zIndex: 12, background: selectedColumn === h ? `${th.accent}30` : headerDragOver === h ? `${th.accent}1a` : th.headerBg + "cc", overflow: "hidden", transition: "background var(--m-fast) var(--ease-out), border-left-color var(--m-fast) var(--ease-out)" }}>
-                    <span onClick={(e) => { e.stopPropagation(); unpinColumn(h); }} style={{ fontSize: 8, marginRight: 3, cursor: "pointer", opacity: 0.7, flexShrink: 0 }} title="Unpin">📌</span>
+                    style={{ display: "flex", alignItems: "center", height: HEADER_HEIGHT, width: gw(h), minWidth: gw(h), boxSizing: "border-box", padding: "0 8px", cursor: "pointer", userSelect: "none", fontWeight: 600, color: th.headerText, fontSize: 11, borderRight: h === pinnedH[pinnedH.length - 1] ? `2px solid ${th.borderAccent}` : `1px solid ${th.border}`, borderLeft: selectedColumn === h ? `2px solid ${th.accent}` : headerDragOver === h ? `2px solid ${th.accent}` : "2px solid transparent", position: "sticky", left: pinnedOffsets.offsets[h], zIndex: 12, background: selectedColumn === h ? `linear-gradient(${th.accent}30, ${th.accent}30), ${stickyHeaderBg}` : headerDragOver === h ? `linear-gradient(${th.accent}1a, ${th.accent}1a), ${stickyHeaderBg}` : stickyHeaderBg, overflow: "hidden", transition: "background var(--m-fast) var(--ease-out), border-left-color var(--m-fast) var(--ease-out)" }}>
+                    <button type="button" onClick={(e) => { e.stopPropagation(); unpinColumn(h); }} aria-label={`Unpin ${h}`}
+                      style={{ width: 24, height: 24, padding: 0, background: "none", border: "none", fontSize: 11, marginRight: 3, cursor: "pointer", opacity: 0.8, flexShrink: 0 }} title="Unpin">📌</button>
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{h}</span>
-                    {ct.tsColumns.has(h) && <span style={{ fontSize: 8, marginRight: 2, opacity: 0.7 }}>⏱</span>}
-                    {ct.sortCol === h && <span style={{ fontSize: 9, color: th.accent, marginLeft: 3 }}>{ct.sortDir === "asc" ? "▲" : "▼"}</span>}
+                    {ct.tsColumns.has(h) && <span aria-label="Timestamp column" style={{ fontSize: 11, marginRight: 2, opacity: 0.8 }}>⏱</span>}
+                    {ct.sortCol === h && <span style={{ fontSize: 11, color: th.accent, marginLeft: 3 }}>{ct.sortDir === "asc" ? "▲" : "▼"}</span>}
                     <div onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); setResizingCol(h); setResizeX(e.clientX); setResizeW(gw(h)); }}
                       onDoubleClick={(e) => { e.preventDefault(); e.stopPropagation(); autoFitColumn(h); }}
                       style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: 5, cursor: "col-resize", background: resizingCol === h ? th.borderAccent : "transparent" }} />
@@ -452,7 +478,9 @@ export default function VirtualGrid({
                 ))}
                 {/* Scrollable columns */}
                 {scrollH.map((h) => (
-                  <div key={h} data-col-header={h} role="columnheader" aria-sort={ct?.sortCol === h ? (ct?.sortDir === "asc" ? "ascending" : "descending") : "none"} draggable onDragStart={(e) => { if (e.button === 2) { e.preventDefault(); return; } e.dataTransfer.setData("text/column-name", h); e.dataTransfer.effectAllowed = "move"; }}
+                  <div key={h} data-col-header={h} role="columnheader" aria-sort={ct?.sortCol === h ? (ct?.sortDir === "asc" ? "ascending" : "descending") : "none"} tabIndex={0}
+                    onKeyDown={(e) => activateOnKey(e, () => handleSort(h))}
+                    draggable onDragStart={(e) => { if (e.button === 2) { e.preventDefault(); return; } e.dataTransfer.setData("text/column-name", h); e.dataTransfer.effectAllowed = "move"; }}
                     onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = "move"; setHeaderDragOver(h); }}
                     onDragLeave={() => setHeaderDragOver((prev) => prev === h ? null : prev)}
                     onDrop={(e) => { e.preventDefault(); e.stopPropagation(); setHeaderDragOver(null); const src = e.dataTransfer.getData("text/column-name"); if (src && src !== h) reorderColumn(src, h); }}
@@ -461,8 +489,8 @@ export default function VirtualGrid({
                     onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
                     style={{ display: "flex", alignItems: "center", height: HEADER_HEIGHT, width: gw(h), minWidth: gw(h), boxSizing: "border-box", padding: "0 8px", cursor: "pointer", userSelect: "none", fontWeight: 600, color: th.headerText, fontSize: 11, borderRight: `1px solid ${th.border}`, borderLeft: selectedColumn === h ? `2px solid ${th.accent}` : headerDragOver === h ? `2px solid ${th.accent}` : "2px solid transparent", position: "relative", overflow: "hidden", background: selectedColumn === h ? `${th.accent}30` : headerDragOver === h ? `${th.accent}1a` : undefined, transition: "background var(--m-fast) var(--ease-out), border-left-color var(--m-fast) var(--ease-out)" }}>
                     <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{h}</span>
-                    {ct.tsColumns.has(h) && <span style={{ fontSize: 8, marginRight: 2, opacity: 0.7 }}>⏱</span>}
-                    {ct.sortCol === h && <span style={{ fontSize: 9, color: th.accent, marginLeft: 3 }}>{ct.sortDir === "asc" ? "▲" : "▼"}</span>}
+                    {ct.tsColumns.has(h) && <span aria-label="Timestamp column" style={{ fontSize: 11, marginRight: 2, opacity: 0.8 }}>⏱</span>}
+                    {ct.sortCol === h && <span style={{ fontSize: 11, color: th.accent, marginLeft: 3 }}>{ct.sortDir === "asc" ? "▲" : "▼"}</span>}
                     <div onMouseDown={(e) => { e.preventDefault(); e.stopPropagation(); setResizingCol(h); setResizeX(e.clientX); setResizeW(gw(h)); }}
                       onDoubleClick={(e) => { e.preventDefault(); e.stopPropagation(); autoFitColumn(h); }}
                       style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: 5, cursor: "col-resize", background: resizingCol === h ? th.borderAccent : "transparent" }} />
@@ -471,9 +499,9 @@ export default function VirtualGrid({
               </div>
 
               {/* Filters */}
-              <div style={{ display: "flex", position: "sticky", top: HEADER_HEIGHT, zIndex: 10, background: th.bg + "cc", backdropFilter: "blur(12px) saturate(180%)", WebkitBackdropFilter: "blur(12px) saturate(180%)", borderBottom: `1px solid ${th.border}` }}>
+              <div style={{ display: "flex", position: "sticky", top: HEADER_HEIGHT, zIndex: 10, background: stickyFilterBg, borderBottom: `1px solid ${th.border}` }}>
                 {/* # filter placeholder */}
-                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", width: isGrouped ? (16 + 26 + CHECKBOX_COL_WIDTH) : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH), minWidth: isGrouped ? (16 + 26 + CHECKBOX_COL_WIDTH) : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH), height: FILTER_HEIGHT, position: "sticky", left: 0, zIndex: 11, background: th.bg + "cc" }}>
+                <div style={{ display: "flex", alignItems: "center", justifyContent: "center", width: isGrouped ? (16 + 26 + CHECKBOX_COL_WIDTH) : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH), minWidth: isGrouped ? (16 + 26 + CHECKBOX_COL_WIDTH) : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH), height: FILTER_HEIGHT, position: "sticky", left: 0, zIndex: 11, background: stickyFilterBg }}>
                   <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke={th.textMuted} strokeWidth="2"><polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3" /></svg>
                 </div>
                 {/* Tags filter cell — standard layout with text input + dropdown */}
@@ -483,11 +511,12 @@ export default function VirtualGrid({
                   const hasFilter = !!(hasTextFilter || hasCbf);
                   const isDis = ct.disabledFilters?.has("__tags__");
                   return (
-                    <div style={{ width: tagColWidth, minWidth: tagColWidth, boxSizing: "border-box", padding: "0 2px", display: "flex", alignItems: "center", height: FILTER_HEIGHT, borderRight: `1px solid ${th.border}`, position: "sticky", left: isGrouped ? (16 + 26 + CHECKBOX_COL_WIDTH) : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH), zIndex: 11, background: th.bg + "cc" }}>
+                    <div style={{ width: tagColWidth, minWidth: tagColWidth, boxSizing: "border-box", padding: "0 2px", display: "flex", alignItems: "center", height: FILTER_HEIGHT, borderRight: `1px solid ${th.border}`, position: "sticky", left: isGrouped ? (16 + 26 + CHECKBOX_COL_WIDTH) : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH), zIndex: 11, background: stickyFilterBg }}>
                       {hasFilter && <button onClick={() => { const s = new Set(ct.disabledFilters || []); if (s.has("__tags__")) s.delete("__tags__"); else s.add("__tags__"); up("disabledFilters", s); }}
-                        style={{ background: "none", border: "none", cursor: "pointer", padding: "1px 2px", color: isDis ? th.danger : th.success, fontSize: 9, flexShrink: 0, lineHeight: 1, opacity: 0.8 }} title={isDis ? "Enable filter" : "Disable filter"}>{isDis ? "⊘" : "⊙"}</button>}
-                      <input value={ct.columnFilters["__tags__"] || ""} onChange={(e) => up("columnFilters", { ...ct.columnFilters, "__tags__": e.target.value })} placeholder="Filter..."
-                        style={{ flex: 1, background: th.bgInput, border: `1px solid ${hasCbf ? th.borderAccent : th.border}`, borderRadius: 3, color: th.text, fontSize: 10, padding: "2px 4px", outline: "none", fontFamily: "inherit", minWidth: 0, opacity: isDis ? 0.4 : 1, textDecoration: isDis ? "line-through" : "none" }} />
+                        aria-label={isDis ? "Enable Tags filter" : "Disable Tags filter"}
+                        style={{ width: 24, height: 24, background: "none", border: "none", cursor: "pointer", padding: 0, color: isDis ? th.danger : th.success, fontSize: 11, flexShrink: 0, lineHeight: 1 }} title={isDis ? "Enable filter" : "Disable filter"}>{isDis ? "⊘" : "⊙"}</button>}
+                      <input aria-label="Filter Tags" value={ct.columnFilters["__tags__"] || ""} onChange={(e) => up("columnFilters", { ...ct.columnFilters, "__tags__": e.target.value })} placeholder="Filter..."
+                        style={{ flex: 1, background: th.bgInput, border: `1px solid ${hasCbf ? th.borderAccent : th.border}`, borderRadius: 3, color: th.text, fontSize: 11, padding: "3px 4px", outline: "none", fontFamily: "inherit", minWidth: 0, opacity: isDis ? 0.4 : 1, textDecoration: isDis ? "line-through" : "none" }} />
                       <button onClick={(e) => { e.stopPropagation(); const rect = e.currentTarget.getBoundingClientRect(); setFilterDropdown(filterDropdown?.colName === "__tags__" ? null : { colName: "__tags__", x: rect.left, y: rect.bottom + 2 }); }}
                         style={{ background: "none", border: "none", cursor: "pointer", padding: "2px 3px", color: hasCbf ? th.borderAccent : th.textDim, fontSize: 12, flexShrink: 0, lineHeight: 1 }} title="Filter by tags">▼</button>
                     </div>
@@ -499,9 +528,10 @@ export default function VirtualGrid({
                   const hasFilter = hasCbf;
                   const isDis = ct.disabledFilters?.has("__vt__");
                   return (
-                    <div style={{ width: ct.columnWidths?.["__vt__"] || VT_COL_WIDTH, minWidth: 40, boxSizing: "border-box", padding: "0 1px", display: "flex", alignItems: "center", justifyContent: "flex-end", height: FILTER_HEIGHT, borderRight: `1px solid ${th.border}`, position: "sticky", left: (isGrouped ? (16 + 26 + CHECKBOX_COL_WIDTH) : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH)) + tagColWidth, zIndex: 11, background: th.bg + "cc" }}>
+                    <div style={{ width: ct.columnWidths?.["__vt__"] || VT_COL_WIDTH, minWidth: 40, boxSizing: "border-box", padding: "0 1px", display: "flex", alignItems: "center", justifyContent: "flex-end", height: FILTER_HEIGHT, borderRight: `1px solid ${th.border}`, position: "sticky", left: (isGrouped ? (16 + 26 + CHECKBOX_COL_WIDTH) : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH)) + tagColWidth, zIndex: 11, background: stickyFilterBg }}>
                       {hasFilter && <button onClick={() => { const s = new Set(ct.disabledFilters || []); if (s.has("__vt__")) s.delete("__vt__"); else s.add("__vt__"); up("disabledFilters", s); }}
-                        style={{ background: "none", border: "none", cursor: "pointer", padding: "1px 1px", color: isDis ? th.danger : th.success, fontSize: 9, flexShrink: 0, lineHeight: 1, opacity: 0.8 }} title={isDis ? "Enable filter" : "Disable filter"}>{isDis ? "⊘" : "⊙"}</button>}
+                        aria-label={isDis ? "Enable VirusTotal filter" : "Disable VirusTotal filter"}
+                        style={{ width: 24, height: 24, background: "none", border: "none", cursor: "pointer", padding: 0, color: isDis ? th.danger : th.success, fontSize: 11, flexShrink: 0, lineHeight: 1 }} title={isDis ? "Enable filter" : "Disable filter"}>{isDis ? "⊘" : "⊙"}</button>}
                       <button onClick={(e) => { e.stopPropagation(); const rect = e.currentTarget.getBoundingClientRect(); setFilterDropdown(filterDropdown?.colName === "__vt__" ? null : { colName: "__vt__", x: rect.left, y: rect.bottom + 2 }); }}
                         style={{ background: "none", border: "none", cursor: "pointer", padding: "2px 4px", color: hasFilter ? th.borderAccent : th.textDim, fontSize: 12, flexShrink: 0, lineHeight: 1 }} title="Filter by VT verdict">▼</button>
                     </div>
@@ -515,7 +545,7 @@ export default function VirtualGrid({
                   
                   
                   return (
-                    <div style={{ width: evW, minWidth: EVIDENCE_COL_MIN_WIDTH, boxSizing: "border-box", padding: "0 6px", display: "flex", alignItems: "center", height: FILTER_HEIGHT, borderRight: `1px solid ${th.border}`, position: "sticky", left: leftBase, zIndex: 11, background: th.bg + "cc", fontSize: 9, color: ct.evidencePillFilter ? th.accent : th.textMuted, fontFamily: "-apple-system, sans-serif" }}>
+                    <div style={{ width: evW, minWidth: EVIDENCE_COL_MIN_WIDTH, boxSizing: "border-box", padding: "0 6px", display: "flex", alignItems: "center", height: FILTER_HEIGHT, borderRight: `1px solid ${th.border}`, position: "sticky", left: leftBase, zIndex: 11, background: stickyFilterBg, fontSize: 11, color: ct.evidencePillFilter ? th.accent : th.textMuted, fontFamily: "-apple-system, sans-serif" }}>
                       {ct.evidencePillFilter ? `Focus: ${ct.evidencePillFilter}` : `${Object.keys(pillsMap).length} tagged`}
                     </div>
                   );
@@ -528,13 +558,15 @@ export default function VirtualGrid({
                   const hasFilter = !!(ct.columnFilters[h] || hasCbf);
                   const isDis = ct.disabledFilters?.has(h);
                   return (
-                    <div key={h} style={{ width: gw(h), minWidth: gw(h), boxSizing: "border-box", padding: "0 2px", display: "flex", alignItems: "center", height: FILTER_HEIGHT, borderRight: h === pinnedH[pinnedH.length - 1] ? `2px solid ${th.borderAccent}` : `1px solid ${th.border}`, position: "sticky", left: pinnedOffsets.offsets[h], zIndex: 11, background: th.bg + "cc" }}>
+                    <div key={h} style={{ width: gw(h), minWidth: gw(h), boxSizing: "border-box", padding: "0 2px", display: "flex", alignItems: "center", height: FILTER_HEIGHT, borderRight: h === pinnedH[pinnedH.length - 1] ? `2px solid ${th.borderAccent}` : `1px solid ${th.border}`, position: "sticky", left: pinnedOffsets.offsets[h], zIndex: 11, background: stickyFilterBg }}>
                       {hasFilter && <button onClick={() => { const s = new Set(ct.disabledFilters || []); if (s.has(h)) s.delete(h); else s.add(h); up("disabledFilters", s); }}
-                        style={{ background: "none", border: "none", cursor: "pointer", padding: "1px 2px", color: isDis ? th.danger : th.success, fontSize: 9, flexShrink: 0, lineHeight: 1, opacity: 0.8 }} title={isDis ? "Enable filter" : "Disable filter"}>{isDis ? "⊘" : "⊙"}</button>}
-                      <input value={ct.columnFilters[h] || ""} onChange={(e) => up("columnFilters", { ...ct.columnFilters, [h]: e.target.value })} placeholder="Filter..."
-                        style={{ flex: 1, background: th.bgInput, border: `1px solid ${hasCbf ? th.borderAccent : th.border}`, borderRadius: 3, color: th.text, fontSize: 10, padding: "2px 4px", outline: "none", fontFamily: "inherit", minWidth: 0, opacity: isDis ? 0.4 : 1, textDecoration: isDis ? "line-through" : "none" }} />
+                        aria-label={`${isDis ? "Enable" : "Disable"} ${h} filter`}
+                        style={{ width: 24, height: 24, background: "none", border: "none", cursor: "pointer", padding: 0, color: isDis ? th.danger : th.success, fontSize: 11, flexShrink: 0, lineHeight: 1 }} title={isDis ? "Enable filter" : "Disable filter"}>{isDis ? "⊘" : "⊙"}</button>}
+                      <input aria-label={`Filter ${h}`} value={ct.columnFilters[h] || ""} onChange={(e) => up("columnFilters", { ...ct.columnFilters, [h]: e.target.value })} placeholder="Filter..."
+                        style={{ flex: 1, background: th.bgInput, border: `1px solid ${hasCbf ? th.borderAccent : th.border}`, borderRadius: 3, color: th.text, fontSize: 11, padding: "3px 4px", outline: "none", fontFamily: "inherit", minWidth: 0, opacity: isDis ? 0.4 : 1, textDecoration: isDis ? "line-through" : "none" }} />
                       {isTs && <button onClick={(e) => { e.stopPropagation(); const rect = e.currentTarget.getBoundingClientRect(); setDateRangeDropdown(dateRangeDropdown?.colName === h ? null : { colName: h, x: rect.left, y: rect.bottom + 2, from: hasDr?.from || "", to: hasDr?.to || "" }); }}
-                        style={{ background: "none", border: "none", cursor: "pointer", padding: "2px 2px", color: hasDr ? th.warning : th.textMuted, fontSize: 9, flexShrink: 0, lineHeight: 1 }} title="Date range filter">⏱</button>}
+                        aria-label={`Date range filter for ${h}`}
+                        style={{ width: 24, height: 24, background: "none", border: "none", cursor: "pointer", padding: 0, color: hasDr ? th.warning : th.textMuted, fontSize: 11, flexShrink: 0, lineHeight: 1 }} title="Date range filter">⏱</button>}
                       <button onClick={(e) => { e.stopPropagation(); const rect = e.currentTarget.getBoundingClientRect(); setFilterDropdown(filterDropdown?.colName === h ? null : { colName: h, x: rect.left, y: rect.bottom + 2 }); }}
                         style={{ background: "none", border: "none", cursor: "pointer", padding: "2px 3px", color: hasCbf ? th.borderAccent : th.textDim, fontSize: 12, flexShrink: 0, lineHeight: 1 }} title="Filter by values">▼</button>
                     </div>
@@ -550,11 +582,13 @@ export default function VirtualGrid({
                   return (
                     <div key={h} style={{ width: gw(h), minWidth: gw(h), boxSizing: "border-box", padding: "0 2px", display: "flex", alignItems: "center", height: FILTER_HEIGHT, borderRight: `1px solid ${th.border}` }}>
                       {hasFilter && <button onClick={() => { const s = new Set(ct.disabledFilters || []); if (s.has(h)) s.delete(h); else s.add(h); up("disabledFilters", s); }}
-                        style={{ background: "none", border: "none", cursor: "pointer", padding: "1px 2px", color: isDis ? th.danger : th.success, fontSize: 9, flexShrink: 0, lineHeight: 1, opacity: 0.8 }} title={isDis ? "Enable filter" : "Disable filter"}>{isDis ? "⊘" : "⊙"}</button>}
-                      <input value={ct.columnFilters[h] || ""} onChange={(e) => up("columnFilters", { ...ct.columnFilters, [h]: e.target.value })} placeholder="Filter..."
-                        style={{ flex: 1, background: th.bgInput, border: `1px solid ${hasCbf ? th.borderAccent : th.border}`, borderRadius: 3, color: th.text, fontSize: 10, padding: "2px 4px", outline: "none", fontFamily: "inherit", minWidth: 0, opacity: isDis ? 0.4 : 1, textDecoration: isDis ? "line-through" : "none" }} />
+                        aria-label={`${isDis ? "Enable" : "Disable"} ${h} filter`}
+                        style={{ width: 24, height: 24, background: "none", border: "none", cursor: "pointer", padding: 0, color: isDis ? th.danger : th.success, fontSize: 11, flexShrink: 0, lineHeight: 1 }} title={isDis ? "Enable filter" : "Disable filter"}>{isDis ? "⊘" : "⊙"}</button>}
+                      <input aria-label={`Filter ${h}`} value={ct.columnFilters[h] || ""} onChange={(e) => up("columnFilters", { ...ct.columnFilters, [h]: e.target.value })} placeholder="Filter..."
+                        style={{ flex: 1, background: th.bgInput, border: `1px solid ${hasCbf ? th.borderAccent : th.border}`, borderRadius: 3, color: th.text, fontSize: 11, padding: "3px 4px", outline: "none", fontFamily: "inherit", minWidth: 0, opacity: isDis ? 0.4 : 1, textDecoration: isDis ? "line-through" : "none" }} />
                       {isTs && <button onClick={(e) => { e.stopPropagation(); const rect = e.currentTarget.getBoundingClientRect(); setDateRangeDropdown(dateRangeDropdown?.colName === h ? null : { colName: h, x: rect.left, y: rect.bottom + 2, from: hasDr?.from || "", to: hasDr?.to || "" }); }}
-                        style={{ background: "none", border: "none", cursor: "pointer", padding: "2px 2px", color: hasDr ? th.warning : th.textMuted, fontSize: 9, flexShrink: 0, lineHeight: 1 }} title="Date range filter">⏱</button>}
+                        aria-label={`Date range filter for ${h}`}
+                        style={{ width: 24, height: 24, background: "none", border: "none", cursor: "pointer", padding: 0, color: hasDr ? th.warning : th.textMuted, fontSize: 11, flexShrink: 0, lineHeight: 1 }} title="Date range filter">⏱</button>}
                       <button onClick={(e) => { e.stopPropagation(); const rect = e.currentTarget.getBoundingClientRect(); setFilterDropdown(filterDropdown?.colName === h ? null : { colName: h, x: rect.left, y: rect.bottom + 2 }); }}
                         style={{ background: "none", border: "none", cursor: "pointer", padding: "2px 3px", color: hasCbf ? th.borderAccent : th.textDim, fontSize: 12, flexShrink: 0, lineHeight: 1 }} title="Filter by values">▼</button>
                     </div>
@@ -573,17 +607,21 @@ export default function VirtualGrid({
                     const indent = (item.depth || 0) * 20 + 12;
                     const gcs = isExpanded ? getGroupCheckState(ai, item.depth) : null;
                     return (
-                      <div key={`g-${item.pathKey}`} onClick={() => isExpanded ? collapseGroup(item.pathKey) : expandGroup(item.pathKey, item.filters, item.depth + 1)}
-                        style={{ display: "flex", alignItems: "center", height: ROW_HEIGHT, position: "absolute", top: ai * ROW_HEIGHT - (pageOffset || 0), width: tw, background: th.bgAlt, cursor: "pointer", borderBottom: `1px solid ${th.border}`, paddingLeft: indent, gap: 8 }}>
+                      <div key={`g-${item.pathKey}`} role="row" tabIndex={0}
+                        aria-expanded={isExpanded}
+                        onKeyDown={(e) => activateOnKey(e, () => isExpanded ? collapseGroup(item.pathKey) : expandGroup(item.pathKey, item.filters, item.depth + 1))}
+                        onClick={() => isExpanded ? collapseGroup(item.pathKey) : expandGroup(item.pathKey, item.filters, item.depth + 1)}
+                        style={{ display: "flex", alignItems: "center", height: ROW_HEIGHT, position: "absolute", top: ai * ROW_HEIGHT - (pageOffset || 0), width: tw, boxSizing: "border-box", background: th.bgAlt, cursor: "pointer", borderBottom: `1px solid ${th.border}`, paddingLeft: indent, gap: 8 }}>
                         {isExpanded && gcs && gcs.total > 0 && (
-                          <div onClick={(e) => { e.stopPropagation(); handleGroupSelectAll(ai); }}
-                            style={{ display: "flex", alignItems: "center", cursor: "pointer", flexShrink: 0 }}>
+                          <button type="button" onClick={(e) => { e.stopPropagation(); handleGroupSelectAll(ai); }}
+                            aria-label={`Select all rows in ${item.colName} ${item.value || "empty"}`}
+                            style={{ width: 26, height: 26, padding: 0, border: "none", background: "none", display: "flex", alignItems: "center", justifyContent: "center", cursor: "pointer", flexShrink: 0 }}>
                             <CheckboxIcon
                               checked={gcs.selected === gcs.total}
                               indeterminate={gcs.selected > 0 && gcs.selected < gcs.total} />
-                          </div>
+                          </button>
                         )}
-                        <span style={{ color: th.accent, fontSize: 10, width: 14, textAlign: "center", flexShrink: 0 }}>{isExpanded ? "▼" : "▶"}</span>
+                        <span style={{ color: th.accent, fontSize: 11, width: 14, textAlign: "center", flexShrink: 0 }}>{isExpanded ? "▼" : "▶"}</span>
                         <span style={{ color: th.text, fontSize: 12, fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>{item.colName}:</span>
                         <span style={{ color: th.text, fontSize: 12, fontFamily: "-apple-system, sans-serif" }}>{item.value || "(empty)"}</span>
                         <span style={{ color: th.textMuted, fontSize: 11, fontFamily: "-apple-system, sans-serif" }}>— {formatNumber(item.count)} rows</span>
@@ -599,10 +637,10 @@ export default function VirtualGrid({
                       <div key={`m-${item.pathKey}`} style={{ height: ROW_HEIGHT, position: "absolute", top: ai * ROW_HEIGHT - (pageOffset || 0), display: "flex", alignItems: "center", paddingLeft: indent, color: th.textMuted, fontSize: 11, fontFamily: "-apple-system, sans-serif", gap: 8 }}>
                         <span style={{ fontStyle: "italic" }}>Showing {formatNumber(item.loaded)} of {formatNumber(item.total)}</span>
                         <button onClick={() => loadMoreGroupRows(item.pathKey, false)}
-                          style={{ background: th.accent + "22", color: th.accent, border: `1px solid ${th.accent}44`, borderRadius: 3, padding: "1px 8px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>
+                          style={{ minHeight: 24, background: th.accent + "22", color: th.accent, border: `1px solid ${th.accent}44`, borderRadius: 3, padding: "2px 8px", fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>
                           Load more ({formatNumber(Math.min(remaining, 100000))})</button>
                         {remaining > 100000 && <button onClick={() => loadMoreGroupRows(item.pathKey, true)}
-                          style={{ background: th.warning + "22", color: th.warning, border: `1px solid ${th.warning}44`, borderRadius: 3, padding: "1px 8px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>
+                          style={{ minHeight: 24, background: th.warning + "22", color: th.warning, border: `1px solid ${th.warning}44`, borderRadius: 3, padding: "2px 8px", fontSize: 11, cursor: "pointer", fontFamily: "inherit" }}>
                           Load all ({formatNumber(remaining)})</button>}
                       </div>
                     );
@@ -615,7 +653,7 @@ export default function VirtualGrid({
                   const rTags = ct.rowTags[row.__idx] || [];
                   const cm = applyColors(row, compiledColors);
                   const bm = ct.bookmarkedSet?.has(row.__idx);
-                  const sel = selectedRows.has(ai);
+                  const sel = isRowSelected(selectedRows, allRowsSelected, row.__idx);
                   const rowBg = getRowBg(ai, row, sel, cm, bm);
 
                   // Evidence pill focus: dim rows that don't carry the active pill
@@ -627,26 +665,35 @@ export default function VirtualGrid({
                   const stickyOverlay = sel ? `inset 0 0 0 9999px ${th.selection}` : bm ? `inset 0 0 0 9999px ${th.bookmark}` : "none";
 
                   return (
-                    <div key={row.__idx} data-row-id={row.__idx} data-row-index={ai} role="row" aria-rowindex={ai + 2} aria-selected={!!sel} onClick={(e) => handleRowClick(ai, e)}
+                    <div key={row.__idx} data-row-id={row.__idx} data-row-index={ai} role="row" aria-rowindex={ai + 2} aria-selected={!!sel}
+                      tabIndex={selectedRow === ai || (selectedRow === null && vi === 0) ? 0 : -1}
+                      onKeyDown={(e) => activateOnKey(e, (keyEvent) => handleRowClick(ai, keyEvent))}
+                      onClick={(e) => handleRowClick(ai, e)}
                       onContextMenu={(e) => { e.preventDefault(); e.stopPropagation(); }}
-                      style={{ display: "flex", height: ROW_HEIGHT, position: "absolute", top: ai * ROW_HEIGHT - (pageOffset || 0), width: tw,
+                      style={{ display: "flex", height: ROW_HEIGHT, position: "absolute", top: ai * ROW_HEIGHT - (pageOffset || 0), width: tw, boxSizing: "border-box",
                         background: rowBg, color: cm ? cm.fg : th.text, borderBottom: `1px solid ${th.cellBorder}`,
                         boxShadow: sel ? `inset 2px 0 0 0 ${th.borderAccent}` : "none", cursor: "default",
                         paddingLeft: isGrouped ? 16 : 0, opacity: _pillDimmed ? 0.25 : 1, transition: "opacity var(--m-base)" }}>
                       {/* Bookmark - always sticky */}
-                      <div role="gridcell" style={{ display: "flex", alignItems: "center", justifyContent: "center", width: isGrouped ? 26 : BKMK_COL_WIDTH, minWidth: isGrouped ? 26 : BKMK_COL_WIDTH, cursor: "pointer", position: "sticky", left: isGrouped ? 16 : 0, zIndex: 3, background: stickyBase, boxShadow: stickyOverlay }}
-                        onClick={(e) => { e.stopPropagation(); handleBookmark(row.__idx); }}>
-                        <BkmkIcon filled={bm} />
+                      <div role="gridcell" style={{ display: "flex", alignItems: "center", justifyContent: "center", width: isGrouped ? 26 : BKMK_COL_WIDTH, minWidth: isGrouped ? 26 : BKMK_COL_WIDTH, boxSizing: "border-box", position: "sticky", left: isGrouped ? 16 : 0, zIndex: 3, background: stickyBase, boxShadow: stickyOverlay }}>
+                        <button type="button" aria-label={`${bm ? "Remove" : "Add"} bookmark for row ${ai + 1}`} aria-pressed={!!bm}
+                          onClick={(e) => { e.stopPropagation(); handleBookmark(row.__idx); }}
+                          style={{ width: 26, height: 26, padding: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", cursor: "pointer" }}>
+                          <BkmkIcon filled={bm} />
+                        </button>
                       </div>
                       {/* Checkbox cell */}
-                      <div role="gridcell" style={{ display: "flex", alignItems: "center", justifyContent: "center", width: CHECKBOX_COL_WIDTH, minWidth: CHECKBOX_COL_WIDTH, position: "sticky", left: isGrouped ? 42 : BKMK_COL_WIDTH, zIndex: 3, background: stickyBase, boxShadow: stickyOverlay, cursor: "pointer" }}
-                        onClick={(e) => { e.stopPropagation(); handleCheckboxToggle(ai); }}>
-                        <CheckboxIcon checked={sel} />
+                      <div role="gridcell" style={{ display: "flex", alignItems: "center", justifyContent: "center", width: CHECKBOX_COL_WIDTH, minWidth: CHECKBOX_COL_WIDTH, boxSizing: "border-box", position: "sticky", left: isGrouped ? 42 : BKMK_COL_WIDTH, zIndex: 3, background: stickyBase, boxShadow: stickyOverlay }}>
+                        <button type="button" aria-label={`${sel ? "Deselect" : "Select"} row ${ai + 1}`} aria-pressed={!!sel}
+                          onClick={(e) => { e.stopPropagation(); handleCheckboxToggle(ai); }}
+                          style={{ width: 26, height: 26, padding: 0, display: "flex", alignItems: "center", justifyContent: "center", background: "none", border: "none", cursor: "pointer" }}>
+                          <CheckboxIcon checked={sel} />
+                        </button>
                       </div>
                       {/* Tags cell — sticky */}
-                      <div role="gridcell" style={{ display: "flex", alignItems: "center", gap: 2, width: tagColWidth, minWidth: tagColWidth, padding: "0 4px", overflow: "hidden", borderRight: `1px solid ${th.cellBorder}`, position: "sticky", left: isGrouped ? 42 + CHECKBOX_COL_WIDTH : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH), zIndex: 2, background: stickyBase, boxShadow: stickyOverlay }}>
+                      <div role="gridcell" style={{ display: "flex", alignItems: "center", gap: 2, width: tagColWidth, minWidth: tagColWidth, boxSizing: "border-box", padding: "0 4px", overflow: "hidden", borderRight: `1px solid ${th.cellBorder}`, position: "sticky", left: isGrouped ? 42 + CHECKBOX_COL_WIDTH : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH), zIndex: 2, background: stickyBase, boxShadow: stickyOverlay }}>
                         {rTags.map((tag) => (
-                          <span key={tag} style={{ padding: "0 4px", borderRadius: 3, fontSize: 9, background: ((ct.tagColors || {})[tag] || th.textMuted) + "33", color: (ct.tagColors || {})[tag] || th.textDim, whiteSpace: "nowrap", lineHeight: "16px" }}>{tag}</span>
+                          <span key={tag} style={{ padding: "0 4px", borderRadius: 3, fontSize: 11, background: ((ct.tagColors || {})[tag] || th.textMuted) + "33", color: (ct.tagColors || {})[tag] || th.textDim, whiteSpace: "nowrap", lineHeight: "18px" }}>{tag}</span>
                         ))}
                       </div>
                       {/* VT verdict cell — sticky, after tags */}
@@ -674,12 +721,12 @@ export default function VirtualGrid({
                         const worstThreat = iocDetails.find((d) => d.verdict === worstVerdict && d.threatLabel)?.threatLabel || null;
                         
                         return (
-                          <div role="gridcell" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3, width: vtW, minWidth: 40, borderRight: `1px solid ${th.cellBorder}`, position: "sticky", left: (isGrouped ? 42 + CHECKBOX_COL_WIDTH : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH)) + tagColWidth, zIndex: 2, background: stickyBase, boxShadow: stickyOverlay, overflow: "hidden" }}>
+                          <div role="gridcell" style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 3, width: vtW, minWidth: 40, boxSizing: "border-box", borderRight: `1px solid ${th.cellBorder}`, position: "sticky", left: (isGrouped ? 42 + CHECKBOX_COL_WIDTH : (BKMK_COL_WIDTH + CHECKBOX_COL_WIDTH)) + tagColWidth, zIndex: 2, background: stickyBase, boxShadow: stickyOverlay, overflow: "hidden" }}>
                             {worstVerdict && (
                               <Tooltip content={tooltip} maxWidth={420}>
                                 <span
                                   onClick={worstUrl ? (e) => { e.stopPropagation(); window.open(worstUrl, "_blank"); } : undefined}
-                                  style={{ fontSize: 8, padding: "1px 4px", borderRadius: 3, fontWeight: 700, fontFamily: "'SF Mono', Menlo, monospace",
+                                  style={{ fontSize: 11, padding: "1px 4px", borderRadius: 3, fontWeight: 700, fontFamily: "'SF Mono', Menlo, monospace",
                                     background: `${vtColor}22`, color: vtColor, border: `1px solid ${vtColor}44`, lineHeight: "14px",
                                     cursor: worstUrl ? "pointer" : "default", flexShrink: 0 }}>
                                   {worstScore}
@@ -688,7 +735,7 @@ export default function VirtualGrid({
                             )}
                             {worstThreat && vtW > 90 && (
                               <Tooltip content={worstThreat}>
-                                <span style={{ fontSize: 7, color: vtColor, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontStyle: "italic", opacity: 0.85 }}>{worstThreat}</span>
+                                <span style={{ fontSize: 11, color: vtColor, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontStyle: "italic" }}>{worstThreat}</span>
                               </Tooltip>
                             )}
                           </div>
@@ -703,7 +750,7 @@ export default function VirtualGrid({
                         
                         const rowPills = pillsMap[row.__idx];
                         return (
-                          <div role="gridcell" style={{ display: "flex", alignItems: "center", gap: 3, width: evW, minWidth: EVIDENCE_COL_MIN_WIDTH, padding: "0 6px", overflow: "hidden", borderRight: `1px solid ${th.cellBorder}`, position: "sticky", left: leftBase, zIndex: 2, background: stickyBase, boxShadow: stickyOverlay }}>
+                          <div role="gridcell" style={{ display: "flex", alignItems: "center", gap: 3, width: evW, minWidth: EVIDENCE_COL_MIN_WIDTH, boxSizing: "border-box", padding: "0 6px", overflow: "hidden", borderRight: `1px solid ${th.cellBorder}`, position: "sticky", left: leftBase, zIndex: 2, background: stickyBase, boxShadow: stickyOverlay }}>
                             {rowPills && rowPills.map((p, pi) => (
                               <Badge key={pi} size="sm" tone={pillToneFor(p.type)} title={`${p.type} — click to highlight`}
                                 style={{ cursor: "pointer" }}
@@ -737,7 +784,7 @@ export default function VirtualGrid({
                 })}
                 {/* Skeleton placeholder rows shown during fast scroll when data is loading */}
                 {skeletonIndices.length > 0 && skeletonIndices.map((ai) => (
-                  <div key={`sk-${ai}`} style={{ display: "flex", alignItems: "center", height: ROW_HEIGHT, position: "absolute", top: ai * ROW_HEIGHT - (pageOffset || 0), width: tw, borderBottom: `1px solid ${th.cellBorder}`, background: ai % 2 === 0 ? th.rowEven : th.rowOdd, gap: 12, paddingLeft: BKMK_COL_WIDTH + tagColWidth + 8 }}>
+                  <div key={`sk-${ai}`} style={{ display: "flex", alignItems: "center", height: ROW_HEIGHT, position: "absolute", top: ai * ROW_HEIGHT - (pageOffset || 0), width: tw, boxSizing: "border-box", borderBottom: `1px solid ${th.cellBorder}`, background: ai % 2 === 0 ? th.rowEven : th.rowOdd, gap: 12, paddingLeft: BKMK_COL_WIDTH + tagColWidth + 8 }}>
                     <div style={{ width: 50, height: 8, background: th.border, borderRadius: 3 }} />
                     <div style={{ width: 130, height: 8, background: th.border, borderRadius: 3 }} />
                     <div style={{ width: 40, height: 8, background: th.border, borderRadius: 3 }} />
@@ -825,14 +872,14 @@ export default function VirtualGrid({
                 {(isAiHistorySourceFormat(ct?.sourceFormat) ? aiHistoryDetailHeaderOrder(ct.headers) : ct.headers).map((h) => (
                   <div key={h} style={{ display: "flex", gap: 12, padding: "3px 0", borderBottom: `1px solid ${th.bgAlt}`, alignItems: "flex-start" }}>
                     <span style={{ width: 180, minWidth: 180, fontWeight: 600, color: ct.hiddenColumns.has(h) ? th.textMuted : th.textDim, fontSize: 11, flexShrink: 0, fontFamily: "-apple-system, sans-serif" }}>
-                      {h}{ct.hiddenColumns.has(h) && <span style={{ fontSize: 9, marginLeft: 4, color: th.textMuted }}>(hidden)</span>}
+                      {h}{ct.hiddenColumns.has(h) && <span style={{ fontSize: 11, marginLeft: 4, color: th.textMuted }}>(hidden)</span>}
                     </span>
                     <span style={{ flex: 1, color: th.text, fontSize: 11, fontFamily: "'SF Mono', Menlo, monospace", wordBreak: "break-all", whiteSpace: "pre-wrap" }}>
                       {isAiHistorySourceFormat(ct?.sourceFormat)
                         ? aiHistoryDetailCellValue(selectedRowData, h) || fmtCell(h, selectedRowData[h])
                         : fmtCell(h, selectedRowData[h])}
                     </span>
-                    <button onClick={() => copyCell(selectedRowData[h], h)} style={{ background: "none", border: "none", color: th.textMuted, cursor: "pointer", fontSize: 10, flexShrink: 0, padding: "1px 4px" }} title="Copy value">
+                    <button aria-label={`Copy ${h} value`} onClick={() => copyCell(selectedRowData[h], h)} style={{ width: 26, height: 26, background: "none", border: "none", color: th.textMuted, cursor: "pointer", fontSize: 11, flexShrink: 0, padding: 0 }} title="Copy value">
                       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" /></svg>
                     </button>
                   </div>

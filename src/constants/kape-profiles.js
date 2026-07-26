@@ -129,7 +129,8 @@ export const KAPE_PROFILES = {
     detect: ["Timestamp", "Role", "RecordType", "Summary", "SessionId", "Tool"],
     showAllColumns: true,
     columnOrder: [
-      "Timestamp", "Role", "RecordType", "Summary", "FullText", "InvokedTool", "SessionId",
+      "Timestamp", "Role", "RecordType", "Summary", "FullText", "InvokedTool", "ToolCommand",
+      "ToolDescription", "ToolInput", "SessionId",
       "MessageId", "ParentId", "Workspace", "IsSidechain", "GitBranch", "Tool", "Model",
       "InputTokens", "OutputTokens", "SourceFile", "LineNumber", "User", "Host", "Description", "RecordId",
     ],

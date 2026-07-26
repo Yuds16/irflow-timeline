@@ -1,6 +1,7 @@
 import { sevColorsFor } from "./constants.js";
 import { sigmaRuleKey } from "./triageSummary.mjs";
 import { downloadFile, rowsToCsv } from "./sigmaModalHelpers.js";
+import { clearIpcSubscription, replaceIpcSubscription } from "../../../utils/ipc-subscriptions.js";
 
 export default function useSigmaResultActions({
   modal,
@@ -98,15 +99,14 @@ export default function useSigmaResultActions({
       importProgress: { phase: "importing-tab", importInserted: 0, importTotal: match.matchCount || match._triageHitCount || 0, importPct: 0, text: progressText },
       error: null,
     }));
-    tle.removeAllListeners?.("sigma-progress");
-    tle.onSigmaProgress?.((prog) => {
+    replaceIpcSubscription("sigma-progress", tle.onSigmaProgress, (prog) => {
       if (prog?.phase === "importing-tab" || prog?.phase === "importing-tab-done") {
         setModal((p) => p?.type === "sigma" ? { ...p, importProgress: prog } : p);
       }
     });
     try {
       const r = await tle.sigmaOpenSourceRowsAsTab(jobId, { ruleId: match.ruleId, title: match.title }, name, postAction);
-      tle.removeAllListeners?.("sigma-progress");
+      clearIpcSubscription("sigma-progress");
       if (r?.__ipcError || r?.error) {
         setModal((p) => ({ ...p, sourceAction: null, importProgress: null, error: r.message || r.error || "Failed to open exact matches as a tab" }));
         return null;
@@ -115,7 +115,7 @@ export default function useSigmaResultActions({
       setModal(null);
       return r;
     } catch (e) {
-      tle.removeAllListeners?.("sigma-progress");
+      clearIpcSubscription("sigma-progress");
       setModal((p) => ({ ...p, sourceAction: null, importProgress: null, error: e?.message || "Failed to open exact matches as a tab" }));
       return null;
     }
@@ -353,15 +353,14 @@ export default function useSigmaResultActions({
       return;
     }
     setModal((p) => ({ ...p, openingTab: true, importProgress: { phase: "importing-tab", importInserted: 0, importTotal: results?.eventRowCount || 0, importPct: 0, text: "Starting import..." }, error: null }));
-    tle.removeAllListeners?.("sigma-progress");
-    tle.onSigmaProgress?.((prog) => {
+    replaceIpcSubscription("sigma-progress", tle.onSigmaProgress, (prog) => {
       if (prog?.phase === "importing-tab" || prog?.phase === "importing-tab-done") {
         setModal((p) => p?.type === "sigma" ? { ...p, importProgress: prog } : p);
       }
     });
     try {
       const r = await tle.sigmaOpenAsTab(null, name, jobId);
-      tle.removeAllListeners?.("sigma-progress");
+      clearIpcSubscription("sigma-progress");
       if (r?.__ipcError) {
         setModal((p) => ({ ...p, openingTab: false, importProgress: null, error: r.message || "Failed to open as tab" }));
         return;
@@ -371,7 +370,7 @@ export default function useSigmaResultActions({
         return;
       }
     } catch (e) {
-      tle.removeAllListeners?.("sigma-progress");
+      clearIpcSubscription("sigma-progress");
       setModal((p) => ({ ...p, openingTab: false, importProgress: null, error: e?.message || "Failed to open as tab" }));
       return;
     }

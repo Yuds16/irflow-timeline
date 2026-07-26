@@ -1,4 +1,4 @@
-import { Fragment } from "react";
+import { Fragment, useEffect, useState } from "react";
 import useUIStore from "../store/useUIStore.js";
 import useTabStore from "../store/useTabStore.js";
 import { toast } from "../store/useToastStore.js";
@@ -6,6 +6,8 @@ import { DT_FORMATS, TIMEZONES } from "../constants/datetime.js";
 import { isIpcError, ipcErrorMessage } from "../utils/ipc-result.js";
 import { handleOpenFileDialogResult } from "../utils/open-file-result.js";
 import { isAiHistorySourceFormat, tabHasActiveExportFilters } from "../utils/ai-history-profile.js";
+import { getNextEnabledIndex } from "../utils/keyboard-navigation.js";
+import { Modal } from "./primitives/index.js";
 // Shared analyzer column/format detection — the single source of truth, also used by
 // the home-screen capability tiles in App.jsx so both launch paths resolve columns identically.
 import { buildProcessInspectorCols, buildLateralMovementCols, buildPersistenceMode } from "../utils/analyzer-launch.js";
@@ -17,6 +19,7 @@ import {
   CopilotMenuIcon,
   CursorMenuIcon,
   GeminiMenuIcon,
+  GrokMenuIcon,
   OpenAiMenuIcon,
   WindsurfMenuIcon,
   ContinueMenuIcon,
@@ -31,6 +34,7 @@ import {
   openIocLoadModal,
   openIocResultsModal,
   openLateralMovementModal,
+  openTriageCollectionModal,
   openLogSourceCoverageModal,
   openMergeTabsModal,
 	  openPersistenceModal,
@@ -73,11 +77,10 @@ export default function MenuBar({
   up,
   activeFilters,
   // Selection state
-  selectedRows,
+  allFilteredRowsSelected,
   selectedRowData,
   isGrouped,
-  displayRows,
-  getRowAt,
+  handleSelectAllRows,
   // Misc state
   proximityFilter,
   setProximityFilter,
@@ -193,9 +196,29 @@ export default function MenuBar({
   const setDateTimeFormat = useUIStore((s) => s.setDateTimeFormat);
   const histogramVisible = useUIStore((s) => s.histogramVisible);
   const setHistogramVisible = useUIStore((s) => s.setHistogramVisible);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [commandQuery, setCommandQuery] = useState("");
+  const [commandActiveIndex, setCommandActiveIndex] = useState(0);
 
   const setActiveTab = useTabStore((s) => s.setActiveTab);
   const setTabs = useTabStore((s) => s.setTabs);
+
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+        event.preventDefault();
+        setFileMenuOpen(false); setViewMenuOpen(false); setToolsOpen(false);
+        setActionsMenuOpen(false); setHelpMenuOpen(false);
+        setCommandQuery("");
+        setCommandActiveIndex(0);
+        setCommandPaletteOpen(true);
+      }
+      if (event.key === "Escape") setSettingsOpen(false);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [setActionsMenuOpen, setFileMenuOpen, setHelpMenuOpen, setToolsOpen, setViewMenuOpen]);
 
   const tb = { display: "flex", alignItems: "center", gap: 5, padding: "5px 12px", background: "transparent", color: th.textDim, border: "none", borderRadius: 8, fontSize: 13, fontWeight: 500, cursor: "pointer", fontFamily: "-apple-system,sans-serif", whiteSpace: "nowrap" };
 
@@ -296,13 +319,14 @@ export default function MenuBar({
       { label: "Burst Detection", icon: ic(<><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" fill={th.accent+"33"}/></>, th.danger), action: () => {
         if (ct?.dataReady && ct?.tsColumns?.size) setModal(openBurstAnalysisModal([...ct.tsColumns][0]));
       }, disabled: !ct?.dataReady || !ct?.tsColumns?.size },
-      // ── AI assistant artifacts — native extractors (not EZ-Tool CSV decoders). Triage can
-      //    merge multiple sources; these entries are the per-tool manual import path. ──
+      // ── AI assistant artifacts — native extractors. Profile collection can merge multiple
+      //    sources; these entries are the per-tool manual import path. ──
       { group: "AI Artifacts", icon: <AiArtifactsGroupIcon th={th} />, items: [
         { label: "Collect AI Artifacts", icon: ic(<><path d="M4 13v5a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-5" fill={(th.accent) + "14"} /><path d="M12 3.5v9.5" /><polyline points="8.5 9.5 12 13 15.5 9.5" /></>, th.accent), action: scanAiHistoryProfile },
         { group: "AI Apps", icon: <AiAppsGroupIcon th={th} />, items: [
           { label: "Claude Code", icon: <ClaudeCodeMenuIcon th={th} />, action: () => decodeAiHistory("claude-code", "Claude Code AI History") },
           { label: "OpenAI Codex", icon: <OpenAiMenuIcon th={th} />, action: () => decodeAiHistory("codex", "OpenAI Codex AI History") },
+          { label: "Grok Build", icon: <GrokMenuIcon th={th} />, action: () => decodeAiHistory("grok-build", "Grok Build AI History") },
           { label: "ChatGPT Desktop", icon: <ChatGptMenuIcon th={th} />, action: () => decodeAiHistory("chatgpt", "ChatGPT AI History") },
           { label: "Gemini CLI", icon: <GeminiMenuIcon th={th} />, action: () => decodeAiHistory("gemini-cli", "Gemini CLI AI History") },
           { label: "Cursor", icon: <CursorMenuIcon th={th} />, action: () => decodeAiHistory("cursor", "Cursor AI History") },
@@ -356,29 +380,10 @@ export default function MenuBar({
         { label: "USN Journal Analysis", icon: ic(<><rect x="3" y="3" width="18" height="18" rx="2" fill={(th.accent) + "14"}/><path d="M7 7h10M7 11h10M7 15h6"/><circle cx="17" cy="15" r="2" fill={th.warning} stroke="none" opacity="0.7"/></>), action: () => { if (ct?.dataReady) setModal(openUsnAnalysisModal()); }, disabled: !ct?.dataReady || ct?.sourceFormat !== "raw-usnjrnl" },
       ] },
       ] },
-      { group: "Linux", icon: ic(<><rect x="3" y="4" width="18" height="13" rx="2" fill={th.accent+"14"}/><polyline points="7 9 10 11.5 7 14"/><line x1="12" y1="14" x2="16" y2="14"/><line x1="3" y1="20" x2="21" y2="20"/></>, th.textDim), items: [
-        // Disabled stubs — planned Linux artifact analyzers (no functionality yet).
-        { label: "Auth Logs (auth.log / secure)", icon: ic(<><path d="M4 6h16M4 12h16M4 18h10"/></>, th.textMuted), action: () => {}, disabled: true },
-        { label: "Bash / Shell History", icon: ic(<><rect x="3" y="4" width="18" height="16" rx="2" fill={th.textMuted+"14"}/><polyline points="7 9 10 12 7 15"/><line x1="13" y1="15" x2="17" y2="15"/></>, th.textMuted), action: () => {}, disabled: true },
-        { label: "Cron & systemd Persistence", icon: ic(<><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" fill={th.textMuted+"18"}/></>, th.textMuted), action: () => {}, disabled: true },
-        { label: "Audit Logs (auditd)", icon: ic(<><path d="M4 6h16M4 12h16M4 18h8"/><circle cx="18" cy="18" r="2" fill="none"/></>, th.textMuted), action: () => {}, disabled: true },
-        { label: "SSH Activity", icon: ic(<><circle cx="8" cy="13" r="3"/><path d="M10.5 11 L20 4M16 4h4v4"/></>, th.textMuted), action: () => {}, disabled: true },
-      ] },
-      { group: "macOS", icon: ic(<><path d="M16 13.5c0 3-2 5.5-3.7 5.5-1 0-1.6-.6-2.8-.6s-1.9.6-2.9.6C5 19.5 3 16.5 3 13.5 3 10.5 5 9 6.6 9c1 0 1.8.6 2.4.6S10.6 9 11.6 9c1.6 0 3.4 1 4.4 2.5" fill={th.accent+"14"}/><path d="M13 6.5c.3-1.6-1-3.3-2.6-3.3-.2 1.6 1 3.3 2.6 3.3z" fill={th.accent+"33"}/></>, th.textDim), items: [
-        // Disabled stubs — planned macOS artifact analyzers (no functionality yet).
-        { label: "Unified Logs", icon: ic(<><path d="M4 6h16M4 12h16M4 18h10"/></>, th.textMuted), action: () => {}, disabled: true },
-        { label: "LaunchAgents & Daemons", icon: ic(<><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" fill={th.textMuted+"18"}/></>, th.textMuted), action: () => {}, disabled: true },
-        { label: "FSEvents", icon: ic(<><rect x="3" y="4" width="18" height="16" rx="2" fill={th.textMuted+"14"}/><path d="M3 9h18M9 9v11"/></>, th.textMuted), action: () => {}, disabled: true },
-        { label: "Quarantine & Gatekeeper", icon: ic(<><path d="M12 2l8 4v6c0 5-4 8-8 10-4-2-8-5-8-10V6z" fill={th.textMuted+"18"}/><path d="M9 12l2 2 4-4"/></>, th.textMuted), action: () => {}, disabled: true },
-        { label: "TCC Database", icon: ic(<><rect x="5" y="11" width="14" height="9" rx="2" fill={th.textMuted+"14"}/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></>, th.textMuted), action: () => {}, disabled: true },
-      ] },
-      { group: "Cloud", icon: ic(<><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" fill={th.accent+"18"}/></>, th.textDim), items: [
-        // Disabled stubs — planned cloud-log analyzers (no functionality yet).
-        { label: "AWS CloudTrail", icon: ic(<><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" fill={th.textMuted+"18"}/></>, th.textMuted), action: () => {}, disabled: true },
-        { label: "Azure / Entra ID Sign-ins", icon: ic(<><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" fill={th.textMuted+"18"}/></>, th.textMuted), action: () => {}, disabled: true },
-        { label: "Microsoft 365 Unified Audit Log", icon: ic(<><path d="M4 6h16M4 12h16M4 18h10"/></>, th.textMuted), action: () => {}, disabled: true },
-        { label: "GCP Audit Logs", icon: ic(<><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z" fill={th.textMuted+"18"}/></>, th.textMuted), action: () => {}, disabled: true },
-        { label: "Okta System Log", icon: ic(<><circle cx="12" cy="12" r="9" fill={th.textMuted+"14"}/><circle cx="12" cy="12" r="4"/></>, th.textMuted), action: () => {}, disabled: true },
+      { group: "Coming soon", badge: "3 platforms", comingSoon: true, icon: ic(<><circle cx="12" cy="12" r="9"/><polyline points="12 7 12 12 15 14"/></>, th.textMuted), items: [
+        { label: "Linux artifact analyzers", detail: "auth, shell history, persistence, auditd, SSH", icon: ic(<><rect x="3" y="4" width="18" height="13" rx="2"/><polyline points="7 9 10 11.5 7 14"/><line x1="12" y1="14" x2="16" y2="14"/></>, th.textMuted), disabled: true, comingSoon: true },
+        { label: "macOS artifact analyzers", detail: "unified logs, persistence, FSEvents, quarantine, TCC", icon: ic(<><circle cx="12" cy="12" r="8"/><path d="M12 8v8M8 12h8"/></>, th.textMuted), disabled: true, comingSoon: true },
+        { label: "Cloud log analyzers", detail: "AWS, Azure, M365, GCP, Okta", icon: ic(<><path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/></>, th.textMuted), disabled: true, comingSoon: true },
       ] },
       { section: "Export" },
       { label: "Export AI History Package", icon: ic(<><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><path d="M12 11v6M9 14h6"/></>, th.accent), action: () => exportAiHistoryPackage(false), disabled: !ct?.dataReady || !isAiHistorySourceFormat(ct?.sourceFormat) },
@@ -389,12 +394,15 @@ export default function MenuBar({
 
   // ── Render tools menu item with nested groups ─────────────────
   const renderToolsBtn = (item, indent) => (
-    <button key={item.label} role="menuitem" onClick={() => { setToolsOpen(false); item.action(); }} disabled={item.disabled}
+    <button key={item.label} role="menuitem" title={item.detail} onClick={() => { setToolsOpen(false); item.action?.(); }} disabled={item.disabled}
       onMouseEnter={(e) => { if (!item.disabled) { e.currentTarget.style.background = `${th.accent}15`; e.currentTarget.style.borderLeft = `2px solid ${th.accent}`; e.currentTarget.style.paddingLeft = `${indent}px`; } }}
       onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; e.currentTarget.style.borderLeft = "2px solid transparent"; e.currentTarget.style.paddingLeft = `${indent}px`; }}
       style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: `7px 14px 7px ${indent}px`, background: "none", border: "none", borderLeft: "2px solid transparent", color: item.disabled ? th.textMuted : th.text, fontSize: 13, cursor: item.disabled ? "default" : "pointer", textAlign: "left", fontFamily: "-apple-system, sans-serif", opacity: item.disabled ? 0.4 : 1, transition: "background var(--m-fast) var(--ease-out), border-color var(--m-fast) var(--ease-out)" }}>
       <span style={{ flexShrink: 0, display: "flex" }}>{item.icon}</span>
-      <span style={{ whiteSpace: "nowrap", flexShrink: 0 }}>{item.label}</span>
+      <span style={{ flex: 1, minWidth: 0 }}>
+        <span style={{ display: "block", whiteSpace: "nowrap" }}>{item.label}</span>
+        {item.detail && <span style={{ display: "block", marginTop: 2, color: th.textMuted, fontSize: 9, overflow: "hidden", textOverflow: "ellipsis" }}>{item.detail}</span>}
+      </span>
     </button>
   );
 
@@ -414,11 +422,13 @@ export default function MenuBar({
       return (
         <Fragment key={`grp-${item.group}`}>
           <button onClick={() => setToolsMenuExpanded((p) => ({ ...p, [item.group]: !p[item.group] }))}
+            type="button" aria-expanded={expanded}
             onMouseEnter={(e) => { e.currentTarget.style.background = `${th.accent}10`; }}
             onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
             style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: `7px 14px 7px ${indent}px`, background: "none", border: "none", borderLeft: "2px solid transparent", color: th.text, fontSize: 13, cursor: "pointer", textAlign: "left", fontFamily: "-apple-system, sans-serif", transition: "background var(--m-fast) var(--ease-out), border-color var(--m-fast) var(--ease-out)" }}>
             {item.icon}
             <span style={{ flex: 1, whiteSpace: "nowrap", overflow: "visible" }}>{item.group}</span>
+            {item.badge && <span style={{ color: th.textMuted, fontSize: 9, padding: "1px 5px", border: `1px solid ${th.border}`, borderRadius: 8 }}>{item.badge}</span>}
             <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke={th.textMuted} strokeWidth="1.5" strokeLinecap="round" style={{ transform: expanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform var(--m-base) ease", flexShrink: 0 }}>
               <polyline points="3,1 7,5 3,9" />
             </svg>
@@ -432,20 +442,10 @@ export default function MenuBar({
 
   // ── Build Actions menu items ──────────────────────────────────
   const buildActionsItems = () => {
-    const hasSelection = selectedRows.size > 0;
     return [
       { label: ct?.showBookmarkedOnly ? "Show All Rows" : "Show Flagged Only", icon: ic(ct?.showBookmarkedOnly ? <><path d="M1 4v10l7 7 10-10V1H8z" fill={th.accent+"22"}/><circle cx="13" cy="7" r="2"/><line x1="3" y1="18" x2="10" y2="11"/></> : <><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></>, ct?.showBookmarkedOnly ? th.accent : th.textDim), action: () => { if (ct) up("showBookmarkedOnly", !ct.showBookmarkedOnly); } },
       { type: "separator" },
-      { label: "Select All", icon: ic(<><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12h8M12 8v8"/></>), action: () => {
-        if (!displayRows) return;
-        const all = new Set();
-        if (isGrouped) { for (let i = 0; i < displayRows.length; i++) { if (displayRows[i].type === "row") all.add(i); } }
-        else { for (let i = 0; i < displayRows.length; i++) all.add(i); }
-        // setSelectedRows is passed through 'up' parent — we need a different mechanism
-        // For now this is handled by the parent; we just call the action
-      }, disabled: !ct?.dataReady },
-      // NOTE: Select All / Deselect All / Invert / Copy / Export actions reference setSelectedRows
-      // which is local App state. These actions are passed in via the actionsOverrides prop.
+      { label: allFilteredRowsSelected ? "Deselect All" : "Select All", icon: ic(<><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M8 12h8M12 8v8"/></>), action: handleSelectAllRows, disabled: !ct?.dataReady || isGrouped },
       { type: "separator" },
       { label: "IOC Matching", icon: ic(<><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" fill={(th.warning)+"22"}/></>), action: () => {
         if (!ct?.dataReady) return;
@@ -492,9 +492,55 @@ export default function MenuBar({
     }, disabled: tabs.filter((t) => t.dataReady && !t.importing).length < 2 },
   ];
 
+  const flattenToolCommands = (items, trail = [], unavailable = false) => items.flatMap((item) => {
+    if (item.section) return [];
+    if (item.group) {
+      return flattenToolCommands(item.items || [], [...trail, item.group], unavailable || item.comingSoon);
+    }
+    if (!item.label || unavailable || item.comingSoon) return [];
+    return [{ ...item, category: ["Tools", ...trail].join(" › ") }];
+  });
+  const commandItems = [
+    { category: "File", label: "Open", shortcut: "⌘O", action: () => tle?.openFileDialog() },
+    { category: "File", label: "Open Triage Collection", action: () => setModal(openTriageCollectionModal()) },
+    { category: "File", label: "Export", shortcut: "⌘E", action: handleExport, disabled: !ct?.dataReady },
+    { category: "File", label: "Save Session", shortcut: "⌘S", action: handleSaveSession, disabled: tabs.length === 0 },
+    { category: "File", label: "Load Session", shortcut: "⇧⌘O", action: handleLoadSession },
+    { category: "File", label: "Close Tab", shortcut: "⌘W", action: () => { if (ct) closeTab(ct.id); }, disabled: !ct },
+    ...buildViewItems().filter((item) => item.label).map((item) => ({ ...item, category: "View" })),
+    ...buildActionsItems().filter((item) => item.label).map((item) => ({ ...item, category: "Actions" })),
+    ...flattenToolCommands(buildToolsItems()),
+    { category: "Help", label: "Quick Help", action: () => setModal(openSimpleModal("quickHelp")) },
+    { category: "Help", label: "Keyboard Shortcuts", shortcut: "⌘/", action: () => setModal(openSimpleModal("shortcuts")) },
+    { category: "Help", label: checkingForUpdates ? "Checking for Updates..." : "Check for Updates", action: handleCheckForUpdates, disabled: checkingForUpdates },
+  ];
+  const normalizedCommandQuery = commandQuery.trim().toLocaleLowerCase();
+  const filteredCommands = commandItems.filter((item) => (
+    !normalizedCommandQuery
+    || `${item.category} ${item.label}`.toLocaleLowerCase().includes(normalizedCommandQuery)
+  ));
+  const resolvedCommandActiveIndex = (
+    commandActiveIndex >= 0
+    && commandActiveIndex < filteredCommands.length
+    && !filteredCommands[commandActiveIndex]?.disabled
+  )
+    ? commandActiveIndex
+    : filteredCommands.findIndex((command) => !command.disabled);
+  useEffect(() => {
+    if (!commandPaletteOpen || resolvedCommandActiveIndex < 0) return;
+    document.getElementById(`command-option-${resolvedCommandActiveIndex}`)?.scrollIntoView({ block: "nearest" });
+  }, [commandPaletteOpen, commandQuery, resolvedCommandActiveIndex]);
+  const runCommand = (command) => {
+    if (command.disabled) return;
+    setCommandPaletteOpen(false);
+    setCommandQuery("");
+    command.action?.();
+  };
+
   return (
-    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 12px 6px 84px", background: th.toolbarBg, backdropFilter: "blur(20px) saturate(180%)", WebkitBackdropFilter: "blur(20px) saturate(180%)", borderBottom: `1px solid ${th.glassBorder}`, gap: 10, flexShrink: 0, position: "relative", zIndex: 100, WebkitAppRegion: "drag" }}>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, WebkitAppRegion: "no-drag" }}>
+    <>
+    <div className="tle-menubar-shell" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "6px 12px 6px 84px", background: th.toolbarBg, backdropFilter: "blur(20px) saturate(180%)", WebkitBackdropFilter: "blur(20px) saturate(180%)", borderBottom: `1px solid ${th.glassBorder}`, gap: 10, flexShrink: 0, position: "relative", zIndex: 100, WebkitAppRegion: "drag" }}>
+      <div className="tle-menubar-left" style={{ display: "flex", alignItems: "center", gap: 8, WebkitAppRegion: "no-drag" }}>
         {/* Menu capsule */}
         <div role="menubar" aria-label="Main menu" style={{ display: "flex", alignItems: "center", gap: 1, background: th.glassBg, border: `1px solid ${th.glassBorder}`, borderRadius: 10, padding: 2 }}>
 
@@ -509,6 +555,7 @@ export default function MenuBar({
                   const r = await tle?.openFileDialog();
                   handleOpenFileDialogResult(tle, setModal, r);
                 } },
+                { label: "Open Triage Collection…", action: () => setModal(openTriageCollectionModal()) },
                 { label: "Export", shortcut: "⌘E", action: handleExport, disabled: !ct?.dataReady },
                 { type: "separator" },
                 { label: "Save Session", shortcut: "⌘S", action: handleSaveSession, disabled: tabs.length === 0 },
@@ -611,6 +658,7 @@ export default function MenuBar({
             {backdrop(() => setHelpMenuOpen(false))}
             <div style={ddStyle} role="menu" ref={focusFirstMenuItem} onKeyDown={menuKeyDown}>
               {[
+                { label: "Command Palette", shortcut: "⌘K", icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={th.accent} strokeWidth="1.8" strokeLinecap="round"><circle cx="11" cy="11" r="7"/><line x1="16" y1="16" x2="21" y2="21"/></svg>, action: () => { setCommandQuery(""); setCommandActiveIndex(0); setCommandPaletteOpen(true); } },
                 { label: "Quick Help", icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={th.accent} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>, action: () => setModal(openSimpleModal("quickHelp")) },
                 { label: "Keyboard Shortcuts", shortcut: "⌘/", icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={th.accent} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M6 8h.01M10 8h.01M14 8h.01M18 8h.01M6 12h.01M18 12h.01M8 16h8"/></svg>, action: () => setModal(openSimpleModal("shortcuts")) },
                 { label: checkingForUpdates ? "Checking for Updates" : "Check for Updates", icon: <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke={th.accent} strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round"><path d="M21 12a9 9 0 1 1-2.64-6.36"/><polyline points="21 3 21 9 15 9"/></svg>, action: handleCheckForUpdates },
@@ -635,24 +683,33 @@ export default function MenuBar({
         </div>
         </div>{/* end menu capsule */}
 
+        <button type="button" className="tle-settings-toggle tle-tb" aria-expanded={settingsOpen} aria-controls="timeline-toolbar-settings"
+          aria-label={`${settingsOpen ? "Close" : "Open"} display settings`}
+          onClick={() => setSettingsOpen((open) => !open)}
+          style={{ ...tb, display: "none", background: th.glassBg, border: `1px solid ${th.glassBorder}`, padding: "5px 8px" }}>
+          ⚙ Settings
+        </button>
+        {settingsOpen && <div className="tle-settings-backdrop" onClick={() => setSettingsOpen(false)} style={{ position: "fixed", inset: 0, zIndex: 149, display: "none" }} />}
+
         {/* Settings capsule */}
-        <div style={{ display: "flex", alignItems: "center", gap: 4, background: th.glassBg, border: `1px solid ${th.glassBorder}`, borderRadius: 10, padding: "2px 6px" }}>
-        <span style={{ color: th.textMuted, fontSize: 10 }}>⏱</span>
-        <select value={dateTimeFormat} onChange={(e) => setDateTimeFormat(e.target.value)} style={{ background: th.btnBg, border: `1px solid ${th.btnBorder}`, color: th.textDim, fontSize: 10, padding: "3px 5px", borderRadius: 4, cursor: "pointer", outline: "none" }}>
+        <div id="timeline-toolbar-settings" className="tle-toolbar-settings" data-open={settingsOpen ? "true" : "false"}
+          style={{ display: "flex", alignItems: "center", gap: 4, background: th.glassBg, border: `1px solid ${th.glassBorder}`, borderRadius: 10, padding: "2px 6px" }}>
+        <span aria-hidden="true" style={{ color: th.textMuted, fontSize: 10 }}>⏱</span>
+        <select aria-label="Timestamp display format" value={dateTimeFormat} onChange={(e) => setDateTimeFormat(e.target.value)} style={{ background: th.btnBg, border: `1px solid ${th.btnBorder}`, color: th.textDim, fontSize: 10, padding: "3px 5px", borderRadius: 4, cursor: "pointer", outline: "none" }}>
           {DT_FORMATS.map((f) => <option key={f.value} value={f.value}>{f.label}</option>)}
         </select>
-        <select value={timezone} onChange={(e) => setTimezone(e.target.value)} style={{ background: th.btnBg, border: `1px solid ${th.btnBorder}`, color: th.textDim, fontSize: 10, padding: "3px 5px", borderRadius: 4, cursor: "pointer", outline: "none" }}>
+        <select aria-label="Timestamp timezone" value={timezone} onChange={(e) => setTimezone(e.target.value)} style={{ background: th.btnBg, border: `1px solid ${th.btnBorder}`, color: th.textDim, fontSize: 10, padding: "3px 5px", borderRadius: 4, cursor: "pointer", outline: "none" }}>
           {TIMEZONES.map((tz) => <option key={tz.value} value={tz.value}>{tz.label}</option>)}
         </select>
         <span style={{ width: 1, height: 14, background: th.glassBorder, display: "inline-block" }} />
-        <button className="tle-tb" onClick={() => setThemeName((p) => p === "dark" ? "light" : "dark")} style={{ ...tb, padding: "4px 8px" }} title="Toggle theme">{themeName === "dark" ? "☀" : "🌙"}</button>
+        <button className="tle-tb" aria-label={`Switch to ${themeName === "dark" ? "light" : "dark"} theme`} onClick={() => setThemeName((p) => p === "dark" ? "light" : "dark")} style={{ ...tb, padding: "4px 8px" }} title="Toggle theme">{themeName === "dark" ? "☀" : "🌙"}</button>
         <span style={{ width: 1, height: 14, background: th.glassBorder, display: "inline-block" }} />
-        <span style={{ color: th.textMuted, fontSize: 10 }}>A</span>
-        <button className="tle-tb" onClick={() => setFontSize((s) => Math.max(9, s - 1))} style={{ ...tb, fontSize: 11, padding: "3px 5px" }} title="Decrease font size">−</button>
-        <span style={{ color: th.textDim, fontSize: 10, minWidth: 18, textAlign: "center" }}>{fontSize}</span>
-        <button className="tle-tb" onClick={() => setFontSize((s) => Math.min(18, s + 1))} style={{ ...tb, fontSize: 11, padding: "3px 5px" }} title="Increase font size">+</button>
+        <span aria-hidden="true" style={{ color: th.textMuted, fontSize: 10 }}>A</span>
+        <button className="tle-tb" aria-label="Decrease grid font size" onClick={() => setFontSize((s) => Math.max(9, s - 1))} style={{ ...tb, fontSize: 11, padding: "3px 5px" }} title="Decrease font size">−</button>
+        <output aria-label="Grid font size" style={{ color: th.textDim, fontSize: 10, minWidth: 18, textAlign: "center" }}>{fontSize}</output>
+        <button className="tle-tb" aria-label="Increase grid font size" onClick={() => setFontSize((s) => Math.min(18, s + 1))} style={{ ...tb, fontSize: 11, padding: "3px 5px" }} title="Increase font size">+</button>
         <span style={{ width: 1, height: 14, background: th.glassBorder, display: "inline-block" }} />
-        <button className="tle-tb" onClick={() => setHistogramVisible((v) => !v)} style={{ ...tb, color: histogramVisible ? th.accent : th.textDim, padding: "4px 8px" }} title="Toggle timeline histogram">
+        <button className="tle-tb" aria-label="Toggle timeline histogram" aria-pressed={histogramVisible} onClick={() => setHistogramVisible((v) => !v)} style={{ ...tb, color: histogramVisible ? th.accent : th.textDim, padding: "4px 8px" }} title="Toggle timeline histogram">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="3" y="12" width="4" height="9" rx="1" /><rect x="10" y="6" width="4" height="15" rx="1" /><rect x="17" y="3" width="4" height="18" rx="1" /></svg>
         </button>
         </div>{/* end settings capsule */}
@@ -671,11 +728,13 @@ export default function MenuBar({
       </div>
 
       {/* Search bar (FilterBar) — rendered via slot prop */}
-      {searchBar}
+      <div className="tle-search-slot" style={{ display: "flex", flex: 1, minWidth: 180, maxWidth: 560, WebkitAppRegion: "no-drag" }}>
+        {searchBar}
+      </div>
 
       {/* Background indexing indicator */}
       {ct && ct.dataReady && (!ct.indexesReady || (!ct.ftsReady && ct.ftsTotal > 0)) && (
-        <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 6px", flexShrink: 0 }}>
+        <div className="tle-indexing-indicator" style={{ display: "flex", alignItems: "center", gap: 6, padding: "0 6px", flexShrink: 0 }}>
           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={th.warning} strokeWidth="2.5" style={{ animation: "tle-spin 1s linear infinite", flexShrink: 0 }}>
             <path d="M12 2a10 10 0 0 1 10 10" strokeLinecap="round" /></svg>
           <span style={{ color: th.warning, fontSize: 9, fontFamily: "-apple-system,sans-serif", whiteSpace: "nowrap" }}>
@@ -688,5 +747,50 @@ export default function MenuBar({
         </div>
       )}
     </div>
+    <Modal open={commandPaletteOpen} title="Command Palette" subtitle="Search actions across the application" width={620} maxHeight="78vh"
+      zIndex={260} bodyPadding="12px" onClose={() => { setCommandPaletteOpen(false); setCommandQuery(""); }}>
+      <input autoFocus role="combobox" aria-autocomplete="list" aria-expanded="true" aria-controls="command-palette-results"
+        aria-activedescendant={resolvedCommandActiveIndex >= 0 ? `command-option-${resolvedCommandActiveIndex}` : undefined}
+        value={commandQuery} onChange={(event) => { setCommandQuery(event.target.value); setCommandActiveIndex(0); }}
+        onKeyDown={(event) => {
+          if (event.key === "Enter") {
+            event.preventDefault();
+            const activeCommand = filteredCommands[resolvedCommandActiveIndex];
+            if (activeCommand) runCommand(activeCommand);
+          } else if (event.key === "ArrowDown") {
+            event.preventDefault();
+            setCommandActiveIndex(getNextEnabledIndex(filteredCommands, resolvedCommandActiveIndex, 1));
+          } else if (event.key === "ArrowUp") {
+            event.preventDefault();
+            setCommandActiveIndex(getNextEnabledIndex(filteredCommands, resolvedCommandActiveIndex, -1));
+          } else if (event.key === "Home") {
+            event.preventDefault();
+            setCommandActiveIndex(getNextEnabledIndex(filteredCommands, -1, 1));
+          } else if (event.key === "End") {
+            event.preventDefault();
+            setCommandActiveIndex(getNextEnabledIndex(filteredCommands, -1, -1));
+          }
+        }}
+        aria-label="Search commands" placeholder="Type a command, tool, or action…"
+        style={{ width: "100%", boxSizing: "border-box", background: th.bgInput, color: th.text, border: `1px solid ${th.btnBorder}`, borderRadius: 7, padding: "9px 11px", fontSize: 13, outline: "none", marginBottom: 8 }} />
+      <div id="command-palette-results" role="listbox" aria-label="Available commands" style={{ display: "flex", flexDirection: "column", gap: 2, maxHeight: "52vh", overflowY: "auto" }}>
+        {filteredCommands.map((command, index) => (
+          <button id={`command-option-${index}`} key={`${command.category}-${command.label}-${index}`} type="button" role="option" aria-selected={index === resolvedCommandActiveIndex} disabled={command.disabled}
+            onClick={() => runCommand(command)}
+            onMouseEnter={() => { if (!command.disabled) setCommandActiveIndex(index); }}
+            style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", padding: "8px 10px", background: index === resolvedCommandActiveIndex ? th.selection : "transparent", border: "none", borderRadius: 6, color: command.disabled ? th.textMuted : th.text, opacity: command.disabled ? 0.45 : 1, cursor: command.disabled ? "default" : "pointer", textAlign: "left", fontFamily: "-apple-system, sans-serif" }}>
+            <span style={{ color: th.textMuted, fontSize: 10, minWidth: 92 }}>{command.category}</span>
+            <span style={{ flex: 1, fontSize: 13 }}>{command.label}</span>
+            {command.disabled && <span style={{ fontSize: 9, color: th.textMuted }}>Unavailable</span>}
+            {command.shortcut && <span style={{ fontSize: 10, color: th.textMuted }}>{command.shortcut}</span>}
+          </button>
+        ))}
+        {filteredCommands.length === 0 && (
+          <div role="status" style={{ padding: "18px 10px", color: th.textMuted, fontSize: 12, textAlign: "center" }}>No matching commands</div>
+        )}
+      </div>
+      {filteredCommands.length > 0 && <div role="status" style={{ padding: "7px 4px 0", color: th.textMuted, fontSize: 10 }}>{filteredCommands.filter((command) => !command.disabled).length} available · ↑↓ navigate · Enter run</div>}
+    </Modal>
+    </>
   );
 }
