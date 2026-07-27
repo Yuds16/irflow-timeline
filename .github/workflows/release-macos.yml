@@ -95,9 +95,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Keep this before the Electron rebuild. npm ci installs better-sqlite3 for
-      # the Node ABI, so SQLite-backed tests run here instead of being skipped
-      # after the native module is rebuilt for Electron.
+      # The project postinstall prepares better-sqlite3 for local Electron use.
+      # Restore the Node ABI explicitly so SQLite-backed tests execute instead
+      # of being skipped. Packaging rebuilds the universal Electron module below.
+      - name: Rebuild SQLite for Node tests
+        run: npm rebuild better-sqlite3
+
       - name: Run test suite
         timeout-minutes: 10
         run: npm test
