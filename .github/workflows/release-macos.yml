@@ -200,6 +200,7 @@ jobs:
           zip_path="$(find release -maxdepth 1 -type f -name "*${pkg_version}*.zip" | sort | head -n 1)"
           dmg_blockmap="${dmg_path}.blockmap"
           zip_blockmap="${zip_path}.blockmap"
+          app_update_yml="$(find release -type f -path "*/Contents/Resources/app-update.yml" | sort | head -n 1)"
 
           if [ "${channel}" = "latest" ]; then
             yml_name="latest-mac.yml"
@@ -212,12 +213,17 @@ jobs:
             yml_path="$(find release -maxdepth 1 -type f -name '*-mac.yml' | sort | head -n 1)"
           fi
 
-          for path_name in dmg_path zip_path dmg_blockmap zip_blockmap yml_path; do
+          for path_name in dmg_path zip_path dmg_blockmap zip_blockmap app_update_yml yml_path; do
             if [ -z "${!path_name:-}" ] || [ ! -f "${!path_name}" ]; then
               echo "::error::Missing expected release artifact: ${path_name}"
               exit 1
             fi
           done
+
+          if ! grep -Eq '^useMultipleRangeRequest:[[:space:]]*false$' "${app_update_yml}"; then
+            echo "::error::Packaged updater is not configured for S3-compatible single-range downloads"
+            exit 1
+          fi
 
           echo "dmg=${dmg_path}" >> "${GITHUB_OUTPUT}"
           echo "zip=${zip_path}" >> "${GITHUB_OUTPUT}"
