@@ -289,6 +289,7 @@ function _enrichAndEmit(state) {
         chain.hopDetails = chain._rawHops.map(h => ({
           source: h.source, target: h.target, user: h.user, ts: h.ts,
           technique: h.technique, eventId: h.eventId, logonType: h.logonType,
+          evidenceRefs: _dedupeEvidenceRefs(h.evidenceRefs || []),
         }));
       }
 

@@ -11,6 +11,7 @@
  * @returns {Array} accounts (sorted by suspicion score, then activity)
  */
 const { SERVICE_RE, PRIVILEGED_NAME_RE } = require("../constants");
+const { normalizeTimestamp } = require("../../../utils/forensic-normalize");
 
 function aggregateAccounts(state) {
   const { timeOrdered, rdpSessions, findings, userEventCounts, userEventOriginalName, _outlierHosts } = state;
@@ -87,6 +88,7 @@ function aggregateAccounts(state) {
             rdpAdminCount: 0,
             rdpConcurrentCount: 0,
             rdpFailedCount: 0,
+            rdpFailedAttemptCount: 0,
             rdpReconnectCount: 0,
             // Per-user counts — SCOPED to the lateral-movement population (primary;
             // shown in the table + used for scoring/Class). Filled from userEventCountsScoped.
@@ -174,12 +176,16 @@ function aggregateAccounts(state) {
       for (const s of rdpSessions) {
         const acct = _getAcct(s.user);
         if (!acct) continue;
-        acct.rdpSessionCount++;
-        if ((s.suspicionScore || 0) >= 25) acct.rdpSuspiciousCount++;
-        if (s.hasAdmin) acct.rdpAdminCount++;
-        if (s.isConcurrent) acct.rdpConcurrentCount++;
-        if (s.status === "failed") acct.rdpFailedCount++;
-        if (s.isReconnect) acct.rdpReconnectCount++;
+        const isFailedActivity = s.status === "failed";
+        if (!isFailedActivity) acct.rdpSessionCount++;
+        if (!isFailedActivity && (s.suspicionScore || 0) >= 25) acct.rdpSuspiciousCount++;
+        if (!isFailedActivity && s.hasAdmin) acct.rdpAdminCount++;
+        if (!isFailedActivity && s.isConcurrent) acct.rdpConcurrentCount++;
+        if (isFailedActivity) {
+          acct.rdpFailedCount++;
+          acct.rdpFailedAttemptCount += s.attemptCount || 1;
+        }
+        if (!isFailedActivity && s.isReconnect) acct.rdpReconnectCount++;
         if (s.source) { acct.sourceHosts.add(s.source); acct.rdpSourceHosts.add(s.source); }
         if (s.target) { acct.targetHosts.add(s.target); acct.rdpTargetHosts.add(s.target); }
         // RDP sessions are scoped lateral activity — extend the First/Last Seen window
@@ -241,7 +247,10 @@ function aggregateAccounts(state) {
       // service 4672 never matches (those users have no scoped 4624), so it can't
       // re-inflate the count we fixed in the scoped-counts work.
       if (privLogonEvents.length) {
-        const _sec = (ts) => { const t = Date.parse(ts); return Number.isNaN(t) ? null : Math.floor(t / 1000); };
+        const _sec = (ts) => {
+          const t = normalizeTimestamp(ts);
+          return Number.isFinite(t) ? Math.floor(t / 1000) : null;
+        };
         const privSeconds = new Set();
         for (const p of privLogonEvents) {
           const s = _sec(p.ts);
@@ -380,6 +389,7 @@ function aggregateAccounts(state) {
         rdpAdminCount: a.rdpAdminCount,
         rdpConcurrentCount: a.rdpConcurrentCount,
         rdpFailedCount: a.rdpFailedCount,
+        rdpFailedAttemptCount: a.rdpFailedAttemptCount,
         rdpReconnectCount: a.rdpReconnectCount,
         kerberosCount: a.kerberosCount,
         ntlmCount: a.ntlmCount,

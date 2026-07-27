@@ -37,6 +37,16 @@ const MIXED_HEADERS = [
   "User", "SessionID", "Address", "Param1", "Param2", "Param3",
 ];
 
+const SECURITY_HEADERS = [
+  "datetime", "RecordId", "EventID", "Provider", "Level", "Channel", "Computer", "Message",
+  "IpAddress", "TargetUserName", "LogonType", "SubStatus",
+];
+
+const RDP_CORRELATION_HEADERS = [
+  ...SECURITY_HEADERS,
+  "User", "SessionID", "Address", "Param1", "Param2", "Param3",
+];
+
 const LSM_CHANNEL = "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational";
 const RCM_CHANNEL = "Microsoft-Windows-TerminalServices-RemoteConnectionManager/Operational";
 
@@ -110,6 +120,23 @@ function rcmRow(eid, opts = {}) {
     Param1: opts.user != null ? opts.user : "cersei.lannister",
     Param2: opts.domain || "SEVENKINGDOMS",
     Param3: opts.address != null ? opts.address : "10.10.10.55",
+  };
+}
+
+function securityRow(eid, opts = {}) {
+  return {
+    datetime: opts.ts || "2026-03-10 08:00:00.000",
+    RecordId: opts.recordId || "1",
+    EventID: eid,
+    Provider: "Microsoft-Windows-Security-Auditing",
+    Level: "Information",
+    Channel: "Security",
+    Computer: opts.computer || "WKS-TARGET",
+    Message: "",
+    IpAddress: opts.address || "10.10.10.55",
+    TargetUserName: opts.user || "SEVENKINGDOMS\\cersei.lannister",
+    LogonType: opts.logonType || "3",
+    SubStatus: opts.subStatus || "0xC000006A",
   };
 }
 
@@ -227,4 +254,95 @@ test("raw session IDs are recovered so distinct sessions do not collapse", () =>
     res.rdpSessions.length >= 2,
     `two distinct session IDs should yield two sessions, got ${res.rdpSessions.length}`,
   );
+});
+
+test("generic Security 4625 Type 3 failures stay out of the RDP activity table", () => {
+  const rows = Array.from({ length: 8 }, (_, i) => securityRow("4625", {
+    ts: `2026-03-10 08:0${i}:00.000`,
+    recordId: String(i + 1),
+    logonType: "3",
+  }));
+  const res = run(SECURITY_HEADERS, rows);
+
+  assert.ok(!res.error, `analyzer returned an error: ${res.error}`);
+  assert.equal(res.rdpSessions.length, 0, "network-logon failures are not RDP without RDP-specific corroboration");
+  assert.ok(
+    res.findings.some((finding) => /brute force/i.test(finding.category) || /brute force/i.test(finding.title)),
+    "generic failures must remain available to the credential-attack detectors",
+  );
+});
+
+test("Security 4625 Type 10 is direct failed-RDP evidence and is counted separately from sessions", () => {
+  const res = run(SECURITY_HEADERS, [
+    securityRow("4625", { logonType: "10" }),
+  ]);
+
+  assert.ok(!res.error, `analyzer returned an error: ${res.error}`);
+  assert.equal(res.rdpSessions.length, 1);
+  assert.equal(res.rdpSessions[0].status, "failed");
+  assert.equal(res.rdpSessions[0].evidenceLevel, "direct");
+  assert.match(res.rdpSessions[0].evidenceBasis.join(" "), /4625 Logon Type 10/);
+  assert.equal(res.stats.rdpSessionCount, 0);
+  assert.equal(res.stats.rdpFailedAttemptCount, 1);
+});
+
+test("Security 4625 Type 3 becomes correlated RDP evidence only near a direct signal on the same pair", () => {
+  const res = run(RDP_CORRELATION_HEADERS, [
+    {
+      ...securityRow("4625", { ts: "2026-03-10 08:00:00.000", logonType: "3" }),
+      User: null, SessionID: null, Address: null, Param1: null, Param2: null, Param3: null,
+    },
+    {
+      ...rcmRow("1149", { ts: "2026-03-10 08:00:10.000" }),
+      IpAddress: null, TargetUserName: null, LogonType: null, SubStatus: null,
+      User: null, SessionID: null, Address: null,
+    },
+  ]);
+
+  assert.ok(!res.error, `analyzer returned an error: ${res.error}`);
+  const failed = res.rdpSessions.find((session) => session.status === "failed");
+  assert.ok(failed, "the nearby Type 3 failure should be admitted as correlated RDP evidence");
+  assert.equal(failed.evidenceLevel, "correlated");
+  assert.match(failed.evidenceBasis.join(" "), /correlated with TerminalServices 1149/);
+});
+
+test("Security 4624 Type 7 alone is an unlock, not an RDP reconnect", () => {
+  const res = run(SECURITY_HEADERS, [
+    securityRow("4624", { logonType: "7" }),
+  ]);
+
+  assert.ok(!res.error, `analyzer returned an error: ${res.error}`);
+  assert.equal(res.rdpSessions.length, 0);
+});
+
+test("source-less lifecycle events attach by TerminalServices SessionID", () => {
+  const res = run(LSM_HEADERS, [
+    lsmRow("21", { ts: "2026-03-10 08:00:00.000", sessionId: "3", address: "10.10.10.55" }),
+    lsmRow("24", { ts: "2026-03-10 12:00:00.000", sessionId: "3", address: "" }),
+  ]);
+
+  assert.ok(!res.error, `analyzer returned an error: ${res.error}`);
+  assert.equal(res.rdpSessions.length, 1);
+  assert.equal(res.rdpSessions[0].status, "disconnected");
+  assert.equal(res.rdpSessions[0].source, "10.10.10.55");
+  assert.ok(res.rdpSessions[0].events.some((event) => event.eventId === "24"));
+});
+
+test("graph normalizes ports, rejects loopback artifacts, and conservatively merges short/FQDN aliases", () => {
+  const res = run(SECURITY_HEADERS, [
+    securityRow("4624", { ts: "2026-03-10 08:00:00.000", address: "WKS2390", computer: "APP01", logonType: "3" }),
+    securityRow("4624", { ts: "2026-03-10 08:00:01.000", address: "WKS2390.orionhubs.local", computer: "APP01", logonType: "3" }),
+    securityRow("4624", { ts: "2026-03-10 08:00:02.000", address: "10.2.10.113:3389", computer: "APP01", logonType: "3" }),
+    securityRow("4624", { ts: "2026-03-10 08:00:03.000", address: "127.0.0.1:0", computer: "APP01", logonType: "3" }),
+    securityRow("4624", { ts: "2026-03-10 08:00:04.000", address: "::1:0", computer: "APP01", logonType: "3" }),
+  ]);
+
+  assert.ok(!res.error, `analyzer returned an error: ${res.error}`);
+  const shortEdge = res.edges.find((edge) => edge.source === "WKS2390" && edge.target === "APP01");
+  assert.ok(shortEdge);
+  assert.equal(shortEdge.count, 2);
+  assert.ok(!res.nodes.some((node) => node.id === "WKS2390.ORIONHUBS.LOCAL"));
+  assert.deepEqual(res.nodes.find((node) => node.id === "WKS2390").aliases, ["WKS2390.ORIONHUBS.LOCAL"]);
+  assert.ok(res.edges.some((edge) => edge.source === "10.2.10.113" && edge.target === "APP01"));
+  assert.ok(!res.nodes.some((node) => /^(?:127\.0\.0\.1|::1)/.test(node.id)));
 });

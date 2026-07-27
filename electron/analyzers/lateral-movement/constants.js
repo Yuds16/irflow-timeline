@@ -20,6 +20,14 @@ const SERVICE_RE = /^(SYSTEM|LOCAL SERVICE|NETWORK SERVICE|DWM-\d+|UMFD-\d+|ANON
 // Events used for RDP session correlation but which do NOT create graph edges.
 const SESSION_ONLY_EVENTS = new Set(["20", "23", "24", "32", "33", "34", "35", "39", "40", "4634", "4647", "4672", "4769", "4779"]);
 
+// Events that can participate in an RDP authentication/session reconstruction.
+// General authentication events remain in the main logon graph, but only this
+// subset is copied into the RDP state machine.
+const RDP_CONTEXT_EVENT_IDS = new Set([
+  "20", "21", "22", "23", "24", "25", "32", "33", "34", "35", "39", "40",
+  "1149", "4624", "4625", "4634", "4647", "4648", "4672", "4776", "4778", "4779",
+]);
+
 // Human-readable descriptions for RDP/logon event IDs.
 const RDP_EVENT_DESC = {
   "1149": "Network auth succeeded", "4624": "Logon succeeded", "4625": "Logon failed",
@@ -64,6 +72,7 @@ module.exports = {
   EXCLUDED_IPS,
   SERVICE_RE,
   SESSION_ONLY_EVENTS,
+  RDP_CONTEXT_EVENT_IDS,
   RDP_EVENT_DESC,
   DC_PAT,
   SRV_PAT,

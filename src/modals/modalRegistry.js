@@ -231,6 +231,10 @@ export function openLateralMovementModal(columns = {}, extra = {}) {
     selectedNode: null,
     selectedEdge: null,
     viewTab: "graph",
+    lmGraphMode: "machines",
+    findingsView: "alerts",
+    findingsSortBy: "triage",
+    findingsGroupBy: "default",
     positions: null,
     ...extra,
   };

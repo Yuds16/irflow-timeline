@@ -23,14 +23,16 @@
  */
 const { cleanWrappedField, compactGet, compactGetInt, parseCompactKeyValues, extractFirstInteger, resolveEventChannel } = require("../evtx-utils");
 const { detectConventions } = require("./convention-detector");
-const { EXCLUDED_IPS, SERVICE_RE, SESSION_ONLY_EVENTS, RDP_EVENT_DESC, DC_PAT: _DC_PAT, SRV_PAT: _SRV_PAT } = require("./constants");
+const { EXCLUDED_IPS, SERVICE_RE, SESSION_ONLY_EVENTS, RDP_CONTEXT_EVENT_IDS, RDP_EVENT_DESC, DC_PAT: _DC_PAT, SRV_PAT: _SRV_PAT } = require("./constants");
+const { buildObservedHostAliases, isExcludedEndpoint } = require("./endpoint-normalize");
+const { normalizeTimestamp } = require("../../utils/forensic-normalize");
 
 function buildGraphAndChains(state) {
   const {
     rows, columns, meta, options, db, edgeMap, hostSet, timeOrdered, rdpEvents, _ipToHostname,
     isEvtxECmd, isHayabusa, _dedupeEvidenceRefs, _rowEvidenceRef, _refsFromEvents, _rowidsFromRefs,
     _bumpHostTelemetry, _bumpUserEvent, _bumpUserEventScoped, _bumpDatasetEvent, _normLmHost,
-    excludeLocalLogons, excludeServiceAccounts, privLogonEvents,
+    excludeLocalLogons, excludeServiceAccounts, privLogonEvents, hostTelemetry,
   } = state;
 
       // Single global format (derived from the first/only tab's headers). In multi-source
@@ -49,7 +51,7 @@ function buildGraphAndChains(state) {
         const isEvtxECmd = row._sourceFormat ? row._sourceFormat === "EvtxECmd" : _globalIsEvtxECmd;
         const isHayabusa = row._sourceFormat ? row._sourceFormat === "Hayabusa" : _globalIsHayabusa;
         let targetHost = _normLmHost(row.target || columns._syntheticTarget || "");
-        if (!targetHost) continue;
+        if (!targetHost || isExcludedEndpoint(targetHost)) continue;
 
         const eventId = cleanWrappedField(row.eventId || "");
         const evidenceRef = _rowEvidenceRef(row);
@@ -317,7 +319,7 @@ function buildGraphAndChains(state) {
           privLogonEvents.push({ userKey: user.toUpperCase(), host: targetHost, ts: row.ts || "" });
         }
 
-        if (!sourceHost || EXCLUDED_IPS.has(sourceHost)) {
+        if (!sourceHost || EXCLUDED_IPS.has(sourceHost) || isExcludedEndpoint(sourceHost)) {
           // Still collect for RDP session correlation if we have target + user (for logoff/disconnect events)
           if (SESSION_ONLY_EVENTS.has(eventId) && targetHost && user) {
             let _drc;
@@ -326,7 +328,9 @@ function buildGraphAndChains(state) {
               else if (compact) { _drc = compactGet(compact, "Reason", "ReasonCode") || undefined; }
               if (!_drc) { const r = row._rawReason || row._rawParam3; if (r) _drc = extractFirstInteger(r) || undefined; }
             }
-            rdpEvents.push({ eventId, ts: row.ts || "", user, sourceHost: "", targetHost, logonType, sessionId, channel: channelNorm || channelRaw, ...(_drc ? { disconnectReasonCode: _drc } : {}), ...provenance });
+            if (RDP_CONTEXT_EVENT_IDS.has(eventId)) {
+              rdpEvents.push({ eventId, ts: row.ts || "", user, sourceHost: "", targetHost, logonType, sessionId, channel: channelNorm || channelRaw, ...(_drc ? { disconnectReasonCode: _drc } : {}), ...provenance });
+            }
           }
           continue;
         }
@@ -361,7 +365,9 @@ function buildGraphAndChains(state) {
             if (rawReason) disconnectReasonCode = extractFirstInteger(rawReason) || undefined;
           }
         }
-        rdpEvents.push({ eventId, ts, user, sourceHost, targetHost, logonType, sessionId, channel: channelNorm || channelRaw, ...(disconnectReasonCode ? { disconnectReasonCode } : {}), ...provenance });
+        if (RDP_CONTEXT_EVENT_IDS.has(eventId)) {
+          rdpEvents.push({ eventId, ts, user, sourceHost, targetHost, logonType, sessionId, channel: channelNorm || channelRaw, ...(disconnectReasonCode ? { disconnectReasonCode } : {}), ...provenance });
+        }
 
         // Session-only events: don't create graph edges, only used for RDP session correlation
         if (SESSION_ONLY_EVENTS.has(eventId)) continue;
@@ -483,6 +489,14 @@ function buildGraphAndChains(state) {
             evt.sourceFieldType = "resolved";
           }
         }
+        // The session state machine consumes a separate event array. Leaving it on
+        // raw IPs while the graph moved to hostnames split one real connection into
+        // two identities and prevented lifecycle events from joining.
+        for (const evt of rdpEvents) {
+          if (evt.sourceHost && _ipToHostname.has(evt.sourceHost)) {
+            evt.sourceHost = _ipToHostname.get(evt.sourceHost);
+          }
+        }
         // Merge IP edges into hostname edges in edgeMap
         for (const [ip, hostname] of _ipToHostname) {
           const ipEdges = [];
@@ -530,23 +544,191 @@ function buildGraphAndChains(state) {
         }
       }
 
-      // === RDP Session Correlation ===
-      rdpEvents.sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
-      const rdpSessions = [];
-      const openSessions = new Map(); // sessionKey => session
-      const openByBase = new Map(); // baseKey => Set<sessionKey> (index for fast lookup)
+      // === Conservative short-name/FQDN alias resolution ===
+      // Merge only when BOTH forms were observed and one short name maps to exactly
+      // one FQDN. This fixes "WKS01" and "WKS01.corp.example" appearing as separate
+      // graph nodes without collapsing same-named hosts from two domains.
+      {
+        const aliases = buildObservedHostAliases([
+          ...hostSet.keys(),
+          ...timeOrdered.flatMap((evt) => [evt.source, evt.target]),
+          ...rdpEvents.flatMap((evt) => [evt.sourceHost, evt.targetHost]),
+        ]);
+        if (aliases.size > 0) {
+          const canonical = (host) => aliases.get(host) || host;
+          for (const evt of timeOrdered) {
+            evt.source = canonical(evt.source);
+            evt.target = canonical(evt.target);
+          }
+          for (const evt of rdpEvents) {
+            evt.sourceHost = canonical(evt.sourceHost);
+            evt.targetHost = canonical(evt.targetHost);
+          }
 
-      const findNearestSession = (baseKey, ts, windowMs) => {
-        const keys = openByBase.get(baseKey);
-        if (!keys || keys.size === 0) return null;
-        let best = null, bestDiff = Infinity;
-        for (const key of keys) {
+          const mergedHosts = new Map();
+          for (const [host, info] of hostSet) {
+            const id = canonical(host);
+            const current = mergedHosts.get(id) || {
+              isSource: false,
+              isTarget: false,
+              eventCount: 0,
+              aliases: new Set(),
+            };
+            current.isSource = current.isSource || !!info.isSource;
+            current.isTarget = current.isTarget || !!info.isTarget;
+            current.eventCount += Number(info.eventCount) || 0;
+            if (host !== id) current.aliases.add(host);
+            for (const alias of (info.aliases || [])) current.aliases.add(alias);
+            mergedHosts.set(id, current);
+          }
+          hostSet.clear();
+          for (const [id, info] of mergedHosts) hostSet.set(id, info);
+
+          const mergeEdge = (target, source) => {
+            target.count += source.count || 0;
+            target.shareAccessCount = (target.shareAccessCount || 0) + (source.shareAccessCount || 0);
+            target._adminShareCount = (target._adminShareCount || 0) + (source._adminShareCount || 0);
+            target._rdpLogonCount = (target._rdpLogonCount || 0) + (source._rdpLogonCount || 0);
+            target.hasFailures = target.hasFailures || source.hasFailures;
+            if (source.firstSeen && (!target.firstSeen || source.firstSeen < target.firstSeen)) target.firstSeen = source.firstSeen;
+            if (source.lastSeen && (!target.lastSeen || source.lastSeen > target.lastSeen)) target.lastSeen = source.lastSeen;
+            for (const value of source.users || []) target.users.add(value);
+            for (const value of source.logonTypes || []) target.logonTypes.add(value);
+            for (const value of source.clientNames || []) target.clientNames.add(value);
+            for (const value of source.clientAddresses || []) target.clientAddresses.add(value);
+            for (const value of source.shareNames || []) {
+              if (!target.shareNames) target.shareNames = new Set();
+              target.shareNames.add(value);
+            }
+            for (const [eid, count] of source.eventBreakdown || []) {
+              target.eventBreakdown.set(eid, (target.eventBreakdown.get(eid) || 0) + count);
+            }
+            target.evidenceRefs = _dedupeEvidenceRefs([
+              ...(target.evidenceRefs || []),
+              ...(source.evidenceRefs || []),
+            ]);
+          };
+          const mergedEdges = new Map();
+          for (const edge of edgeMap.values()) {
+            const source = canonical(edge.source);
+            const target = canonical(edge.target);
+            if (!source || !target || source === target) continue;
+            const key = `${source}->${target}`;
+            const existing = mergedEdges.get(key);
+            if (existing) mergeEdge(existing, edge);
+            else mergedEdges.set(key, { ...edge, source, target });
+          }
+          edgeMap.clear();
+          for (const [key, edge] of mergedEdges) edgeMap.set(key, edge);
+
+          if (hostTelemetry instanceof Map) {
+            const mergedTelemetry = new Map();
+            for (const [host, eidMap] of hostTelemetry) {
+              const id = canonical(host);
+              if (!mergedTelemetry.has(id)) mergedTelemetry.set(id, new Map());
+              const targetMap = mergedTelemetry.get(id);
+              for (const [eid, count] of eidMap) {
+                targetMap.set(eid, (targetMap.get(eid) || 0) + count);
+              }
+            }
+            hostTelemetry.clear();
+            for (const [host, eidMap] of mergedTelemetry) hostTelemetry.set(host, eidMap);
+          }
+        }
+      }
+
+      // === RDP Session Correlation ===
+      const _tsMs = (value) => {
+        const parsed = normalizeTimestamp(value);
+        return Number.isFinite(parsed) ? parsed : null;
+      };
+      const _cmpTs = (a, b) => {
+        const am = _tsMs(a);
+        const bm = _tsMs(b);
+        if (am != null && bm != null) return am - bm;
+        return String(a || "").localeCompare(String(b || ""));
+      };
+      rdpEvents.sort((a, b) => _cmpTs(a.ts, b.ts));
+      const rdpSessions = [];
+      const openSessions = new Map(); // unique open key -> session
+      const openByBase = new Map(); // source->target|user -> Set<open key>
+      const openByTargetUser = new Map(); // target|user -> Set<open key>
+      const openBySessionId = new Map(); // target|user|sid -> Set<open key>
+
+      const _baseKeyFor = (evt) => `${evt.sourceHost || "?"}->${evt.targetHost}|${evt.user}`;
+      const _targetUserKeyFor = (evt) => `${evt.targetHost}|${evt.user}`;
+      const _sessionIdentityKeyFor = (evt) => evt.sessionId
+        ? `${_targetUserKeyFor(evt)}|s${evt.sessionId}`
+        : "";
+      const _indexOpen = (index, key, openKey) => {
+        if (!key) return;
+        if (!index.has(key)) index.set(key, new Set());
+        index.get(key).add(openKey);
+      };
+      const _unindexOpen = (index, key, openKey) => {
+        const set = index.get(key);
+        if (!set) return;
+        set.delete(openKey);
+        if (set.size === 0) index.delete(key);
+      };
+      const _registerOpenSession = (session, evt) => {
+        const baseKey = _baseKeyFor(evt);
+        const targetUserKey = _targetUserKeyFor(evt);
+        const sessionIdentityKey = _sessionIdentityKeyFor(evt);
+        const openKey = `${baseKey}${evt.sessionId ? `|s${evt.sessionId}` : ""}|#${session.id}`;
+        session._openKey = openKey;
+        session._openBaseKey = baseKey;
+        session._openTargetUserKey = targetUserKey;
+        session._openSessionIdentityKey = sessionIdentityKey;
+        openSessions.set(openKey, session);
+        _indexOpen(openByBase, baseKey, openKey);
+        _indexOpen(openByTargetUser, targetUserKey, openKey);
+        _indexOpen(openBySessionId, sessionIdentityKey, openKey);
+      };
+      const _closeOpenSession = (session) => {
+        if (!session?._openKey) return;
+        openSessions.delete(session._openKey);
+        _unindexOpen(openByBase, session._openBaseKey, session._openKey);
+        _unindexOpen(openByTargetUser, session._openTargetUserKey, session._openKey);
+        _unindexOpen(openBySessionId, session._openSessionIdentityKey, session._openKey);
+        delete session._openKey;
+        delete session._openBaseKey;
+        delete session._openTargetUserKey;
+        delete session._openSessionIdentityKey;
+      };
+      const _findOpenSession = (evt, windowMs) => {
+        const candidateKeys = new Set();
+        for (const key of (openByBase.get(_baseKeyFor(evt)) || [])) candidateKeys.add(key);
+        for (const key of (openByTargetUser.get(_targetUserKeyFor(evt)) || [])) candidateKeys.add(key);
+        for (const key of (openBySessionId.get(_sessionIdentityKeyFor(evt)) || [])) candidateKeys.add(key);
+        let best = null;
+        let bestStrength = Infinity;
+        let bestDiff = Infinity;
+        for (const key of candidateKeys) {
           const session = openSessions.get(key);
           if (!session) continue;
+          if (String(session.target || "") !== String(evt.targetHost || "")) continue;
+          if (String(session.user || "").toUpperCase() !== String(evt.user || "").toUpperCase()) continue;
+          const sameSid = !!evt.sessionId && !!session.sessionId && String(evt.sessionId) === String(session.sessionId);
+          if (evt.sessionId && session.sessionId && !sameSid) continue;
+          const sameSource = !!evt.sourceHost && !!session.source
+            && String(evt.sourceHost).toUpperCase() === String(session.source).toUpperCase();
+          if (evt.sourceHost && session.source && !sameSource && !sameSid) continue;
           const lastEvt = session.events[session.events.length - 1];
-          if (!lastEvt?.ts || !ts) { if (!best) best = session; continue; }
-          const diff = Math.abs(new Date(ts) - new Date(lastEvt.ts));
-          if (diff < windowMs && diff < bestDiff) { best = session; bestDiff = diff; }
+          const eventMs = _tsMs(evt.ts);
+          const lastMs = _tsMs(lastEvt?.ts || session.startTime);
+          const diff = eventMs != null && lastMs != null ? eventMs - lastMs : 0;
+          if (diff < 0) continue;
+          // A matching TerminalServices SessionId is authoritative across a long
+          // session; source/target/user-only correlation stays tightly bounded.
+          const allowed = sameSid ? 7 * 86400000 : windowMs;
+          if (diff > allowed) continue;
+          const strength = sameSid ? 0 : sameSource ? 1 : 2;
+          if (strength < bestStrength || (strength === bestStrength && diff < bestDiff)) {
+            best = session;
+            bestStrength = strength;
+            bestDiff = diff;
+          }
         }
         return best;
       };
@@ -562,10 +744,80 @@ function buildGraphAndChains(state) {
         session.evidenceRefs = _dedupeEvidenceRefs([...(session.evidenceRefs || []), ...(evt.evidenceRefs || [])]);
         session.itemRowids = _rowidsFromRefs(session.evidenceRefs);
       };
+      const _newRdpSession = (evt, overrides = {}, registerOpen = true) => {
+        const session = {
+          id: rdpSessions.length,
+          source: evt.sourceHost || "",
+          target: evt.targetHost,
+          user: evt.user,
+          sessionId: evt.sessionId || "",
+          events: [],
+          startTime: evt.ts,
+          endTime: null,
+          status: "connecting",
+          isReconnect: false,
+          hasAdmin: false,
+          hasFailed: false,
+          evidenceLevel: "direct",
+          evidenceBasis: [],
+          evidenceRefs: [],
+          itemRowids: [],
+          ...overrides,
+        };
+        rdpSessions.push(session);
+        if (registerOpen) _registerOpenSession(session, evt);
+        return session;
+      };
+
+      // Security 4625 Type 3 means "network logon failure", not "RDP failure".
+      // It is admitted to the RDP activity table only when direct RDP telemetry
+      // on the same source->target pair occurs nearby. Types 10/12 are direct.
+      const _DIRECT_RDP_SIGNAL_EIDS = new Set(["20", "21", "22", "23", "24", "25", "32", "33", "34", "35", "39", "40", "1149", "4778", "4779"]);
+      const _directRdpSignalsByPair = new Map();
+      for (const evt of rdpEvents) {
+        const directSecurity = evt.eventId === "4624" && ["10", "12"].includes(evt.logonType);
+        if (!_DIRECT_RDP_SIGNAL_EIDS.has(evt.eventId) && !directSecurity) continue;
+        if (!evt.sourceHost || !evt.targetHost) continue;
+        const key = `${evt.sourceHost}->${evt.targetHost}`;
+        if (!_directRdpSignalsByPair.has(key)) _directRdpSignalsByPair.set(key, []);
+        _directRdpSignalsByPair.get(key).push(evt);
+      }
+      const _nearbyRdpSignal = (evt, windowMs = 600000) => {
+        if (!evt.sourceHost || !evt.targetHost || !evt.ts) return null;
+        const eventMs = _tsMs(evt.ts);
+        if (eventMs == null) return null;
+        const pair = `${evt.sourceHost}->${evt.targetHost}`;
+        let best = null;
+        let bestGap = Infinity;
+        for (const signal of (_directRdpSignalsByPair.get(pair) || [])) {
+          const signalMs = _tsMs(signal.ts);
+          if (signalMs == null) continue;
+          const gap = Math.abs(signalMs - eventMs);
+          if (gap <= windowMs && gap < bestGap) {
+            best = signal;
+            bestGap = gap;
+          }
+        }
+        return best;
+      };
+      const _rdpFailureEvidence = (evt) => {
+        if (["10", "12"].includes(String(evt.logonType || ""))) {
+          return { level: "direct", basis: `Security 4625 Logon Type ${evt.logonType}` };
+        }
+        if (String(evt.logonType || "") === "3") {
+          const signal = _nearbyRdpSignal(evt);
+          if (signal) {
+            return {
+              level: "correlated",
+              basis: `Security 4625 Type 3 correlated with TerminalServices ${signal.eventId} on the same pair`,
+              signal,
+            };
+          }
+        }
+        return null;
+      };
 
       for (const evt of rdpEvents) {
-        const baseKey = `${evt.sourceHost || "?"}->${evt.targetHost}|${evt.user}`;
-        const sessionKey = evt.sessionId ? `${baseKey}|s${evt.sessionId}` : baseKey;
         const eid = evt.eventId;
         const desc = (eid === "4624" && evt.logonType === "10") ? "RDP logon succeeded"
           : (eid === "4624" && evt.logonType === "7") ? "Reconnect logon"
@@ -573,27 +825,27 @@ function buildGraphAndChains(state) {
           : RDP_EVENT_DESC[eid] || `Event ${eid}`;
 
         // Connection-starting events
-        if (eid === "1149" || (eid === "4624" && ["10","7","12"].includes(evt.logonType))) {
-          let session = openSessions.get(sessionKey);
-          if (!session || eid === "1149") {
-            session = {
-              id: rdpSessions.length, source: evt.sourceHost || "", target: evt.targetHost,
-              user: evt.user, sessionId: evt.sessionId || "",
-              events: [], startTime: evt.ts, endTime: null,
-              status: "connecting", isReconnect: evt.logonType === "7",
-              hasAdmin: false, hasFailed: false,
-              evidenceRefs: [], itemRowids: [],
-            };
-            rdpSessions.push(session);
-            openSessions.set(sessionKey, session);
-            if (!openByBase.has(baseKey)) openByBase.set(baseKey, new Set());
-            openByBase.get(baseKey).add(sessionKey);
+        const type7Signal = eid === "4624" && evt.logonType === "7" ? _nearbyRdpSignal(evt, 120000) : null;
+        if (eid === "1149" || (eid === "4624" && ["10","12"].includes(evt.logonType)) || type7Signal) {
+          let session = _findOpenSession(evt, eid === "1149" ? 5000 : 120000);
+          if (!session) {
+            session = _newRdpSession(evt, {
+              isReconnect: evt.logonType === "7",
+              evidenceLevel: type7Signal ? "correlated" : "direct",
+              evidenceBasis: [
+                type7Signal
+                  ? `Security 4624 Type 7 correlated with TerminalServices ${type7Signal.eventId}`
+                  : eid === "1149"
+                    ? "TerminalServices RemoteConnectionManager 1149"
+                    : `Security 4624 Logon Type ${evt.logonType}`,
+              ],
+            });
           }
           _pushRdpSessionEvent(session, evt, desc, evt.logonType || "");
         }
         // Session-active events: 21, 22, 25
         else if (["21","22","25"].includes(eid)) {
-          let session = openSessions.get(sessionKey) || findNearestSession(baseKey, evt.ts, 30000);
+          let session = _findOpenSession(evt, 120000);
           // LocalSessionManager 21 (session logon) and 25 (reconnect) are themselves session
           // starts. They only ever attached to an existing session because 1149 was assumed
           // present — true when RemoteConnectionManager is imported alongside, false when the
@@ -601,18 +853,10 @@ function buildGraphAndChains(state) {
           // populated LocalSessionManager log yields no sessions at all. 22 stays
           // attach-only: a shell-start with no preceding logon is not a session.
           if (!session && (eid === "21" || eid === "25")) {
-            session = {
-              id: rdpSessions.length, source: evt.sourceHost || "", target: evt.targetHost,
-              user: evt.user, sessionId: evt.sessionId || "",
-              events: [], startTime: evt.ts, endTime: null,
-              status: "connecting", isReconnect: eid === "25",
-              hasAdmin: false, hasFailed: false,
-              evidenceRefs: [], itemRowids: [],
-            };
-            rdpSessions.push(session);
-            openSessions.set(sessionKey, session);
-            if (!openByBase.has(baseKey)) openByBase.set(baseKey, new Set());
-            openByBase.get(baseKey).add(sessionKey);
+            session = _newRdpSession(evt, {
+              isReconnect: eid === "25",
+              evidenceBasis: [`TerminalServices LocalSessionManager ${eid}`],
+            });
           }
           if (session) {
             session.status = "active";
@@ -622,7 +866,7 @@ function buildGraphAndChains(state) {
         }
         // Admin privilege: 4672
         else if (eid === "4672") {
-          const session = findNearestSession(baseKey, evt.ts, 5000);
+          const session = _findOpenSession(evt, 5000);
           if (session) {
             session.hasAdmin = true;
             _pushRdpSessionEvent(session, evt, desc, "");
@@ -630,7 +874,7 @@ function buildGraphAndChains(state) {
         }
         // Disconnect events: 24, 39, 40, 4779
         else if (["24","39","40","4779"].includes(eid)) {
-          const session = openSessions.get(sessionKey) || findNearestSession(baseKey, evt.ts, 60000);
+          const session = _findOpenSession(evt, 86400000);
           if (session) {
             session.status = "disconnected";
             let evtDesc = desc;
@@ -650,7 +894,7 @@ function buildGraphAndChains(state) {
         // EID 20 = session logon failed, 32 = session begin shadow,
         // 33 = session end shadow, 34 = session logon, 35 = session reconnection failure
         else if (["20","32","33","34","35"].includes(eid)) {
-          const session = openSessions.get(sessionKey) || findNearestSession(baseKey, evt.ts, 60000);
+          const session = _findOpenSession(evt, 120000);
           if (session) {
             if (eid === "32") { session.isShadowed = true; session.status = "active"; }
             if (eid === "20" || eid === "35") session.hasFailed = true;
@@ -659,37 +903,41 @@ function buildGraphAndChains(state) {
         }
         // Logoff events: 23, 4634, 4647
         else if (["23","4634","4647"].includes(eid)) {
-          const session = openSessions.get(sessionKey) || findNearestSession(baseKey, evt.ts, 60000);
+          const session = _findOpenSession(evt, 86400000);
           if (session) {
             session.status = "ended";
             session.endTime = evt.ts;
             _pushRdpSessionEvent(session, evt, desc, "");
-            openSessions.delete(sessionKey);
-            const baseSet = openByBase.get(baseKey); if (baseSet) baseSet.delete(sessionKey);
+            _closeOpenSession(session);
           }
         }
         // Failed logon: 4625
         else if (eid === "4625") {
-          const session = openSessions.get(sessionKey);
-          if (session) {
-            session.hasFailed = true;
-            session.status = "failed";
-            _pushRdpSessionEvent(session, evt, desc, "");
-            openSessions.delete(sessionKey);
-            const baseSet = openByBase.get(baseKey); if (baseSet) baseSet.delete(sessionKey);
-          } else {
-            rdpSessions.push({
-              id: rdpSessions.length, source: evt.sourceHost || "", target: evt.targetHost,
-              user: evt.user, sessionId: "", events: [_rdpSessionEvent(evt, desc, "")],
-              startTime: evt.ts, endTime: evt.ts,
-              status: "failed", isReconnect: false, hasAdmin: false, hasFailed: true,
-              evidenceRefs: _dedupeEvidenceRefs(evt.evidenceRefs || []), itemRowids: _rowidsFromRefs(evt.evidenceRefs || []),
-            });
-          }
+          const evidence = _rdpFailureEvidence(evt);
+          if (!evidence) continue;
+          const correlationRefs = evidence.signal?.evidenceRefs || [];
+          const session = _newRdpSession(evt, {
+            sessionId: "",
+            endTime: evt.ts,
+            status: "failed",
+            hasFailed: true,
+            evidenceLevel: evidence.level,
+            evidenceBasis: [evidence.basis],
+            evidenceRefs: _dedupeEvidenceRefs([...(evt.evidenceRefs || []), ...correlationRefs]),
+          }, false);
+          _pushRdpSessionEvent(session, evt, desc, evt.logonType || "");
+          session.evidenceRefs = _dedupeEvidenceRefs([...session.evidenceRefs, ...correlationRefs]);
+          session.itemRowids = _rowidsFromRefs(session.evidenceRefs);
         }
         // 4648: explicit creds, 4778: reconnect
         else if (eid === "4648" || eid === "4778") {
-          const session = openSessions.get(sessionKey) || findNearestSession(baseKey, evt.ts, 30000);
+          let session = _findOpenSession(evt, eid === "4778" ? 86400000 : 30000);
+          if (!session && eid === "4778") {
+            session = _newRdpSession(evt, {
+              isReconnect: true,
+              evidenceBasis: ["Security 4778 window-station reconnect"],
+            });
+          }
           if (session) {
             _pushRdpSessionEvent(session, evt, desc, "");
             if (eid === "4778") { session.isReconnect = true; session.status = "active"; }
@@ -697,10 +945,11 @@ function buildGraphAndChains(state) {
         }
       }
       // Mark remaining open sessions
-      for (const session of openSessions.values()) {
+      for (const session of [...new Set(openSessions.values())]) {
         if (session.status === "connecting" || session.status === "active") {
           session.status = session.events.length > 1 ? "active (no logoff)" : "incomplete";
         }
+        _closeOpenSession(session);
       }
 
       // === Failed Session Clustering ===
@@ -718,36 +967,44 @@ function buildGraphAndChains(state) {
       }
       _failedStandalone.sort((a, b) => {
         const ka = `${a.source}|${a.target}|${a.user}`, kb = `${b.source}|${b.target}|${b.user}`;
-        return ka < kb ? -1 : ka > kb ? 1 : (a.startTime || "").localeCompare(b.startTime || "");
+        return ka < kb ? -1 : ka > kb ? 1 : _cmpTs(a.startTime, b.startTime);
       });
       let _fci = 0;
       while (_fci < _failedStandalone.length) {
         const anchor = _failedStandalone[_fci];
         const cKey = `${anchor.source}|${anchor.target}|${anchor.user}`;
         const cEvts = [...anchor.events];
+        const cSessions = [anchor];
         let cEnd = _fci + 1;
-        let lastMs = new Date(anchor.startTime).getTime();
+        const anchorMs = _tsMs(anchor.startTime);
         while (cEnd < _failedStandalone.length) {
           const next = _failedStandalone[cEnd];
           if (`${next.source}|${next.target}|${next.user}` !== cKey) break;
-          const nextMs = new Date(next.startTime).getTime();
-          if (nextMs - lastMs > FAIL_CLUSTER_MS) break; // rolling: compare to last clustered event
+          const nextMs = _tsMs(next.startTime);
+          // Fixed five-minute episode from the first failure. A rolling window
+          // could merge one attempt every 4m59s into a multi-hour "burst".
+          if (anchorMs == null || nextMs == null || nextMs - anchorMs > FAIL_CLUSTER_MS) break;
           cEvts.push(...next.events);
-          lastMs = nextMs;
+          cSessions.push(next);
           cEnd++;
         }
         const last = _failedStandalone[cEnd - 1];
+        const clusteredRefs = _dedupeEvidenceRefs(cSessions.flatMap((s) => s.evidenceRefs || []));
+        const evidenceBasis = [...new Set(cSessions.flatMap((s) => s.evidenceBasis || []))];
         _keptSessions.push({
           id: 0, source: anchor.source, target: anchor.target, user: anchor.user,
           sessionId: "", events: cEvts,
           startTime: anchor.startTime, endTime: last.startTime,
           status: "failed", isReconnect: false, hasAdmin: false, hasFailed: true,
           attemptCount: cEnd - _fci,
-          evidenceRefs: _refsFromEvents(cEvts), itemRowids: _rowidsFromRefs(_refsFromEvents(cEvts)),
+          evidenceLevel: cSessions.some((s) => s.evidenceLevel === "direct") ? "direct" : "correlated",
+          evidenceBasis,
+          evidenceRefs: clusteredRefs,
+          itemRowids: _rowidsFromRefs(clusteredRefs),
         });
         _fci = cEnd;
       }
-      _keptSessions.sort((a, b) => (a.startTime || "").localeCompare(b.startTime || ""));
+      _keptSessions.sort((a, b) => _cmpTs(a.startTime, b.startTime));
       _keptSessions.forEach((s, i) => s.id = i);
       rdpSessions.length = 0;
       rdpSessions.push(..._keptSessions);
@@ -763,7 +1020,8 @@ function buildGraphAndChains(state) {
         if (chainParts >= 3) s.confidence = "high";
         else if (chainParts >= 2) s.confidence = "medium";
         else if (has4624t10 || has2122) s.confidence = "medium";
-        else if (s.status === "failed" && (s.attemptCount || 1) >= 3) s.confidence = "medium";
+        else if (s.status === "failed" && s.evidenceLevel === "direct") s.confidence = "medium";
+        else if (s.status === "failed" && (s.attemptCount || 1) >= 3 && s.evidenceLevel === "correlated") s.confidence = "medium";
         else s.confidence = "low";
 
         // Missing expected events
@@ -790,19 +1048,25 @@ function buildGraphAndChains(state) {
           if ((p.target || "").toUpperCase() !== (s.target || "").toUpperCase()) continue;
           if ((p.user || "").toUpperCase() !== (s.user || "").toUpperCase()) continue;
           if (p.isReconnect && p.events.every(e => RECONNECT_ONLY_EIDS.has(e.eventId))) continue;
-          if (!p.startTime || !s.startTime || p.startTime >= s.startTime) continue;
+          if (!p.startTime || !s.startTime || _cmpTs(p.startTime, s.startTime) >= 0) continue;
           const pLastTs = p.events[p.events.length - 1]?.ts || p.endTime || p.startTime;
-          const gap = new Date(s.startTime) - new Date(pLastTs);
-          if (isNaN(gap) || gap < 0 || gap > RECONNECT_MAX_GAP_MS) continue;
+          const sStartMs = _tsMs(s.startTime);
+          const parentLastMs = _tsMs(pLastTs);
+          const gap = sStartMs != null && parentLastMs != null ? sStartMs - parentLastMs : NaN;
+          if (!Number.isFinite(gap) || gap < 0 || gap > RECONNECT_MAX_GAP_MS) continue;
           if (gap < bestGap) { bestParent = p; bestGap = gap; }
         }
         if (bestParent) {
           bestParent.events.push(...s.events);
-          bestParent.events.sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
+          bestParent.events.sort((a, b) => _cmpTs(a.ts, b.ts));
           bestParent.evidenceRefs = _dedupeEvidenceRefs([...(bestParent.evidenceRefs || []), ...(s.evidenceRefs || [])]);
           bestParent.itemRowids = _rowidsFromRefs(bestParent.evidenceRefs);
+          bestParent.evidenceBasis = [...new Set([
+            ...(bestParent.evidenceBasis || []),
+            ...(s.evidenceBasis || []),
+          ])];
           const sEnd = s.endTime || s.events[s.events.length - 1]?.ts;
-          if (sEnd && (!bestParent.endTime || sEnd > bestParent.endTime)) bestParent.endTime = sEnd;
+          if (sEnd && (!bestParent.endTime || _cmpTs(sEnd, bestParent.endTime) > 0)) bestParent.endTime = sEnd;
           bestParent.isReconnect = true;
           bestParent.mergedReconnects = (bestParent.mergedReconnects || 0) + 1;
           if (s.status === "active" || s.status === "active (no logoff)") bestParent.status = s.status;
@@ -826,15 +1090,15 @@ function buildGraphAndChains(state) {
       const preAuthEvents = rdpEvents.filter(e => PRE_AUTH_EIDS.has(e.eventId));
       for (const pa of preAuthEvents) {
         if (!pa.ts) continue;
-        const paTime = new Date(pa.ts).getTime();
-        if (isNaN(paTime)) continue;
+        const paTime = _tsMs(pa.ts);
+        if (paTime == null) continue;
         // Find the best matching RDP session: same user + target, starts within 10s after pre-auth
         let bestSession = null, bestGap = Infinity;
         for (const s of rdpSessions) {
           if (s.status === "failed" && s.events.length === 1) continue; // skip isolated failures
           if (!s.startTime) continue;
-          const sTime = new Date(s.startTime).getTime();
-          if (isNaN(sTime)) continue;
+          const sTime = _tsMs(s.startTime);
+          if (sTime == null) continue;
           const gap = sTime - paTime; // session starts AFTER pre-auth
           if (gap < 0 || gap > PRE_AUTH_WINDOW_MS) continue;
           // Match by user (case-insensitive) — IP/hostname matching is too fragile across formats
@@ -846,7 +1110,7 @@ function buildGraphAndChains(state) {
         if (bestSession) {
           const evtDesc = pa.eventId === "4648" ? "Explicit credential submission (pre-auth)" : "NTLM credential validation (pre-auth)";
           _pushRdpSessionEvent(bestSession, pa, evtDesc, "");
-          bestSession.events.sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
+          bestSession.events.sort((a, b) => _cmpTs(a.ts, b.ts));
           if (!bestSession.preAuthEvents) bestSession.preAuthEvents = [];
           bestSession.preAuthEvents.push({ eventId: pa.eventId, ts: pa.ts, sourceHost: pa.sourceHost, gap: bestGap, evidenceRefs: _dedupeEvidenceRefs(pa.evidenceRefs || []) });
         }
@@ -857,7 +1121,7 @@ function buildGraphAndChains(state) {
       for (const s of rdpSessions) {
         let lastTs = s.endTime || "";
         for (const evt of s.events) {
-          if (evt.ts && evt.ts > lastTs) lastTs = evt.ts;
+          if (evt.ts && (!lastTs || _cmpTs(evt.ts, lastTs) > 0)) lastTs = evt.ts;
         }
         s.effectiveEnd = lastTs || s.startTime || "";
         s.endIsLastSeen = !s.endTime && s.effectiveEnd !== s.startTime;

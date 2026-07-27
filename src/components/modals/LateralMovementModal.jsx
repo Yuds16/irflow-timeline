@@ -12,6 +12,14 @@ import { toast } from "../../store/useToastStore.js";
 import { redactRow, csvCell, toCSV } from "../../utils/lm-export.js";
 import { formatDateTime } from "../../utils/datetime.js";
 import { normalizeTimestamp } from "../../utils/forensic-normalize.js";
+import {
+  LATERAL_GRAPH_DEFAULTS,
+  buildLateralIdentityGraph,
+  layoutLateralMovementGraph,
+  selectLateralGraphEdges,
+  selectLateralGraphNodes,
+} from "../../utils/lateral-movement-graph-layout.js";
+import { PI_TYPOGRAPHY as LM_TYPOGRAPHY } from "../process-analyzer/constants.js";
 
 // ── Local utilities (previously defined in App.jsx scope) ────────────
 
@@ -91,6 +99,34 @@ export default function LateralMovementModal() {
   // Multi-source: list of other data-ready tabs for correlation
   const otherTabs = useMemo(() => tabs.filter(t => t.dataReady && t.id !== ct?.id), [tabs, ct?.id]);
 
+  // Graph derivation can be expensive on large collections. Keep it independent
+  // from pan/zoom/selection state so those interactions do not rebuild hundreds
+  // of nodes and identity links on every pointer event.
+  const lateralGraphModel = useMemo(() => {
+    const machineNodes = selectLateralGraphNodes(data?.nodes || []);
+    const machineIds = new Set(machineNodes.map((node) => node.id));
+    const machineEligibleEdges = (data?.edges || []).filter(
+      (edge) => machineIds.has(edge.source) && machineIds.has(edge.target),
+    );
+    const machineEdges = selectLateralGraphEdges(machineEligibleEdges);
+    const identityGraph = buildLateralIdentityGraph(machineNodes, machineEdges);
+    const identityNodes = selectLateralGraphNodes(identityGraph.nodes);
+    const identityIds = new Set(identityNodes.map((node) => node.id));
+    const identityEligibleEdges = identityGraph.edges.filter(
+      (edge) => identityIds.has(edge.source) && identityIds.has(edge.target),
+    );
+    const identityEdges = selectLateralGraphEdges(identityEligibleEdges);
+    return {
+      machineNodes,
+      machineEdges,
+      machineEligibleEdgeCount: machineEligibleEdges.length,
+      identityGraph,
+      identityNodes,
+      identityEdges,
+      identityEligibleEdgeCount: identityEligibleEdges.length,
+    };
+  }, [data?.nodes, data?.edges]);
+
   // Kick the pre-flight preview + KAPE host detection once per open. These ran as bare
   // `if (...) setModal(...)` statements in the render body, mutating store state during
   // render ("Cannot update a component while rendering") and firing IPC as a side effect.
@@ -121,72 +157,6 @@ export default function LateralMovementModal() {
     setModal((p) => (p?.type === "lateralMovement" ? { ...p, autoStart: false, _lmAutoRun: false } : p));
     _handlersRef.current.handleAnalyze?.();
   }, [isActive, modal?.autoStart, modal?._lmAutoRun, modal?.phase, modal?.loading]);
-
-  // Load persisted triage marks for the current scope. The isActive guard must stay the
-  // FIRST statement: when the component early-returns, this effect still runs, so it must
-  // not touch any of the helpers declared below the guard.
-  useEffect(() => {
-    if (!isActive || !data) return undefined;
-    const scope = _triageScope();
-    if (modal.lmTriageScope === scope.id && modal.lmTriageLoaded) return undefined;
-    const localState = _loadLmTriageState(scope);
-    setModal((p) => p?.type === "lateralMovement" ? {
-      ...p,
-      lmTriageScope: scope.id,
-      lmTriageState: localState,
-      lmTriageLoaded: false,
-    } : p);
-
-    if (!tle?.lateralMovementLoadTriage) {
-      setModal((p) => p?.type === "lateralMovement" && p.lmTriageScope === scope.id ? { ...p, lmTriageLoaded: true } : p);
-      return undefined;
-    }
-
-    let cancelled = false;
-    tle.lateralMovementLoadTriage(scope).then((remoteState) => {
-      if (cancelled) return;
-      // Unchecked, an error object was normalized into an EMPTY triage state, merged over
-      // the analyst's local marks and then written back to localStorage — silently
-      // destroying reviewed/false-positive marks on a transient read failure.
-      if (isIpcError(remoteState)) {
-        setModal((p) => (p?.type === "lateralMovement" && p.lmTriageScope === scope.id ? { ...p, lmTriageLoaded: true } : p));
-        return;
-      }
-      const remote = _normalizeLmTriageState(remoteState || {});
-      const selected = _isEmptyTriageState(remote) && !_isEmptyTriageState(localState) ? localState : remote;
-      if (_isEmptyTriageState(remote) && !_isEmptyTriageState(localState) && tle?.lateralMovementSaveTriage) {
-        // Best-effort seed of the on-disk store from localStorage. Deliberately silent:
-        // the marks are already safe locally and the next open retries.
-        tle.lateralMovementSaveTriage(scope, localState).catch(() => {});
-      }
-      setModal((p) => {
-        if (!p || p.type !== "lateralMovement" || p.lmTriageScope !== scope.id) return p;
-        const current = p.lmTriageState || {};
-        const merged = _normalizeLmTriageState({
-          reviewed: { ...(selected.reviewed || {}), ...(current.reviewed || {}) },
-          falsePositive: { ...(selected.falsePositive || {}), ...(current.falsePositive || {}) },
-          updatedAt: current.updatedAt || selected.updatedAt || null,
-        });
-        if (!_isEmptyTriageState(merged)) {
-          // Write the merge back to BOTH stores. Persisting only to localStorage let the
-          // two drift: disk kept the pre-merge state, so the next session read a stale
-          // set and the local-wins merge re-applied the difference every time.
-          try { window.localStorage?.setItem(_triageStorageKey(scope), JSON.stringify(merged)); } catch { /* quota */ }
-          if (tle?.lateralMovementSaveTriage) {
-            tle.lateralMovementSaveTriage(scope, merged).catch(() => { /* localStorage still holds it */ });
-          }
-        }
-        return { ...p, lmTriageState: merged, lmTriageLoaded: true };
-      });
-    }).catch(() => {
-      if (!cancelled) setModal((p) => p?.type === "lateralMovement" && p.lmTriageScope === scope.id ? { ...p, lmTriageLoaded: true } : p);
-    });
-    return () => { cancelled = true; };
-    // `tabs` was a dependency, but the scan writes evidence pills into the tab store on
-    // completion, so every run re-fired this effect with a stale `modal` closure, reset
-    // lmTriageLoaded and re-issued the load — racing any marks made in between. The
-    // scope id is what actually identifies the triage set, so depend on that.
-  }, [isActive, data, modal?.lmTriageScope, ct?.filePath, ct?.id, ct?.name]);
 
   // Guard: only render when this modal is active
   if (!isActive) return null;
@@ -266,13 +236,22 @@ export default function LateralMovementModal() {
   const _viewInGraph = (f, e) => {
     if (e) e.stopPropagation();
     const edge = data?.edges?.find((ed) => ed.source === f.source && ed.target === f.target);
-    if (edge && positions) {
-      const sp = positions[f.source], tp = positions[f.target];
+    const machineNodes = lateralGraphModel.machineNodes;
+    let machineEdges = lateralGraphModel.machineEdges;
+    if (edge && !machineEdges.includes(edge)) {
+      machineEdges = [
+        ...machineEdges.slice(0, Math.max(0, LATERAL_GRAPH_DEFAULTS.maxEdges - 1)),
+        edge,
+      ];
+    }
+    const machinePositions = computeForceLayout(machineNodes, machineEdges);
+    if (edge) {
+      const sp = machinePositions[f.source], tp = machinePositions[f.target];
       if (sp && tp) {
         const cx = (sp.x + tp.x) / 2, cy = (sp.y + tp.y) / 2;
-        setModal((p) => ({ ...p, viewTab: "graph", selectedEdge: edge, selectedNode: null, viewBox: { x: cx - 120, y: cy - 80, w: 240, h: 160 } }));
-      } else setModal((p) => ({ ...p, viewTab: "graph", selectedEdge: edge, selectedNode: null }));
-    } else setModal((p) => ({ ...p, viewTab: "graph" }));
+        setModal((p) => ({ ...p, viewTab: "graph", lmGraphMode: "machines", positions: machinePositions, selectedEdge: edge, selectedNode: null, viewBox: { x: cx - 120, y: cy - 80, w: 240, h: 160 } }));
+      } else setModal((p) => ({ ...p, viewTab: "graph", lmGraphMode: "machines", positions: machinePositions, selectedEdge: edge, selectedNode: null }));
+    } else setModal((p) => ({ ...p, viewTab: "graph", lmGraphMode: "machines", positions: machinePositions }));
   };
 
   const _evidenceLabel = (item) => item?.title || item?.category || item?.technique || item?.sessionId || item?.id || "lateral-movement-evidence";
@@ -282,181 +261,6 @@ export default function LateralMovementModal() {
     relatedFindings: data?.findings || [],
     relatedIncidents: data?.incidents || [],
   });
-  const _hashString = (value) => {
-    let h = 2166136261;
-    const s = String(value || "");
-    for (let i = 0; i < s.length; i++) {
-      h ^= s.charCodeAt(i);
-      h = Math.imul(h, 16777619);
-    }
-    return (h >>> 0).toString(16);
-  };
-  /**
-   * Identify the triage set the analyst's reviewed / false-positive marks belong to.
-   *
-   * The fingerprint used to include each tab's `totalRows`. That made it a fingerprint of
-   * the DATA rather than of the SOURCE, so re-importing the same file — or importing it
-   * with one more row appended — produced a different scope id and silently orphaned every
-   * mark the analyst had made. Identity now comes from the file path (or tab name) alone.
-   *
-   * `legacyId` is the old row-count-bearing id, so a load can fall back to it once and
-   * migrate the marks forward rather than appearing to have lost them.
-   */
-  const _triageScope = () => {
-    const tabIdentity = (tabId, fallbackLabel = "") => {
-      const tab = tabs.find((t) => String(t.id) === String(tabId));
-      return tab?.filePath || tab?.name || fallbackLabel || tabId || "";
-    };
-    const tabLegacy = (tabId, fallbackLabel = "", fallbackRows = 0) => {
-      const tab = tabs.find((t) => String(t.id) === String(tabId));
-      return `${tabIdentity(tabId, fallbackLabel)}:${tab?.totalRows || fallbackRows || 0}`;
-    };
-    const isMulti = data?.multiSource && Array.isArray(data.tabSummaries);
-    const tabScope = isMulti
-      ? data.tabSummaries.map((t) => tabIdentity(t.tabId, t.label)).sort().join("|")
-      : `${ct?.filePath || ct?.name || ct?.id || ""}`;
-    const legacyScope = isMulti
-      ? data.tabSummaries.map((t) => tabLegacy(t.tabId, t.label, t.rowCount)).sort().join("|")
-      : `${ct?.filePath || ct?.name || ct?.id || ""}:${ct?.totalRows || 0}`;
-    const tabIds = isMulti
-      ? data.tabSummaries.map((t) => t.tabId).filter(Boolean)
-      : [ct?.id].filter(Boolean);
-    return {
-      id: _hashString(tabScope),
-      legacyId: _hashString(legacyScope),
-      // For a multi-source run, also expose each member tab's own single-tab scope so marks
-      // made while looking at one tab are not lost when the correlation set changes.
-      memberIds: isMulti ? data.tabSummaries.map((t) => _hashString(tabIdentity(t.tabId, t.label))) : [],
-      label: isMulti ? `multi-source:${tabIds.length}` : (ct?.name || ct?.id || "current-tab"),
-      tabIds,
-      rowFingerprint: tabScope,
-    };
-  };
-  const _triageStorageKey = (scope = _triageScope()) => {
-    const scopeId = typeof scope === "string" ? scope : scope?.id;
-    return `irflow:lateral-movement:triage:${scopeId || _hashString("default")}`;
-  };
-  const _emptyTriageState = () => ({ reviewed: {}, falsePositive: {}, updatedAt: null });
-  const _normalizeLmTriageState = (state) => ({
-    version: 1,
-    reviewed: state && typeof state.reviewed === "object" ? state.reviewed : {},
-    falsePositive: state && typeof state.falsePositive === "object" ? state.falsePositive : {},
-    updatedAt: state?.updatedAt || null,
-  });
-  const _isEmptyTriageState = (state) => Object.keys(state?.reviewed || {}).length === 0 && Object.keys(state?.falsePositive || {}).length === 0;
-  /**
-   * Read the marks for a scope from localStorage.
-   *
-   * Falls back to the pre-migration `legacyId` (and, for a multi-source run, to each member
-   * tab's own single-tab scope) so marks made before the fingerprint changed — or made
-   * while looking at one tab of a correlation set — still surface instead of appearing lost.
-   */
-  const _loadLmTriageState = (scope = _triageScope()) => {
-    if (typeof window === "undefined" || !window.localStorage) return _emptyTriageState();
-    const read = (id) => {
-      try {
-        const parsed = JSON.parse(window.localStorage.getItem(_triageStorageKey(id)) || "null");
-        return parsed ? _normalizeLmTriageState(parsed) : null;
-      } catch { return null; }
-    };
-    const primary = read(scope?.id ?? scope);
-    if (primary && !_isEmptyTriageState(primary)) return primary;
-
-    const fallbacks = [scope?.legacyId, ...(scope?.memberIds || [])].filter(Boolean);
-    const merged = _emptyTriageState();
-    let found = false;
-    for (const id of fallbacks) {
-      const st = read(id);
-      if (!st || _isEmptyTriageState(st)) continue;
-      found = true;
-      Object.assign(merged.reviewed, st.reviewed || {});
-      Object.assign(merged.falsePositive, st.falsePositive || {});
-      merged.updatedAt = merged.updatedAt || st.updatedAt || null;
-    }
-    if (found) {
-      // Migrate forward so the next read hits the primary key directly.
-      try { window.localStorage.setItem(_triageStorageKey(scope), JSON.stringify(merged)); } catch { /* quota */ }
-      return merged;
-    }
-    return primary || _emptyTriageState();
-  };
-  const _saveLmTriageState = (state, scope = _triageScope()) => {
-    const clean = _normalizeLmTriageState(state || {});
-    if (typeof window !== "undefined" && window.localStorage) {
-      try { window.localStorage.setItem(_triageStorageKey(scope), JSON.stringify(clean)); } catch {}
-    }
-    if (tle?.lateralMovementSaveTriage) {
-      // Triage marks are analyst work product. A silent .catch(()=>{}) meant a failed
-      // write looked identical to a successful one; localStorage still holds the marks,
-      // so warn rather than error.
-      tle.lateralMovementSaveTriage(scope, clean).then((res) => {
-        if (isIpcError(res)) toast.warning("Triage marks not saved to disk", { detail: ipcErrorMessage(res) });
-      }).catch((err) => {
-        toast.warning("Triage marks not saved to disk", { detail: err?.message || "Kept in this session only." });
-      });
-    }
-  };
-  const _triageState = () => modal.lmTriageState || _loadLmTriageState();
-  const _triageKey = (item) => _hashString([
-    item?.id,
-    item?.sessionId,
-    item?.category,
-    item?.title,
-    item?.technique,
-    item?.source,
-    item?.target,
-    _listify(item?.users || item?.user).join(","),
-    item?.timeRange?.from || item?.startTime || item?.firstSeen || item?.firstTs,
-    item?.timeRange?.to || item?.endTime || item?.lastSeen || item?.lastTs,
-    item?.eventCount ?? item?.count,
-  ].filter((v) => v != null && String(v).trim() !== "").join("|"));
-  const _itemTriage = (item) => {
-    const state = _triageState();
-    const key = _triageKey(item);
-    return {
-      key,
-      reviewed: !!state.reviewed?.[key],
-      falsePositive: !!state.falsePositive?.[key],
-      reviewedAt: state.reviewed?.[key] || null,
-      falsePositiveAt: state.falsePositive?.[key] || null,
-    };
-  };
-  const _setItemTriage = (item, field, active, e) => {
-    if (e) e.stopPropagation();
-    const key = _triageKey(item);
-    setModal((p) => {
-      if (!p || p.type !== "lateralMovement") return p;
-      const base = p.lmTriageState || _loadLmTriageState();
-      const next = {
-        reviewed: { ...(base.reviewed || {}) },
-        falsePositive: { ...(base.falsePositive || {}) },
-        updatedAt: new Date().toISOString(),
-      };
-      if (active) next[field][key] = next.updatedAt;
-      else delete next[field][key];
-      if (field === "falsePositive" && active) next.reviewed[key] = next.updatedAt;
-      _saveLmTriageState(next);
-      return { ...p, lmTriageState: next };
-    });
-  };
-  const _clearLmTriageState = () => {
-    const scope = _triageScope();
-    const next = _emptyTriageState();
-    if (typeof window !== "undefined" && window.localStorage) {
-      try { window.localStorage.removeItem(_triageStorageKey(scope)); } catch {}
-    }
-    if (tle?.lateralMovementClearTriage) {
-      tle.lateralMovementClearTriage(scope).then((res) => {
-        if (isIpcError(res)) toast.warning("Triage marks not cleared on disk", { detail: ipcErrorMessage(res) });
-      }).catch((err) => {
-        toast.warning("Triage marks not cleared on disk", { detail: err?.message || "They may reappear next session." });
-      });
-    } else {
-      _saveLmTriageState(next, scope);
-    }
-    setModal((p) => p?.type === "lateralMovement" ? { ...p, lmTriageState: next } : p);
-  };
-
 
   const _firstValue = (row, names) => {
     if (!row || typeof row !== "object") return "";
@@ -703,7 +507,6 @@ export default function LateralMovementModal() {
         evidenceRefCount: refs.length,
         redacted: true,
         redactionNote: "Credential-bearing values are masked. Generated by IRFlow Timeline.",
-        triage: _itemTriage(item),
         item,
         evidence,
       };
@@ -719,14 +522,13 @@ export default function LateralMovementModal() {
   const EvidenceActions = ({ item, compact = false, hideDetails = false }) => {
     const refs = _getEvidenceRefs(item);
     if (refs.length === 0) return null;
-    const triage = _itemTriage(item);
     const btn = {
       padding: compact ? "1px 5px" : "2px 8px",
       background: `${th.accent}12`,
       color: th.accent,
       border: `1px solid ${th.accent}33`,
       borderRadius: 4,
-      fontSize: compact ? 8 : 9,
+      fontSize: LM_TYPOGRAPHY.badge,
       cursor: "pointer",
       fontFamily: "-apple-system, sans-serif",
       fontWeight: 600,
@@ -739,25 +541,7 @@ export default function LateralMovementModal() {
         <button onClick={(ev) => _bookmarkEvidence(item, ev)} style={btn} title="Bookmark the exact source rows behind this item">Bookmark</button>
         <button onClick={(ev) => _tagEvidence(item, ev)} style={btn} title="Tag the exact source rows behind this item">Tag</button>
         <button onClick={(ev) => _exportEvidencePackage(item, ev)} style={btn} title="Export this item and exact source rows as JSON">Export package</button>
-        {!compact && (
-          <>
-            <button
-              onClick={(ev) => _setItemTriage(item, "reviewed", !triage.reviewed, ev)}
-              style={{ ...btn, background: triage.reviewed ? `${th.sev.clean}1f` : `${th.textMuted}10`, color: triage.reviewed ? th.sev.clean : th.textMuted, borderColor: triage.reviewed ? `${th.sev.clean}55` : `${th.border}44` }}
-              title="Mark this result as reviewed for this dataset"
-            >
-              {triage.reviewed ? "Reviewed" : "Mark reviewed"}
-            </button>
-            <button
-              onClick={(ev) => _setItemTriage(item, "falsePositive", !triage.falsePositive, ev)}
-              style={{ ...btn, background: triage.falsePositive ? `${th.sev.med}1f` : `${th.textMuted}10`, color: triage.falsePositive ? th.sev.med : th.textMuted, borderColor: triage.falsePositive ? `${th.sev.med}55` : `${th.border}44` }}
-              title="Mark this result as a false positive for this dataset"
-            >
-              {triage.falsePositive ? "False positive" : "Mark FP"}
-            </button>
-          </>
-        )}
-        {!compact && <span style={{ fontSize: 9, color: th.textMuted, fontFamily: "monospace" }}>{refs.length} refs</span>}
+        {!compact && <span style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, fontFamily: "monospace" }}>{refs.length} refs</span>}
       </div>
     );
   };
@@ -769,48 +553,45 @@ export default function LateralMovementModal() {
     const score = _scoreValue(item);
     const breakdown = _scoreBreakdown(item);
     const entities = _entitySummary(item);
-    const triage = _itemTriage(item);
     const sev = String(item.severity || item.confidence || (score >= 50 ? "critical" : score >= 25 ? "high" : score >= 10 ? "medium" : "info")).toLowerCase();
     const sevColor = LM_SEV_COLORS[sev] || th.sev.info;
     const close = () => setModal((p) => p?.type === "lateralMovement" ? { ...p, lmEvidenceItem: null, lmEvidenceRefs: [], lmEvidenceTimeline: [], lmEvidenceLoading: false, lmEvidenceError: null } : p);
     return (
       <div style={{ marginBottom: 12, border: `1px solid ${sevColor}44`, borderRadius: 10, background: `linear-gradient(135deg, ${sevColor}0d, ${th.panelBg}ee)`, overflow: "hidden" }}>
         <div style={{ padding: "10px 12px", borderBottom: `1px solid ${sevColor}25`, display: "flex", alignItems: "flex-start", gap: 10 }}>
-          <div style={{ width: 28, height: 28, borderRadius: 8, background: `${sevColor}18`, color: sevColor, border: `1px solid ${sevColor}30`, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: 11, fontFamily: "monospace", flexShrink: 0 }}>
+          <div style={{ width: 28, height: 28, borderRadius: 8, background: `${sevColor}18`, color: sevColor, border: `1px solid ${sevColor}30`, display: "flex", alignItems: "center", justifyContent: "center", fontWeight: 800, fontSize: LM_TYPOGRAPHY.body, fontFamily: "monospace", flexShrink: 0 }}>
             {score ?? refs.length}
           </div>
           <div style={{ flex: 1, minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap", marginBottom: 2 }}>
-              <span style={{ padding: "1px 6px", background: `${sevColor}22`, color: sevColor, borderRadius: 3, fontSize: 8, fontWeight: 700, textTransform: "uppercase", fontFamily: "-apple-system, sans-serif" }}>{sev}</span>
-              {triage.falsePositive && <span style={{ padding: "1px 6px", background: `${th.sev.med}22`, color: th.sev.med, borderRadius: 3, fontSize: 8, fontWeight: 700, textTransform: "uppercase", fontFamily: "-apple-system, sans-serif" }}>false positive</span>}
-              {!triage.falsePositive && triage.reviewed && <span style={{ padding: "1px 6px", background: `${th.sev.clean}22`, color: th.sev.clean, borderRadius: 3, fontSize: 8, fontWeight: 700, textTransform: "uppercase", fontFamily: "-apple-system, sans-serif" }}>reviewed</span>}
-              <span style={{ fontSize: 12, fontWeight: 700, color: th.text, fontFamily: "-apple-system, sans-serif", letterSpacing: "-0.1px" }}>{_evidenceLabel(item)}</span>
+              <span style={{ padding: "1px 6px", background: `${sevColor}22`, color: sevColor, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700, textTransform: "uppercase", fontFamily: "-apple-system, sans-serif" }}>{sev}</span>
+              <span style={{ fontSize: LM_TYPOGRAPHY.title, fontWeight: 700, color: th.text, fontFamily: "-apple-system, sans-serif", letterSpacing: "-0.1px" }}>{_evidenceLabel(item)}</span>
             </div>
-            <div style={{ fontSize: 10, color: th.textMuted, fontFamily: "-apple-system, sans-serif", lineHeight: 1.4 }}>
+            <div style={{ fontSize: LM_TYPOGRAPHY.control, color: th.textMuted, fontFamily: "-apple-system, sans-serif", lineHeight: 1.4 }}>
               Exact evidence drill-down. Actions below operate on source timeline rows across all involved tabs.
             </div>
           </div>
           <EvidenceActions item={item} hideDetails />
-          <button onClick={close} style={{ width: 22, height: 22, borderRadius: 11, border: "none", background: th.textMuted + "14", color: th.textMuted, cursor: "pointer", fontSize: 12, flexShrink: 0 }}>{"\u00D7"}</button>
+          <button onClick={close} style={{ width: 22, height: 22, borderRadius: 11, border: "none", background: th.textMuted + "14", color: th.textMuted, cursor: "pointer", fontSize: LM_TYPOGRAPHY.title, flexShrink: 0 }}>{"\u00D7"}</button>
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "minmax(260px, 0.9fr) minmax(320px, 1.2fr)", gap: 10, padding: 12 }}>
           <div style={{ minWidth: 0 }}>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 6, marginBottom: 10 }}>
               <div style={{ padding: "7px 9px", background: th.bg + "88", border: `1px solid ${th.border}33`, borderRadius: 6 }}>
-                <div style={{ fontSize: 8, color: th.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>Score</div>
-                <div style={{ fontSize: 15, color: sevColor, fontWeight: 800, fontFamily: "monospace", marginTop: 2 }}>{score ?? "N/A"}</div>
+                <div style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>Score</div>
+                <div style={{ fontSize: LM_TYPOGRAPHY.metric, color: sevColor, fontWeight: 800, fontFamily: "monospace", marginTop: 2 }}>{score ?? "N/A"}</div>
               </div>
               <div style={{ padding: "7px 9px", background: th.bg + "88", border: `1px solid ${th.border}33`, borderRadius: 6 }}>
-                <div style={{ fontSize: 8, color: th.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>Evidence Rows</div>
-                <div style={{ fontSize: 15, color: th.text, fontWeight: 800, fontFamily: "monospace", marginTop: 2 }}>{refs.length}</div>
+                <div style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, fontWeight: 700, textTransform: "uppercase", letterSpacing: "0.06em" }}>Evidence Rows</div>
+                <div style={{ fontSize: LM_TYPOGRAPHY.metric, color: th.text, fontWeight: 800, fontFamily: "monospace", marginTop: 2 }}>{refs.length}</div>
               </div>
             </div>
 
             {entities.length > 0 && (
               <div style={{ marginBottom: 10 }}>
-                <div style={{ fontSize: 9, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700, marginBottom: 5, fontFamily: "-apple-system, sans-serif" }}>Entities</div>
-                <div style={{ display: "grid", gridTemplateColumns: "90px minmax(0, 1fr)", gap: "4px 8px", fontSize: 10, fontFamily: "-apple-system, sans-serif" }}>
+                <div style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700, marginBottom: 5, fontFamily: "-apple-system, sans-serif" }}>Entities</div>
+                <div style={{ display: "grid", gridTemplateColumns: "90px minmax(0, 1fr)", gap: "4px 8px", fontSize: LM_TYPOGRAPHY.control, fontFamily: "-apple-system, sans-serif" }}>
                   {entities.map(([label, value]) => (
                     <Fragment key={label}>
                       <div style={{ color: th.textMuted, fontWeight: 600 }}>{label}</div>
@@ -822,41 +603,41 @@ export default function LateralMovementModal() {
             )}
 
             <div>
-              <div style={{ fontSize: 9, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700, marginBottom: 5, fontFamily: "-apple-system, sans-serif" }}>Why It Ranked Here</div>
+              <div style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700, marginBottom: 5, fontFamily: "-apple-system, sans-serif" }}>Why It Ranked Here</div>
               {breakdown.length > 0 ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   {breakdown.slice(0, 14).map((r, idx) => (
-                    <div key={`${r.label}-${idx}`} style={{ display: "flex", gap: 6, alignItems: "flex-start", padding: "4px 6px", borderRadius: 5, background: `${r.color}0f`, border: `1px solid ${r.color}22`, fontSize: 10, fontFamily: "-apple-system, sans-serif" }}>
-                      <span style={{ color: r.color, fontSize: 8, textTransform: "uppercase", fontWeight: 800, minWidth: 58 }}>{r.label}</span>
+                    <div key={`${r.label}-${idx}`} style={{ display: "flex", gap: 6, alignItems: "flex-start", padding: "4px 6px", borderRadius: 5, background: `${r.color}0f`, border: `1px solid ${r.color}22`, fontSize: LM_TYPOGRAPHY.control, fontFamily: "-apple-system, sans-serif" }}>
+                      <span style={{ color: r.color, fontSize: LM_TYPOGRAPHY.badge, textTransform: "uppercase", fontWeight: 800, minWidth: 58 }}>{r.label}</span>
                       <span style={{ color: th.textDim, lineHeight: 1.35, overflowWrap: "anywhere" }}>{r.text}</span>
                     </div>
                   ))}
                 </div>
               ) : (
-                <div style={{ fontSize: 10, color: th.textMuted, fontFamily: "-apple-system, sans-serif", lineHeight: 1.4 }}>No explicit scoring details were stored for this item. Use the exact evidence timeline to review the source rows.</div>
+                <div style={{ fontSize: LM_TYPOGRAPHY.control, color: th.textMuted, fontFamily: "-apple-system, sans-serif", lineHeight: 1.4 }}>No explicit scoring details were stored for this item. Use the exact evidence timeline to review the source rows.</div>
               )}
             </div>
           </div>
 
           <div style={{ minWidth: 0 }}>
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
-              <div style={{ fontSize: 9, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700, fontFamily: "-apple-system, sans-serif" }}>Exact Evidence Timeline</div>
-              {refs.length > timeline.length && <div style={{ fontSize: 9, color: th.textMuted, fontFamily: "monospace" }}>showing {timeline.length} of {refs.length}</div>}
+              <div style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 700, fontFamily: "-apple-system, sans-serif" }}>Exact Evidence Timeline</div>
+              {refs.length > timeline.length && <div style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, fontFamily: "monospace" }}>showing {timeline.length} of {refs.length}</div>}
             </div>
             {modal.lmEvidenceLoading ? (
-              <div style={{ padding: 18, textAlign: "center", color: th.textMuted, fontSize: 11, border: `1px solid ${th.border}22`, borderRadius: 6, background: th.bg + "55" }}>Loading source rows...</div>
+              <div style={{ padding: 18, textAlign: "center", color: th.textMuted, fontSize: LM_TYPOGRAPHY.body, border: `1px solid ${th.border}22`, borderRadius: 6, background: th.bg + "55" }}>Loading source rows...</div>
             ) : modal.lmEvidenceError ? (
-              <div style={{ padding: 10, color: th.danger, fontSize: 11, border: `1px solid ${th.danger}33`, borderRadius: 6, background: th.danger + "12" }}>{modal.lmEvidenceError}</div>
+              <div style={{ padding: 10, color: th.danger, fontSize: LM_TYPOGRAPHY.body, border: `1px solid ${th.danger}33`, borderRadius: 6, background: th.danger + "12" }}>{modal.lmEvidenceError}</div>
             ) : timeline.length === 0 ? (
-              <div style={{ padding: 18, textAlign: "center", color: th.textMuted, fontSize: 11, border: `1px solid ${th.border}22`, borderRadius: 6, background: th.bg + "55" }}>No exact source rows were attached to this item.</div>
+              <div style={{ padding: 18, textAlign: "center", color: th.textMuted, fontSize: LM_TYPOGRAPHY.body, border: `1px solid ${th.border}22`, borderRadius: 6, background: th.bg + "55" }}>No exact source rows were attached to this item.</div>
             ) : (
               <div style={{ maxHeight: 290, overflow: "auto", border: `1px solid ${th.border}33`, borderRadius: 6, background: th.bg + "55" }}>
                 {timeline.map((row, idx) => (
-                  <div key={`${row.tabId}-${row.rowId}-${idx}`} style={{ padding: "7px 8px", borderBottom: idx < timeline.length - 1 ? `1px solid ${th.border}18` : "none", display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: 8, fontSize: 10, fontFamily: "-apple-system, sans-serif" }}>
+                  <div key={`${row.tabId}-${row.rowId}-${idx}`} style={{ padding: "7px 8px", borderBottom: idx < timeline.length - 1 ? `1px solid ${th.border}18` : "none", display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: 8, fontSize: LM_TYPOGRAPHY.control, fontFamily: "-apple-system, sans-serif" }}>
                     <div style={{ color: th.textMuted, fontFamily: "monospace", lineHeight: 1.45 }}>
                       <div>{row.timestamp ? fmtTs(row.timestamp) : "(no time)"}</div>
-                      <div style={{ fontSize: 8, overflowWrap: "anywhere" }}>{row.tabName} #{row.rowId}</div>
-                      {row.eventId && <div style={{ color: th.accent, fontSize: 8 }}>EID {row.eventId}</div>}
+                      <div style={{ fontSize: LM_TYPOGRAPHY.badge, overflowWrap: "anywhere" }}>{row.tabName} #{row.rowId}</div>
+                      {row.eventId && <div style={{ color: th.accent, fontSize: LM_TYPOGRAPHY.badge }}>EID {row.eventId}</div>}
                     </div>
                     <div style={{ minWidth: 0, color: th.textDim, lineHeight: 1.45 }}>
                       <div style={{ color: th.text, fontWeight: 600, overflowWrap: "anywhere" }}>{row.computer || row.target || "(unknown host)"}</div>
@@ -874,121 +655,8 @@ export default function LateralMovementModal() {
     );
   };
 
-  const computeForceLayout = (nodes, edges) => {
-    if (nodes.length === 0) return {};
-    const N = nodes.length;
-    const W = 700, H = 450, CX = W / 2, CY = H / 2;
-    const pos = {};
-    const adj = new Map();
-    for (const e of edges) {
-      if (!adj.has(e.source)) adj.set(e.source, []);
-      if (!adj.has(e.target)) adj.set(e.target, []);
-      adj.get(e.source).push(e.target);
-      adj.get(e.target).push(e.source);
-    }
-    const visited = new Set();
-    const components = [];
-    for (const n of nodes) {
-      if (visited.has(n.id)) continue;
-      const comp = [];
-      const q = [n.id];
-      visited.add(n.id);
-      while (q.length) {
-        const c = q.shift();
-        comp.push(c);
-        for (const nb of (adj.get(c) || [])) {
-          if (!visited.has(nb)) { visited.add(nb); q.push(nb); }
-        }
-      }
-      components.push(comp);
-    }
-    const gridCols = Math.ceil(Math.sqrt(components.length));
-    const cellW = W / gridCols, cellH = H / Math.ceil(components.length / gridCols);
-    components.forEach((comp, ci) => {
-      const col = ci % gridCols, row = Math.floor(ci / gridCols);
-      const cx = cellW * (col + 0.5), cy = cellH * (row + 0.5);
-      const r = Math.min(cellW, cellH) * 0.35;
-      comp.forEach((id, i) => {
-        const angle = (2 * Math.PI * i) / comp.length;
-        pos[id] = { x: cx + r * Math.cos(angle), y: cy + r * Math.sin(angle), vx: 0, vy: 0 };
-      });
-    });
-    const ITER = N > 200 ? 40 : N > 100 ? 55 : 80;
-    const REP = N > 200 ? 4000 : 8000;
-    const ATT = 0.005, IDEAL = N > 200 ? 80 : 120, CENTER = 0.01, DAMP = 0.85, MAX_D = 40;
-    const useGrid = N > 100;
-    const GRID_SIZE = 80;
-    for (let it = 0; it < ITER; it++) {
-      const cool = 1 - it / ITER;
-      if (useGrid) {
-        const cells = new Map();
-        for (const n of nodes) {
-          const p = pos[n.id];
-          const gx = Math.floor(p.x / GRID_SIZE), gy = Math.floor(p.y / GRID_SIZE);
-          for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
-            const key = `${gx + dx},${gy + dy}`;
-            if (!cells.has(key)) cells.set(key, []);
-          }
-          const key = `${gx},${gy}`;
-          cells.get(key).push(n.id);
-        }
-        for (const n of nodes) {
-          const p = pos[n.id];
-          const gx = Math.floor(p.x / GRID_SIZE), gy = Math.floor(p.y / GRID_SIZE);
-          for (let dx = -1; dx <= 1; dx++) for (let dy = -1; dy <= 1; dy++) {
-            const key = `${gx + dx},${gy + dy}`;
-            const cell = cells.get(key);
-            if (!cell) continue;
-            for (const oid of cell) {
-              if (oid <= n.id) continue;
-              const b = pos[oid];
-              let ddx = p.x - b.x, ddy = p.y - b.y;
-              const dist = Math.sqrt(ddx * ddx + ddy * ddy) || 1;
-              const f = REP / (dist * dist) * cool;
-              const fx = (ddx / dist) * f, fy = (ddy / dist) * f;
-              p.vx += fx; p.vy += fy; b.vx -= fx; b.vy -= fy;
-            }
-          }
-        }
-      } else {
-        for (let i = 0; i < N; i++) {
-          for (let j = i + 1; j < N; j++) {
-            const a = pos[nodes[i].id], b = pos[nodes[j].id];
-            let dx = a.x - b.x, dy = a.y - b.y;
-            const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-            const f = REP / (dist * dist) * cool;
-            const fx = (dx / dist) * f, fy = (dy / dist) * f;
-            a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
-          }
-        }
-      }
-      for (const edge of edges) {
-        const a = pos[edge.source], b = pos[edge.target];
-        if (!a || !b) continue;
-        const dx = b.x - a.x, dy = b.y - a.y;
-        const dist = Math.sqrt(dx * dx + dy * dy) || 1;
-        const disp = dist - IDEAL;
-        const w = Math.min(3, 1 + Math.log2(edge.count || 1) * 0.3);
-        const f = ATT * disp * cool * w;
-        const fx = (dx / dist) * f, fy = (dy / dist) * f;
-        a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
-      }
-      for (const n of nodes) {
-        const p = pos[n.id];
-        p.vx += (CX - p.x) * CENTER; p.vy += (CY - p.y) * CENTER;
-        p.vx *= DAMP; p.vy *= DAMP;
-        const spd = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
-        const md = MAX_D * cool;
-        if (spd > md) { p.vx = (p.vx / spd) * md; p.vy = (p.vy / spd) * md; }
-        p.x += p.vx; p.y += p.vy;
-        p.x = Math.max(40, Math.min(W - 40, p.x));
-        p.y = Math.max(40, Math.min(H - 40, p.y));
-      }
-    }
-    const result = {};
-    for (const n of nodes) result[n.id] = { x: pos[n.id].x, y: pos[n.id].y };
-    return result;
-  };
+  const computeForceLayout = (nodes, edges) =>
+    layoutLateralMovementGraph(nodes, edges).positions;
 
   // `detector` maps a rule to detector ids in electron/analyzers/lateral-movement/
   // detector-registry.js. The analyzer derives which events to fetch from the enabled
@@ -1128,7 +796,7 @@ export default function LateralMovementModal() {
   const MitreBadge = ({ id }) => {
     const m = MITRE_MAP[id];
     if (!m) return null;
-    return <span onClick={(e) => { e.stopPropagation(); window.open(m.url, "_blank"); }} title={m.name} style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "1px 6px", background: th.textMuted + "18", color: th.textDim, border: `1px solid ${th.textMuted}33`, borderRadius: 4, fontSize: 9, fontFamily: "monospace", cursor: "pointer", fontWeight: 600, letterSpacing: "0.02em", transition: "all var(--m-base)" }} onMouseEnter={(e) => { e.currentTarget.style.background = th.textMuted + "30"; e.currentTarget.style.color = th.accent; }} onMouseLeave={(e) => { e.currentTarget.style.background = th.textMuted + "18"; e.currentTarget.style.color = th.textDim; }}>{id}</span>;
+    return <span onClick={(e) => { e.stopPropagation(); window.open(m.url, "_blank"); }} title={m.name} style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "1px 6px", background: th.textMuted + "18", color: th.textDim, border: `1px solid ${th.textMuted}33`, borderRadius: 4, fontSize: LM_TYPOGRAPHY.meta, fontFamily: "monospace", cursor: "pointer", fontWeight: 600, letterSpacing: "0.02em", transition: "all var(--m-base)" }} onMouseEnter={(e) => { e.currentTarget.style.background = th.textMuted + "30"; e.currentTarget.style.color = th.accent; }} onMouseLeave={(e) => { e.currentTarget.style.background = th.textMuted + "18"; e.currentTarget.style.color = th.textDim; }}>{id}</span>;
   };
   const lmDisabledSet = modal.lmDisabledRules instanceof Set ? modal.lmDisabledRules : new Set(modal.lmDisabledRules || []);
   const lmActiveCount = LM_RULES.length - [...lmDisabledSet].filter((k) => k.startsWith("lm-")).length;
@@ -1291,11 +959,33 @@ export default function LateralMovementModal() {
       } else {
         setModal((p) => isCurrentRun(p) ? { ...p, lmProgress: 100, lmPhaseIdx: 5 } : p);
         await new Promise((r) => setTimeout(r, 300));
-        const layoutNodes = result.nodes.length > 500 ? result.nodes.sort((a, b) => b.eventCount - a.eventCount).slice(0, 500) : result.nodes;
+        const layoutNodes = selectLateralGraphNodes(result.nodes);
         const layoutIds = new Set(layoutNodes.map((n) => n.id));
-        const layoutEdges = result.edges.filter((e) => layoutIds.has(e.source) && layoutIds.has(e.target));
+        const layoutEdges = selectLateralGraphEdges(
+          result.edges.filter((e) => layoutIds.has(e.source) && layoutIds.has(e.target)),
+        );
         const pos = computeForceLayout(layoutNodes, layoutEdges);
-        setModal((p) => isCurrentRun(p) ? { ...p, phase: "results", loading: false, data: result, positions: pos, selectedNode: null, selectedEdge: null, viewTab: p._lmInitialView || "graph", truncatedGraph: result.nodes.length > 500, rdpViewMode: p._lmInitialRdpView || "grouped", lmAlertLimit: 300, lmEdgeLimit: 400 } : p);
+        setModal((p) => isCurrentRun(p) ? {
+          ...p,
+          phase: "results",
+          loading: false,
+          data: result,
+          positions: pos,
+          lmGraphMode: "machines",
+          selectedNode: null,
+          selectedEdge: null,
+          viewBox: {
+            x: 0,
+            y: 0,
+            w: LATERAL_GRAPH_DEFAULTS.width,
+            h: LATERAL_GRAPH_DEFAULTS.height,
+          },
+          viewTab: p._lmInitialView || "graph",
+          truncatedGraph: result.nodes.length > LATERAL_GRAPH_DEFAULTS.maxNodes,
+          rdpViewMode: p._lmInitialRdpView || "grouped",
+          lmAlertLimit: 300,
+          lmEdgeLimit: 400,
+        } : p);
         // Keep the finished run on the tab so closing the modal is not destructive. This
         // is deliberately IN-MEMORY (session lifetime) and deliberately NOT part of
         // buildSessionPayload — a findings array for a large collection is megabytes, and
@@ -1355,6 +1045,7 @@ export default function LateralMovementModal() {
   const isSusHost = (name) => SUS_HOSTNAME.test(name);
   const nodeColor = (node) => {
     if (selectedNode === node.id) return th.accent;
+    if (node.nodeType === "identity") return node.unresolved ? th.textMuted : th.accent;
     if (node.isOutlier) return th.danger;
     if (isSusHost(node.id)) return th.sev.high;
     if (node.isBoth) return th.sev.custom;
@@ -1388,20 +1079,20 @@ export default function LateralMovementModal() {
           const close = () => setModal((p) => (p?.type === "lateralMovement" ? { ...p, lmTagPicker: null } : p));
           const chip = (t) => (
             <button key={t} onClick={() => _applyEvidenceTag(tp.item, t)}
-              style={{ padding: "4px 10px", borderRadius: 999, border: `1px solid ${th.glassBorder || th.border}`, background: th.glassBg || th.bgAlt, color: th.textDim, fontSize: 11, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}>{t}</button>
+              style={{ padding: "4px 10px", borderRadius: 999, border: `1px solid ${th.glassBorder || th.border}`, background: th.glassBg || th.bgAlt, color: th.textDim, fontSize: LM_TYPOGRAPHY.body, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}>{t}</button>
           );
           return (
             <div onClick={close} style={{ position: "absolute", inset: 0, zIndex: 40, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center" }}>
               <div onClick={(ev) => ev.stopPropagation()} role="dialog" aria-label="Tag evidence rows"
                 style={{ width: 420, maxWidth: "90%", padding: 18, borderRadius: 12, background: th.modalBg, border: `1px solid ${th.glassBorder || th.border}`, boxShadow: `0 12px 40px ${th.bg}cc`, backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)" }}>
-                <div style={{ fontSize: 13, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif" }}>Tag evidence rows</div>
-                <div style={{ fontSize: 11, color: th.textMuted, marginTop: 3, fontFamily: "-apple-system, sans-serif" }}>
+                <div style={{ fontSize: LM_TYPOGRAPHY.heading, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif" }}>Tag evidence rows</div>
+                <div style={{ fontSize: LM_TYPOGRAPHY.body, color: th.textMuted, marginTop: 3, fontFamily: "-apple-system, sans-serif" }}>
                   Applies to the {tp.refCount} exact source row{tp.refCount === 1 ? "" : "s"} behind this item.
                 </div>
                 <input autoFocus value={tp.value || ""} onChange={(ev) => setTagVal(ev.target.value)}
                   onKeyDown={(ev) => { if (ev.key === "Enter") _applyEvidenceTag(tp.item, tp.value); if (ev.key === "Escape") close(); }}
                   placeholder="tag name"
-                  style={{ width: "100%", marginTop: 12, padding: "7px 10px", borderRadius: 8, border: `1px solid ${th.border}`, background: th.bgInput, color: th.text, fontSize: 12, fontFamily: "-apple-system, sans-serif", boxSizing: "border-box" }} />
+                  style={{ width: "100%", marginTop: 12, padding: "7px 10px", borderRadius: 8, border: `1px solid ${th.border}`, background: th.bgInput, color: th.text, fontSize: LM_TYPOGRAPHY.title, fontFamily: "-apple-system, sans-serif", boxSizing: "border-box" }} />
                 <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 10 }}>
                   {[_defaultTagFor(tp.item), "lateral:confirmed", "lateral:credential-abuse", "lateral:execution", "needs-review", "false-positive"]
                     .filter((t, i, a) => a.indexOf(t) === i).map(chip)}
@@ -1422,11 +1113,11 @@ export default function LateralMovementModal() {
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke={th.danger} strokeWidth="1.5" strokeLinecap="round"><circle cx="5" cy="12" r="2.5" fill={`${th.danger}33`}/><circle cx="19" cy="5" r="2.5" fill={`${th.danger}33`}/><circle cx="19" cy="19" r="2.5" fill={`${th.danger}33`}/><line x1="7.5" y1="11" x2="16.5" y2="6"/><line x1="7.5" y1="13" x2="16.5" y2="18"/></svg>
             </div>
             <div>
-              <h3 style={{ margin: 0, fontSize: 15, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif", letterSpacing: "-0.3px" }}>Lateral Movement Tracker</h3>
-              <p style={{ margin: "2px 0 0", color: th.textMuted, fontSize: 11, fontFamily: "-apple-system, sans-serif" }}>Network graph of host-to-host logon events</p>
+              <h3 style={{ margin: 0, fontSize: LM_TYPOGRAPHY.heading, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif", letterSpacing: "-0.3px" }}>Lateral Movement Tracker</h3>
+              <p style={{ margin: "2px 0 0", color: th.textMuted, fontSize: LM_TYPOGRAPHY.body, fontFamily: "-apple-system, sans-serif" }}>Evidence-backed machine and user movement paths</p>
             </div>
           </div>
-          <button onClick={() => setModal(null)} style={{ width: 24, height: 24, borderRadius: 12, background: th.textMuted + "15", border: "none", color: th.textMuted, cursor: "pointer", fontSize: 13, fontFamily: "-apple-system, sans-serif", display: "flex", alignItems: "center", justifyContent: "center", transition: "all var(--m-base)" }}
+          <button onClick={() => setModal(null)} style={{ width: 24, height: 24, borderRadius: 12, background: th.textMuted + "15", border: "none", color: th.textMuted, cursor: "pointer", fontSize: LM_TYPOGRAPHY.heading, fontFamily: "-apple-system, sans-serif", display: "flex", alignItems: "center", justifyContent: "center", transition: "all var(--m-base)" }}
             onMouseEnter={(ev) => { ev.currentTarget.style.background = th.danger + "33"; ev.currentTarget.style.color = th.danger; }}
             onMouseLeave={(ev) => { ev.currentTarget.style.background = th.textMuted + "15"; ev.currentTarget.style.color = th.textMuted; }}>{"\u2715"}</button>
         </div>
@@ -1439,7 +1130,7 @@ export default function LateralMovementModal() {
             const covColor = { high: th.sev.clean, medium: th.sev.med, low: th.sev.critical }[cov.level];
             return (
             <div>
-              {modal.error && <div style={{ padding: "8px 12px", background: (th.danger) + "15", border: `1px solid ${th.danger}33`, borderRadius: 6, color: th.danger, fontSize: 11, marginBottom: 12 }}>{modal.error}</div>}
+              {modal.error && <div style={{ padding: "8px 12px", background: (th.danger) + "15", border: `1px solid ${th.danger}33`, borderRadius: 6, color: th.danger, fontSize: LM_TYPOGRAPHY.body, marginBottom: 12 }}>{modal.error}</div>}
 
               {/* KAPE Collection Host */}
               {modal.kapeHost && modal.kapeHost.collectionHost && (
@@ -1448,10 +1139,10 @@ export default function LateralMovementModal() {
                     <rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>
                   </svg>
                   <div style={{ flex: 1 }}>
-                    <div style={{ fontSize: 11, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif" }}>
+                    <div style={{ fontSize: LM_TYPOGRAPHY.body, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif" }}>
                       Collection Host: <span style={{ color: th.accent }}>{modal.kapeHost.shortName || modal.kapeHost.collectionHost}</span>
                     </div>
-                    <div style={{ fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif", marginTop: 1 }}>
+                    <div style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, fontFamily: "-apple-system, sans-serif", marginTop: 1 }}>
                       {modal.kapeHost.format} · {modal.kapeHost.pct}% of events ({modal.kapeHost.eventCount?.toLocaleString()} / {modal.kapeHost.totalEvents?.toLocaleString()}) · {modal.kapeHost.confidence} confidence
                     </div>
                   </div>
@@ -1472,10 +1163,10 @@ export default function LateralMovementModal() {
                     {cov.level === "high" ? <><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></> : cov.level === "medium" ? <><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></> : <><circle cx="12" cy="12" r="10"/><line x1="15" y1="9" x2="9" y2="15"/><line x1="9" y1="9" x2="15" y2="15"/></>}
                   </svg>
                   <div>
-                    <div style={{ fontSize: 12, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif" }}>
+                    <div style={{ fontSize: LM_TYPOGRAPHY.title, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif" }}>
                       {cov.level === "high" ? "All columns mapped" : cov.level === "medium" ? "Core columns mapped" : "Missing required columns"}
                     </div>
-                    <div style={{ fontSize: 10, color: th.textMuted, fontFamily: "-apple-system, sans-serif", marginTop: 1 }}>
+                    <div style={{ fontSize: LM_TYPOGRAPHY.control, color: th.textMuted, fontFamily: "-apple-system, sans-serif", marginTop: 1 }}>
                       {cov.reqOk}/4 required{cov.recOk > 0 ? ` \u00B7 ${cov.recOk}/2 recommended` : ""}{cols.domain ? " \u00B7 domain" : ""}
                     </div>
                   </div>
@@ -1486,7 +1177,7 @@ export default function LateralMovementModal() {
                       <span key={k} title={`${label}: ${cols[k] || "unmapped"}`} style={{ width: 6, height: 6, borderRadius: 3, background: cols[k] ? th.sev.clean : th.sev.critical + "66" }} />
                     ))}
                   </div>}
-                  <button onClick={() => setModal((p) => ({ ...p, lmShowMapping: !p.lmShowMapping }))} style={{ ...ms.bsm, fontSize: 10, padding: "2px 8px" }}>
+                  <button onClick={() => setModal((p) => ({ ...p, lmShowMapping: !p.lmShowMapping }))} style={{ ...ms.bsm, fontSize: LM_TYPOGRAPHY.control, padding: "2px 8px" }}>
                     {modal.lmShowMapping ? "Hide" : "Edit"}
                   </button>
                 </div>
@@ -1502,11 +1193,11 @@ export default function LateralMovementModal() {
                       ["domain", "Domain", false],
                     ].map(([key, label, req]) => (
                       <div key={key}>
-                        <label style={{ fontSize: 9, color: cols[key] ? th.textDim : req ? th.sev.critical : th.textMuted, fontFamily: "-apple-system, sans-serif", textTransform: "uppercase", letterSpacing: "0.04em", display: "flex", alignItems: "center", gap: 3, marginBottom: 2 }}>
+                        <label style={{ fontSize: LM_TYPOGRAPHY.meta, color: cols[key] ? th.textDim : req ? th.sev.critical : th.textMuted, fontFamily: "-apple-system, sans-serif", textTransform: "uppercase", letterSpacing: "0.04em", display: "flex", alignItems: "center", gap: 3, marginBottom: 2 }}>
                           {cols[key] ? <span style={{ color: th.sev.clean }}>{"\u2713"}</span> : req ? <span style={{ color: th.sev.critical }}>{"\u2717"}</span> : <span style={{ color: th.textMuted }}>{"\u25CB"}</span>}
                           {label}
                         </label>
-                        <select value={cols[key] || ""} onChange={(e) => { const v = e.target.value || null; setModal((p) => { const nc = { ...p.columns, [key]: v }; setTimeout(() => refreshLmPreview(nc), 0); return { ...p, columns: nc }; }); }} style={{ ...ms.sl, fontSize: 10, padding: "3px 6px" }}>
+                        <select value={cols[key] || ""} onChange={(e) => { const v = e.target.value || null; setModal((p) => { const nc = { ...p.columns, [key]: v }; setTimeout(() => refreshLmPreview(nc), 0); return { ...p, columns: nc }; }); }} style={{ ...ms.sl, fontSize: LM_TYPOGRAPHY.control, padding: "3px 6px" }}>
                           <option value="">-- auto --</option>
                           {ct.headers.map((h) => <option key={h} value={h}>{h}</option>)}
                         </select>
@@ -1526,8 +1217,8 @@ export default function LateralMovementModal() {
                         <line x1="9" y1="6" x2="15" y2="6"/><line x1="6" y1="9" x2="6" y2="15"/><line x1="18" y1="9" x2="18" y2="15"/><line x1="9" y1="18" x2="15" y2="18"/>
                       </svg>
                       <div>
-                        <div style={{ fontSize: 11, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif" }}>Multi-source Correlation</div>
-                        <div style={{ fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif", marginTop: 1 }}>Merge logon events from multiple KAPE triage tabs to reveal cross-machine attack paths</div>
+                        <div style={{ fontSize: LM_TYPOGRAPHY.body, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif" }}>Multi-source Correlation</div>
+                        <div style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, fontFamily: "-apple-system, sans-serif", marginTop: 1 }}>Merge logon events from multiple KAPE triage tabs to reveal cross-machine attack paths</div>
                       </div>
                     </div>
                     <button onClick={() => setModal((p) => ({ ...p, lmMultiSource: !p.lmMultiSource, lmSelectedTabIds: p.lmSelectedTabIds || [] }))}
@@ -1537,16 +1228,16 @@ export default function LateralMovementModal() {
                   </div>
                   {modal.lmMultiSource && (
                     <div style={{ borderTop: `1px solid ${th.border}22`, paddingTop: 8 }}>
-                      <div style={{ fontSize: 9, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6, fontFamily: "-apple-system, sans-serif" }}>
+                      <div style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6, fontFamily: "-apple-system, sans-serif" }}>
                         Select tabs to include ({(modal.lmSelectedTabIds || []).length + 1} of {otherTabs.length + 1} tabs)
                       </div>
                       <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 120, overflow: "auto" }}>
                         {/* Current tab — always included, shown but not toggleable */}
                         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 8px", background: `${th.accent}12`, borderRadius: 6, border: `1px solid ${th.accent}22` }}>
-                          <span style={{ color: th.accent, fontSize: 12 }}>{"\u2713"}</span>
-                          <span style={{ fontSize: 11, color: th.text, fontFamily: "-apple-system, sans-serif", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{ct.name}</span>
-                          <span style={{ fontSize: 9, color: th.textMuted, fontFamily: "'SF Mono',Menlo,monospace" }}>{(ct.totalRows || 0).toLocaleString()} rows</span>
-                          <span style={{ fontSize: 8, color: th.accent, fontFamily: "-apple-system, sans-serif", padding: "1px 5px", background: `${th.accent}15`, borderRadius: 4 }}>current</span>
+                          <span style={{ color: th.accent, fontSize: LM_TYPOGRAPHY.title }}>{"\u2713"}</span>
+                          <span style={{ fontSize: LM_TYPOGRAPHY.body, color: th.text, fontFamily: "-apple-system, sans-serif", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{ct.name}</span>
+                          <span style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, fontFamily: "'SF Mono',Menlo,monospace" }}>{(ct.totalRows || 0).toLocaleString()} rows</span>
+                          <span style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.accent, fontFamily: "-apple-system, sans-serif", padding: "1px 5px", background: `${th.accent}15`, borderRadius: 4 }}>current</span>
                         </div>
                         {/* Other tabs — toggleable */}
                         {otherTabs.map(t => {
@@ -1559,15 +1250,15 @@ export default function LateralMovementModal() {
                               return { ...p, lmSelectedTabIds: ids };
                             })}
                               style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 8px", background: sel ? `${th.accent}08` : "transparent", borderRadius: 6, border: `1px solid ${sel ? th.accent + "22" : th.border + "11"}`, cursor: "pointer", textAlign: "left", transition: "all var(--m-base)" }}>
-                              <span style={{ color: sel ? th.accent : th.textMuted, fontSize: 12, width: 14, textAlign: "center" }}>{sel ? "\u2713" : "\u25CB"}</span>
-                              <span style={{ fontSize: 11, color: sel ? th.text : th.textDim, fontFamily: "-apple-system, sans-serif", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name}</span>
-                              <span style={{ fontSize: 9, color: th.textMuted, fontFamily: "'SF Mono',Menlo,monospace" }}>{(t.totalRows || 0).toLocaleString()} rows</span>
+                              <span style={{ color: sel ? th.accent : th.textMuted, fontSize: LM_TYPOGRAPHY.title, width: 14, textAlign: "center" }}>{sel ? "\u2713" : "\u25CB"}</span>
+                              <span style={{ fontSize: LM_TYPOGRAPHY.body, color: sel ? th.text : th.textDim, fontFamily: "-apple-system, sans-serif", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{t.name}</span>
+                              <span style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, fontFamily: "'SF Mono',Menlo,monospace" }}>{(t.totalRows || 0).toLocaleString()} rows</span>
                             </button>
                           );
                         })}
                       </div>
                       {(modal.lmSelectedTabIds || []).length === 0 && (
-                        <div style={{ fontSize: 10, color: th.warning, marginTop: 6, fontFamily: "-apple-system, sans-serif" }}>Select at least one additional tab for multi-source correlation</div>
+                        <div style={{ fontSize: LM_TYPOGRAPHY.control, color: th.warning, marginTop: 6, fontFamily: "-apple-system, sans-serif" }}>Select at least one additional tab for multi-source correlation</div>
                       )}
                     </div>
                   )}
@@ -1581,14 +1272,14 @@ export default function LateralMovementModal() {
                     const active = modal.lmIntent === intent.id;
                     return (
                       <button key={intent.id} onClick={() => applyLmIntent(intent)} title={intent.desc}
-                        style={{ padding: "4px 10px", fontSize: 10, fontWeight: active ? 600 : 400, fontFamily: "-apple-system, sans-serif", background: active ? `${th.accent}18` : "transparent", color: active ? th.accent : th.textDim, border: `1px solid ${active ? th.accent + "44" : th.border + "22"}`, borderRadius: 6, cursor: "pointer", transition: "all var(--m-base)" }}>
+                        style={{ padding: "4px 10px", fontSize: LM_TYPOGRAPHY.control, fontWeight: active ? 600 : 400, fontFamily: "-apple-system, sans-serif", background: active ? `${th.accent}18` : "transparent", color: active ? th.accent : th.textDim, border: `1px solid ${active ? th.accent + "44" : th.border + "22"}`, borderRadius: 6, cursor: "pointer", transition: "all var(--m-base)" }}>
                         {intent.label}
                       </button>
                     );
                   })}
                 </div>
                 <button onClick={resetLmRules} title="Reset all rules to recommended defaults"
-                  style={{ padding: "3px 8px", fontSize: 9, fontFamily: "-apple-system, sans-serif", background: "transparent", color: th.textMuted, border: `1px solid ${th.border}22`, borderRadius: 4, cursor: "pointer", display: "flex", alignItems: "center", gap: 3, transition: "all var(--m-base)" }}
+                  style={{ padding: "3px 8px", fontSize: LM_TYPOGRAPHY.meta, fontFamily: "-apple-system, sans-serif", background: "transparent", color: th.textMuted, border: `1px solid ${th.border}22`, borderRadius: 4, cursor: "pointer", display: "flex", alignItems: "center", gap: 3, transition: "all var(--m-base)" }}
                   onMouseEnter={(e) => { e.currentTarget.style.color = th.accent; e.currentTarget.style.borderColor = th.accent + "44"; }}
                   onMouseLeave={(e) => { e.currentTarget.style.color = th.textMuted; e.currentTarget.style.borderColor = th.border + "22"; }}>
                   <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round"><polyline points="1 4 1 10 7 10"/><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/></svg>
@@ -1598,7 +1289,7 @@ export default function LateralMovementModal() {
 
               {/* Technique Presets */}
               <div style={{ marginBottom: 12 }}>
-                <div style={{ fontSize: 10, fontWeight: 700, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8, fontFamily: "-apple-system, sans-serif" }}>Detection Techniques</div>
+                <div style={{ fontSize: LM_TYPOGRAPHY.control, fontWeight: 700, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 8, fontFamily: "-apple-system, sans-serif" }}>Detection Techniques</div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
                   {LM_PRESETS.map((preset) => {
                     const state = lmPresetState(preset.rules, lmDisabledSet);
@@ -1613,12 +1304,12 @@ export default function LateralMovementModal() {
                               {preset.icon}
                             </div>
                             <div>
-                              <div style={{ fontSize: 12, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif" }}>{preset.name}</div>
-                              <div style={{ fontSize: 10, color: th.textMuted, fontFamily: "-apple-system, sans-serif", marginTop: 1, maxWidth: 320 }}>{preset.desc}</div>
+                              <div style={{ fontSize: LM_TYPOGRAPHY.title, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif" }}>{preset.name}</div>
+                              <div style={{ fontSize: LM_TYPOGRAPHY.control, color: th.textMuted, fontFamily: "-apple-system, sans-serif", marginTop: 1, maxWidth: 320 }}>{preset.desc}</div>
                             </div>
                           </div>
                           <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                            <span style={{ fontSize: 10, color: th.textDim, fontFamily: "SF Mono, monospace" }}>{activeRuleCount}/{preset.rules.length}</span>
+                            <span style={{ fontSize: LM_TYPOGRAPHY.control, color: th.textDim, fontFamily: "SF Mono, monospace" }}>{activeRuleCount}/{preset.rules.length}</span>
                             <div style={{ width: 32, height: 18, borderRadius: 10, background: isOn ? th.accent : th.textMuted + "33", transition: "background var(--m-base)", position: "relative" }}>
                               <div style={{ width: 14, height: 14, borderRadius: 8, background: "#fff", position: "absolute", top: 2, left: isOn ? 16 : 2, transition: "left var(--m-base)", boxShadow: "0 1px 3px rgba(0,0,0,0.2)" }} />
                             </div>
@@ -1629,7 +1320,7 @@ export default function LateralMovementModal() {
                             {preset.rules.map(i => {
                               const r = LM_RULES[i]; const off = lmDisabledSet.has(`lm-${i}`);
                               return <span key={i} onClick={(e) => { e.stopPropagation(); toggleLmRule(`lm-${i}`); }}
-                                style={{ fontSize: 9, padding: "1px 6px", borderRadius: 3, background: off ? `${th.textMuted}11` : `${LM_SEV_COLORS[r.sev]}15`, color: off ? th.textMuted : LM_SEV_COLORS[r.sev], border: `1px solid ${off ? th.border + "22" : LM_SEV_COLORS[r.sev] + "33"}`, fontFamily: "-apple-system, sans-serif", cursor: "pointer", textDecoration: off ? "line-through" : "none", opacity: off ? 0.5 : 1, transition: "all var(--m-base)" }}>{r.name}</span>;
+                                style={{ fontSize: LM_TYPOGRAPHY.meta, padding: "1px 6px", borderRadius: 3, background: off ? `${th.textMuted}11` : `${LM_SEV_COLORS[r.sev]}15`, color: off ? th.textMuted : LM_SEV_COLORS[r.sev], border: `1px solid ${off ? th.border + "22" : LM_SEV_COLORS[r.sev] + "33"}`, fontFamily: "-apple-system, sans-serif", cursor: "pointer", textDecoration: off ? "line-through" : "none", opacity: off ? 0.5 : 1, transition: "all var(--m-base)" }}>{r.name}</span>;
                             })}
                           </div>
                         )}
@@ -1642,17 +1333,17 @@ export default function LateralMovementModal() {
               {/* Exclusion toggles + rule count */}
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12 }}>
                 <div style={{ display: "flex", gap: 14 }}>
-                  <label style={{ fontSize: 11, color: th.textDim, cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontFamily: "-apple-system, sans-serif" }}>
+                  <label style={{ fontSize: LM_TYPOGRAPHY.body, color: th.textDim, cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontFamily: "-apple-system, sans-serif" }}>
                     <input type="checkbox" checked={excludeLocal} onChange={() => { setModal((p) => ({ ...p, excludeLocal: !p.excludeLocal })); setTimeout(() => refreshLmPreview(), 0); }} style={{ accentColor: th.accent }} /> Exclude local logons
                   </label>
-                  <label style={{ fontSize: 11, color: th.textDim, cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontFamily: "-apple-system, sans-serif" }}>
+                  <label style={{ fontSize: LM_TYPOGRAPHY.body, color: th.textDim, cursor: "pointer", display: "flex", alignItems: "center", gap: 4, fontFamily: "-apple-system, sans-serif" }}>
                     <input type="checkbox" checked={excludeService} onChange={() => { setModal((p) => ({ ...p, excludeService: !p.excludeService })); setTimeout(() => refreshLmPreview(), 0); }} style={{ accentColor: th.accent }} /> Exclude service accounts
                   </label>
                 </div>
-                <span style={{ fontSize: 10, color: th.textDim, fontFamily: "-apple-system, sans-serif" }}>{lmActiveCount}/{LM_RULES.length} rules{lmCustomCount > 0 ? ` + ${lmCustomCount} custom` : ""}</span>
+                <span style={{ fontSize: LM_TYPOGRAPHY.control, color: th.textDim, fontFamily: "-apple-system, sans-serif" }}>{lmActiveCount}/{LM_RULES.length} rules{lmCustomCount > 0 ? ` + ${lmCustomCount} custom` : ""}</span>
               </div>
               {modal.chainsawSyntheticTarget && (
-                <div style={{ marginBottom: 12, padding: "8px 10px", background: `${th.warning}12`, border: `1px solid ${(th.warning)}30`, borderRadius: 8, color: th.warning, fontSize: 10, fontFamily: "-apple-system, sans-serif", lineHeight: 1.5 }}>
+                <div style={{ marginBottom: 12, padding: "8px 10px", background: `${th.warning}12`, border: `1px solid ${(th.warning)}30`, borderRadius: 8, color: th.warning, fontSize: LM_TYPOGRAPHY.control, fontFamily: "-apple-system, sans-serif", lineHeight: 1.5 }}>
                   Chainsaw logon export has no destination host column. Tracker will treat these events as inbound activity to <span style={{ fontFamily: "SF Mono, monospace" }}>{modal.chainsawSyntheticTarget}</span>.
                 </div>
               )}
@@ -1672,13 +1363,13 @@ export default function LateralMovementModal() {
                 return (
                 <div style={{ padding: "10px 14px", background: `${th.panelBg}44`, border: `1px solid ${th.border}22`, borderRadius: 10, marginBottom: 12 }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
-                    <div style={{ fontSize: 10, fontWeight: 700, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "-apple-system, sans-serif" }}>Event Availability</div>
-                    {prev && <span style={{ fontSize: 9, color: th.textDim, fontFamily: "SF Mono, monospace" }}>{(prev.trackedEvents || 0).toLocaleString()} tracked events</span>}
+                    <div style={{ fontSize: LM_TYPOGRAPHY.control, fontWeight: 700, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "-apple-system, sans-serif" }}>Event Availability</div>
+                    {prev && <span style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textDim, fontFamily: "SF Mono, monospace" }}>{(prev.trackedEvents || 0).toLocaleString()} tracked events</span>}
                   </div>
                   {modal.lmPreviewLoading ? (
-                    <div style={{ fontSize: 10, color: th.textMuted, fontFamily: "-apple-system, sans-serif", padding: "6px 0" }}>Scanning dataset...</div>
+                    <div style={{ fontSize: LM_TYPOGRAPHY.control, color: th.textMuted, fontFamily: "-apple-system, sans-serif", padding: "6px 0" }}>Scanning dataset...</div>
                   ) : !prev ? (
-                    <div style={{ fontSize: 10, color: th.textMuted, fontFamily: "-apple-system, sans-serif", padding: "6px 0" }}>Preview unavailable</div>
+                    <div style={{ fontSize: LM_TYPOGRAPHY.control, color: th.textMuted, fontFamily: "-apple-system, sans-serif", padding: "6px 0" }}>Preview unavailable</div>
                   ) : (
                     <>
                       <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: hasAnyEvents ? 8 : 0 }}>
@@ -1689,8 +1380,8 @@ export default function LateralMovementModal() {
                             <div key={g.label} title={`${g.detector}\nEIDs: ${g.eids.join(", ")}\n${present ? total.toLocaleString() + " events" : "Not found"}`}
                               style={{ display: "flex", alignItems: "center", gap: 4, padding: "3px 8px", borderRadius: 6, background: present ? th.sev.clean + "10" : `${th.textMuted}08`, border: `1px solid ${present ? th.sev.clean + "22" : th.border + "15"}`, transition: "all var(--m-base)" }}>
                               <span style={{ width: 5, height: 5, borderRadius: 3, background: present ? th.sev.clean : g.required ? th.sev.critical : th.textMuted + "44" }} />
-                              <span style={{ fontSize: 9, color: present ? th.text : th.textMuted, fontFamily: "-apple-system, sans-serif", fontWeight: 500 }}>{g.label}</span>
-                              {present && <span style={{ fontSize: 8, color: th.textDim, fontFamily: "SF Mono, monospace" }}>{total >= 1000 ? (total / 1000).toFixed(1) + "k" : total}</span>}
+                              <span style={{ fontSize: LM_TYPOGRAPHY.meta, color: present ? th.text : th.textMuted, fontFamily: "-apple-system, sans-serif", fontWeight: 500 }}>{g.label}</span>
+                              {present && <span style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textDim, fontFamily: "SF Mono, monospace" }}>{total >= 1000 ? (total / 1000).toFixed(1) + "k" : total}</span>}
                             </div>
                           );
                         })}
@@ -1700,10 +1391,10 @@ export default function LateralMovementModal() {
                         <div style={{ borderTop: `1px solid ${th.border}15`, paddingTop: 6 }}>
                           {skipWarns.map((w, i) => (
                             <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 6, padding: "2px 0" }}>
-                              <span style={{ fontSize: 10, flexShrink: 0, marginTop: 1, color: w.level === "error" ? th.sev.critical : w.level === "warn" ? th.sev.med : th.textMuted }}>
+                              <span style={{ fontSize: LM_TYPOGRAPHY.control, flexShrink: 0, marginTop: 1, color: w.level === "error" ? th.sev.critical : w.level === "warn" ? th.sev.med : th.textMuted }}>
                                 {w.level === "error" ? "\u2717" : w.level === "warn" ? "\u26A0" : "\u25CB"}
                               </span>
-                              <span style={{ fontSize: 10, color: w.level === "error" ? th.sev.critical : w.level === "warn" ? th.sev.med : th.textMuted, fontFamily: "-apple-system, sans-serif", lineHeight: 1.4 }}>{w.text}</span>
+                              <span style={{ fontSize: LM_TYPOGRAPHY.control, color: w.level === "error" ? th.sev.critical : w.level === "warn" ? th.sev.med : th.textMuted, fontFamily: "-apple-system, sans-serif", lineHeight: 1.4 }}>{w.text}</span>
                             </div>
                           ))}
                         </div>
@@ -1713,8 +1404,8 @@ export default function LateralMovementModal() {
                         <div style={{ borderTop: `1px solid ${th.border}15`, paddingTop: 6, marginTop: skipWarns.length > 0 ? 0 : 0 }}>
                           {sanityWarns.map((w, i) => (
                             <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 6, padding: "2px 0" }}>
-                              <span style={{ fontSize: 10, flexShrink: 0, marginTop: 1, color: th.sev.med }}>{"\u26A0"}</span>
-                              <span style={{ fontSize: 10, color: th.sev.med, fontFamily: "-apple-system, sans-serif", lineHeight: 1.4 }}>{w}</span>
+                              <span style={{ fontSize: LM_TYPOGRAPHY.control, flexShrink: 0, marginTop: 1, color: th.sev.med }}>{"\u26A0"}</span>
+                              <span style={{ fontSize: LM_TYPOGRAPHY.control, color: th.sev.med, fontFamily: "-apple-system, sans-serif", lineHeight: 1.4 }}>{w}</span>
                             </div>
                           ))}
                         </div>
@@ -1729,16 +1420,16 @@ export default function LateralMovementModal() {
               <div>
                 <button onClick={() => setModal((p) => ({ ...p, showLmRules: !p.showLmRules }))}
                   style={{ width: "100%", padding: "8px 14px", background: "transparent", border: `1px solid ${th.border}22`, borderRadius: modal.showLmRules ? "10px 10px 0 0" : 10, cursor: "pointer", display: "flex", alignItems: "center", justifyContent: "space-between", transition: "all var(--m-base)" }}>
-                  <span style={{ fontSize: 11, fontWeight: 600, color: th.textDim, fontFamily: "-apple-system, sans-serif", display: "flex", alignItems: "center", gap: 6 }}>
+                  <span style={{ fontSize: LM_TYPOGRAPHY.body, fontWeight: 600, color: th.textDim, fontFamily: "-apple-system, sans-serif", display: "flex", alignItems: "center", gap: 6 }}>
                     <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={th.textMuted} strokeWidth="2" strokeLinecap="round"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
                     Advanced
                   </span>
-                  <span style={{ transform: modal.showLmRules ? "rotate(180deg)" : "rotate(0deg)", transition: "transform var(--m-base)", fontSize: 11, color: th.textMuted }}>{"\u25BE"}</span>
+                  <span style={{ transform: modal.showLmRules ? "rotate(180deg)" : "rotate(0deg)", transition: "transform var(--m-base)", fontSize: LM_TYPOGRAPHY.body, color: th.textMuted }}>{"\u25BE"}</span>
                 </button>
 
                 {modal.showLmRules && (
                   <div style={{ padding: "10px 14px", borderLeft: `1px solid ${th.border}22`, borderRight: `1px solid ${th.border}22`, borderBottom: `1px solid ${th.border}22`, borderRadius: "0 0 10px 10px", background: `${th.panelBg}33` }}>
-                    <div style={{ fontSize: 10, fontWeight: 700, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6, fontFamily: "-apple-system, sans-serif" }}>
+                    <div style={{ fontSize: LM_TYPOGRAPHY.control, fontWeight: 700, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6, fontFamily: "-apple-system, sans-serif" }}>
                       Individual Rules ({lmActiveCount}/{LM_RULES.length})
                     </div>
                     {[...LM_RULES.map((r, i) => ({ ...r, _i: i }))].sort((a, b) => {
@@ -1755,13 +1446,13 @@ export default function LateralMovementModal() {
                         <div key={key} style={{ padding: "3px 0", opacity: off ? 0.4 : 1, transition: "opacity var(--m-base)" }}>
                           <label style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer" }}>
                             <input type="checkbox" checked={!off} onChange={() => toggleLmRule(key)} style={{ accentColor: th.accent, margin: 0, flexShrink: 0 }} />
-                            <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 3, background: LM_SEV_COLORS[r.sev] + "22", color: LM_SEV_COLORS[r.sev], fontWeight: 600, fontFamily: "-apple-system, sans-serif", minWidth: 42, textAlign: "center", textTransform: "uppercase" }}>{r.sev}</span>
-                            <span style={{ fontSize: 10, color: th.text, fontFamily: "-apple-system, sans-serif", flex: 1 }}>{r.name}</span>
-                            <span style={{ fontSize: 9, color: th.textDim, fontFamily: "SF Mono, monospace" }}>EID {r.eids.join(",")}</span>
-                            {ruleEvCount > 0 && <span style={{ fontSize: 8, padding: "0 4px", borderRadius: 3, background: th.sev.clean + "15", color: th.sev.clean, fontFamily: "SF Mono, monospace", fontWeight: 600 }}>{ruleEvCount >= 1000 ? (ruleEvCount / 1000).toFixed(1) + "k" : ruleEvCount}</span>}
-                            {ruleEvCount === 0 && modal.lmPreview && <span style={{ fontSize: 8, padding: "0 4px", borderRadius: 3, background: `${th.textMuted}11`, color: th.textMuted, fontFamily: "SF Mono, monospace" }}>0</span>}
+                            <span style={{ fontSize: LM_TYPOGRAPHY.meta, padding: "1px 5px", borderRadius: 3, background: LM_SEV_COLORS[r.sev] + "22", color: LM_SEV_COLORS[r.sev], fontWeight: 600, fontFamily: "-apple-system, sans-serif", minWidth: 42, textAlign: "center", textTransform: "uppercase" }}>{r.sev}</span>
+                            <span style={{ fontSize: LM_TYPOGRAPHY.control, color: th.text, fontFamily: "-apple-system, sans-serif", flex: 1 }}>{r.name}</span>
+                            <span style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textDim, fontFamily: "SF Mono, monospace" }}>EID {r.eids.join(",")}</span>
+                            {ruleEvCount > 0 && <span style={{ fontSize: LM_TYPOGRAPHY.badge, padding: "0 4px", borderRadius: 3, background: th.sev.clean + "15", color: th.sev.clean, fontFamily: "SF Mono, monospace", fontWeight: 600 }}>{ruleEvCount >= 1000 ? (ruleEvCount / 1000).toFixed(1) + "k" : ruleEvCount}</span>}
+                            {ruleEvCount === 0 && modal.lmPreview && <span style={{ fontSize: LM_TYPOGRAPHY.badge, padding: "0 4px", borderRadius: 3, background: `${th.textMuted}11`, color: th.textMuted, fontFamily: "SF Mono, monospace" }}>0</span>}
                           </label>
-                          {blurb && <div style={{ marginLeft: 22, fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif", fontStyle: "italic", lineHeight: 1.3, marginTop: 1 }}>{blurb}</div>}
+                          {blurb && <div style={{ marginLeft: 22, fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, fontFamily: "-apple-system, sans-serif", fontStyle: "italic", lineHeight: 1.3, marginTop: 1 }}>{blurb}</div>}
                         </div>
                       );
                     })}
@@ -1769,13 +1460,13 @@ export default function LateralMovementModal() {
                     {/* Custom rules */}
                     {(modal.lmCustomRules || []).length > 0 && (
                       <div style={{ marginTop: 8 }}>
-                        <div style={{ fontSize: 10, fontWeight: 700, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4, fontFamily: "-apple-system, sans-serif" }}>Custom Rules</div>
+                        <div style={{ fontSize: LM_TYPOGRAPHY.control, fontWeight: 700, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 4, fontFamily: "-apple-system, sans-serif" }}>Custom Rules</div>
                         {(modal.lmCustomRules || []).map((cr, i) => (
                           <div key={`custom-${i}`} style={{ display: "flex", alignItems: "center", gap: 6, padding: "2px 0" }}>
-                            <span style={{ fontSize: 9, padding: "1px 5px", borderRadius: 3, background: LM_SEV_COLORS[cr.severity || "medium"] + "22", color: LM_SEV_COLORS[cr.severity || "medium"], fontWeight: 600, fontFamily: "-apple-system, sans-serif", minWidth: 42, textAlign: "center", textTransform: "uppercase" }}>{cr.severity || "med"}</span>
-                            <span style={{ fontSize: 10, color: th.text, fontFamily: "-apple-system, sans-serif", flex: 1 }}>{cr.category || "Custom"} {"\u2014"} {cr.name || "Custom Rule"}</span>
-                            <span style={{ fontSize: 9, color: th.textDim, fontFamily: "SF Mono, monospace" }}>EID {cr.eventIds || ""}</span>
-                            <button onClick={() => deleteLmCustomRule(i)} style={{ background: "none", border: "none", color: th.textMuted, cursor: "pointer", fontSize: 13, padding: "0 4px", lineHeight: 1 }} onMouseEnter={(e) => e.currentTarget.style.color = th.danger} onMouseLeave={(e) => e.currentTarget.style.color = th.textMuted}>{"\u00D7"}</button>
+                            <span style={{ fontSize: LM_TYPOGRAPHY.meta, padding: "1px 5px", borderRadius: 3, background: LM_SEV_COLORS[cr.severity || "medium"] + "22", color: LM_SEV_COLORS[cr.severity || "medium"], fontWeight: 600, fontFamily: "-apple-system, sans-serif", minWidth: 42, textAlign: "center", textTransform: "uppercase" }}>{cr.severity || "med"}</span>
+                            <span style={{ fontSize: LM_TYPOGRAPHY.control, color: th.text, fontFamily: "-apple-system, sans-serif", flex: 1 }}>{cr.category || "Custom"} {"\u2014"} {cr.name || "Custom Rule"}</span>
+                            <span style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textDim, fontFamily: "SF Mono, monospace" }}>EID {cr.eventIds || ""}</span>
+                            <button onClick={() => deleteLmCustomRule(i)} style={{ background: "none", border: "none", color: th.textMuted, cursor: "pointer", fontSize: LM_TYPOGRAPHY.heading, padding: "0 4px", lineHeight: 1 }} onMouseEnter={(e) => e.currentTarget.style.color = th.danger} onMouseLeave={(e) => e.currentTarget.style.color = th.textMuted}>{"\u00D7"}</button>
                           </div>
                         ))}
                       </div>
@@ -1784,23 +1475,23 @@ export default function LateralMovementModal() {
                     {/* Add custom rule */}
                     {!modal.lmAddingRule ? (
                       <button onClick={() => setModal((p) => ({ ...p, lmAddingRule: true, lmNewRule: {} }))}
-                        style={{ ...ms.bsm, marginTop: 8, display: "flex", alignItems: "center", gap: 4, fontSize: 10 }}>
-                        <span style={{ fontSize: 12, lineHeight: 1 }}>+</span> Add Custom Rule
+                        style={{ ...ms.bsm, marginTop: 8, display: "flex", alignItems: "center", gap: 4, fontSize: LM_TYPOGRAPHY.control }}>
+                        <span style={{ fontSize: LM_TYPOGRAPHY.title, lineHeight: 1 }}>+</span> Add Custom Rule
                       </button>
                     ) : (
                       <div style={{ marginTop: 8, padding: "10px 12px", background: `${th.accent}08`, border: `1px solid ${th.accent}22`, borderRadius: 8 }}>
                         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
-                          <input value={(modal.lmNewRule || {}).category || ""} onChange={(e) => setModal((p) => ({ ...p, lmNewRule: { ...p.lmNewRule, category: e.target.value } }))} placeholder="Category" style={{ ...ms.ip, fontSize: 11, padding: "4px 8px" }} />
-                          <input value={(modal.lmNewRule || {}).name || ""} onChange={(e) => setModal((p) => ({ ...p, lmNewRule: { ...p.lmNewRule, name: e.target.value } }))} placeholder="Rule Name" style={{ ...ms.ip, fontSize: 11, padding: "4px 8px" }} />
-                          <input value={(modal.lmNewRule || {}).eventIds || ""} onChange={(e) => setModal((p) => ({ ...p, lmNewRule: { ...p.lmNewRule, eventIds: e.target.value } }))} placeholder="Event IDs (e.g. 7045,4697)" style={{ ...ms.ip, fontSize: 11, padding: "4px 8px" }} />
+                          <input value={(modal.lmNewRule || {}).category || ""} onChange={(e) => setModal((p) => ({ ...p, lmNewRule: { ...p.lmNewRule, category: e.target.value } }))} placeholder="Category" style={{ ...ms.ip, fontSize: LM_TYPOGRAPHY.body, padding: "4px 8px" }} />
+                          <input value={(modal.lmNewRule || {}).name || ""} onChange={(e) => setModal((p) => ({ ...p, lmNewRule: { ...p.lmNewRule, name: e.target.value } }))} placeholder="Rule Name" style={{ ...ms.ip, fontSize: LM_TYPOGRAPHY.body, padding: "4px 8px" }} />
+                          <input value={(modal.lmNewRule || {}).eventIds || ""} onChange={(e) => setModal((p) => ({ ...p, lmNewRule: { ...p.lmNewRule, eventIds: e.target.value } }))} placeholder="Event IDs (e.g. 7045,4697)" style={{ ...ms.ip, fontSize: LM_TYPOGRAPHY.body, padding: "4px 8px" }} />
                           <select value={(modal.lmNewRule || {}).severity || "medium"} onChange={(e) => setModal((p) => ({ ...p, lmNewRule: { ...p.lmNewRule, severity: e.target.value } }))}
-                            style={{ ...ms.sl, fontSize: 11, padding: "4px 8px" }}>
+                            style={{ ...ms.sl, fontSize: LM_TYPOGRAPHY.body, padding: "4px 8px" }}>
                             <option value="critical">Critical</option>
                             <option value="high">High</option>
                             <option value="medium">Medium</option>
                             <option value="low">Low</option>
                           </select>
-                          <input value={(modal.lmNewRule || {}).payloadFilter || ""} onChange={(e) => setModal((p) => ({ ...p, lmNewRule: { ...p.lmNewRule, payloadFilter: e.target.value } }))} placeholder="Payload regex filter (optional)" style={{ ...ms.ip, fontSize: 11, padding: "4px 8px", gridColumn: "1 / -1" }} />
+                          <input value={(modal.lmNewRule || {}).payloadFilter || ""} onChange={(e) => setModal((p) => ({ ...p, lmNewRule: { ...p.lmNewRule, payloadFilter: e.target.value } }))} placeholder="Payload regex filter (optional)" style={{ ...ms.ip, fontSize: LM_TYPOGRAPHY.body, padding: "4px 8px", gridColumn: "1 / -1" }} />
                         </div>
                         <div style={{ display: "flex", justifyContent: "flex-end", gap: 6, marginTop: 8 }}>
                           <button onClick={() => setModal((p) => ({ ...p, lmAddingRule: false, lmNewRule: {} }))} style={ms.bsm}>Cancel</button>
@@ -1832,12 +1523,12 @@ export default function LateralMovementModal() {
                     <line x1="7.5" y1="13" x2="16.5" y2="18" stroke={th.accent} strokeDasharray="3 3" />
                   </svg>
                 </div>
-                <div style={{ color: th.text, fontSize: 13, fontWeight: 500, marginBottom: 6, fontFamily: "-apple-system, sans-serif", letterSpacing: "-0.2px" }}>{plabels[pi]}</div>
-                <div style={{ color: th.textMuted, fontSize: 11, fontFamily: "-apple-system, sans-serif", marginBottom: 24 }}>This may take a moment for large datasets</div>
+                <div style={{ color: th.text, fontSize: LM_TYPOGRAPHY.heading, fontWeight: 500, marginBottom: 6, fontFamily: "-apple-system, sans-serif", letterSpacing: "-0.2px" }}>{plabels[pi]}</div>
+                <div style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.body, fontFamily: "-apple-system, sans-serif", marginBottom: 24 }}>This may take a moment for large datasets</div>
                 <div style={{ position: "relative", height: 4, background: th.border + "22", borderRadius: 2, overflow: "hidden", maxWidth: 360, margin: "0 auto 12px" }}>
                   <div style={{ position: "absolute", left: 0, top: 0, height: "100%", width: `${prog}%`, background: `linear-gradient(90deg, ${th.accent}, ${th.danger})`, borderRadius: 2, transition: "width var(--m-slow) ease-out", boxShadow: `0 0 12px ${th.accent}44` }} />
                 </div>
-                <div style={{ color: th.textDim, fontSize: 10, fontFamily: "-apple-system, sans-serif" }}>{Math.round(prog)}%</div>
+                <div style={{ color: th.textDim, fontSize: LM_TYPOGRAPHY.control, fontFamily: "-apple-system, sans-serif" }}>{Math.round(prog)}%</div>
               </div>
             );
           })()}
@@ -1847,7 +1538,7 @@ export default function LateralMovementModal() {
             <div>
               {/* Multi-source banner */}
               {data.multiSource && data.tabSummaries && (
-                <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", background: `${th.accent}10`, border: `1px solid ${th.accent}22`, borderRadius: 8, marginBottom: 10, fontSize: 10, fontFamily: "-apple-system, sans-serif" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 12px", background: `${th.accent}10`, border: `1px solid ${th.accent}22`, borderRadius: 8, marginBottom: 10, fontSize: LM_TYPOGRAPHY.control, fontFamily: "-apple-system, sans-serif" }}>
                   <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={th.accent} strokeWidth="2" strokeLinecap="round">
                     <circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/>
                     <line x1="9" y1="6" x2="15" y2="6"/><line x1="6" y1="9" x2="6" y2="15"/><line x1="18" y1="9" x2="18" y2="15"/><line x1="9" y1="18" x2="15" y2="18"/>
@@ -1855,7 +1546,7 @@ export default function LateralMovementModal() {
                   <span style={{ color: th.accent, fontWeight: 600 }}>Multi-source</span>
                   <span style={{ color: th.textMuted }}>{"\u00B7"}</span>
                   {data.tabSummaries.map((t, i) => (
-                    <span key={i} style={{ padding: "1px 6px", background: `${th.accent}15`, borderRadius: 4, color: th.text, fontSize: 9 }}>
+                    <span key={i} style={{ padding: "1px 6px", background: `${th.accent}15`, borderRadius: 4, color: th.text, fontSize: LM_TYPOGRAPHY.meta }}>
                       {t.label} <span style={{ color: th.textMuted }}>({t.format}, {t.rowCount.toLocaleString()})</span>
                     </span>
                   ))}
@@ -1874,7 +1565,14 @@ export default function LateralMovementModal() {
                   // Sub-label exposes stats.suspiciousAccounts so analysts see at a glance how
                   // many of those identities crossed the suspicion-score threshold.
                   { val: data.stats.accountCount ?? data.stats.uniqueUsers, label: "users", icon: "M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8", clickTab: "accounts", subVal: data.stats.suspiciousAccounts || 0, subLabel: "suspicious" },
-                  { val: data.stats.rdpSessionCount || 0, label: "rdp sessions", icon: "M2 3h20v14H2zM8 21h8M12 17v4", clickTab: "rdp" },
+                  {
+                    val: data.stats.rdpSessionCount || 0,
+                    label: "rdp sessions",
+                    icon: "M2 3h20v14H2zM8 21h8M12 17v4",
+                    clickTab: "rdp",
+                    subVal: data.stats.rdpFailedAttemptCount || 0,
+                    subLabel: "failed attempts",
+                  },
                   { val: data.stats.longestChain, label: "longest chain", icon: "M13 17l5-5-5-5M6 17l5-5-5-5", clickTab: "chains" },
                   { risk: true, val: data.nodes.filter(n => n.isOutlier).length, label: "outliers", icon: "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01", clickTab: "outlier" },
                   { val: data.stats.totalEvents?.toLocaleString(), label: "logon events", icon: "M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8zM14 2v6h6M16 13H8M16 17H8M10 9H8", clickTab: "events" },
@@ -1891,7 +1589,8 @@ export default function LateralMovementModal() {
                     ? (LM_SEV_COLORS[worstSev] || th.sev.info)
                     : th.accent;
                   const numericVal = Number(String(c.val).replace(/,/g, "")) || 0;
-                  const isClickable = numericVal > 0;
+                  const numericSubVal = Number(String(c.subVal ?? 0).replace(/,/g, "")) || 0;
+                  const isClickable = numericVal > 0 || numericSubVal > 0;
                   const handleClick = () => {
                     if (!isClickable) return;
                     if (c.clickTab === "findings") { setModal((p) => ({ ...p, viewTab: "findings" })); return; }
@@ -1918,13 +1617,13 @@ export default function LateralMovementModal() {
                     onMouseLeave={isClickable ? (e) => { e.currentTarget.style.borderColor = accentColor + "25"; e.currentTarget.style.background = `linear-gradient(160deg, ${accentColor}10, ${accentColor}04)`; } : undefined}>
                     <div style={{ position: "absolute", top: -8, right: -8, width: 40, height: 40, borderRadius: 14, background: `radial-gradient(circle, ${accentColor}18, transparent)` }} />
                     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={accentColor} strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" style={{ opacity: 0.6, marginBottom: 2 }}><path d={c.icon}/></svg>
-                    <div style={{ fontSize: 22, fontWeight: 700, color: accentColor, fontFamily: "-apple-system, sans-serif", letterSpacing: "-0.5px", lineHeight: 1 }}>{c.val}</div>
-                    <div style={{ fontSize: 9, color: th.textMuted, marginTop: 3, fontFamily: "-apple-system, sans-serif", textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 500 }}>{c.label}{isClickable && " \u25b8"}</div>
+                    <div style={{ fontSize: LM_TYPOGRAPHY.metric, fontWeight: 700, color: accentColor, fontFamily: "-apple-system, sans-serif", letterSpacing: "-0.5px", lineHeight: 1 }}>{c.val}</div>
+                    <div style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, marginTop: 3, fontFamily: "-apple-system, sans-serif", textTransform: "uppercase", letterSpacing: "0.05em", fontWeight: 500 }}>{c.label}{isClickable && " \u25b8"}</div>
                     {/* Optional sub-chip — currently used by the Users card to surface
                         suspiciousAccounts. Renders inline below the label as a small
                         accent pill so the card stays compact. */}
                     {c.subVal != null && c.subVal > 0 && (
-                      <div style={{ marginTop: 4, display: "inline-block", fontSize: 8, padding: "1px 6px", borderRadius: 3, background: `${accentColor}22`, color: accentColor, fontFamily: "-apple-system, sans-serif", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}>
+                      <div style={{ marginTop: 4, display: "inline-block", fontSize: LM_TYPOGRAPHY.badge, padding: "1px 6px", borderRadius: 3, background: `${accentColor}22`, color: accentColor, fontFamily: "-apple-system, sans-serif", fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.04em" }}>
                         {c.subVal} {c.subLabel || "flagged"}
                       </div>
                     )}
@@ -1933,17 +1632,17 @@ export default function LateralMovementModal() {
                 })}
               </div>
 
-              {modal.truncatedGraph && <div style={{ padding: "6px 10px", background: th.warning + "15", border: `1px solid ${th.warning}33`, borderRadius: 6, color: th.warning, fontSize: 10, marginBottom: 10, fontFamily: "-apple-system, sans-serif" }}>Graph showing top 500 hosts by activity. {data.nodes.length} total hosts detected.</div>}
+              {modal.truncatedGraph && <div style={{ padding: "6px 10px", background: th.warning + "15", border: `1px solid ${th.warning}33`, borderRadius: 6, color: th.warning, fontSize: LM_TYPOGRAPHY.control, marginBottom: 10, fontFamily: "-apple-system, sans-serif" }}>Graph showing the top 500 machines by activity. {data.nodes.length} total machines detected; the user overlay is derived from the visible machine links.</div>}
 
               {(() => {
                 const criticalWarnings = (data.warnings || []).filter(w => !w.includes("skipped"));
                 const skippedTabs = (data.warnings || []).filter(w => w.includes("skipped"));
                 if (criticalWarnings.length === 0 && skippedTabs.length === 0) return null;
                 return (<>
-                  {criticalWarnings.length > 0 && <div style={{ padding: "6px 10px", background: th.warning + "12", border: `1px solid ${th.warning}30`, borderRadius: 6, color: th.warning, fontSize: 10, marginBottom: 10, fontFamily: "-apple-system, sans-serif", lineHeight: 1.5 }}>
+                  {criticalWarnings.length > 0 && <div style={{ padding: "6px 10px", background: th.warning + "12", border: `1px solid ${th.warning}30`, borderRadius: 6, color: th.warning, fontSize: LM_TYPOGRAPHY.control, marginBottom: 10, fontFamily: "-apple-system, sans-serif", lineHeight: 1.5 }}>
                     <span style={{ fontWeight: 600 }}>Partial analysis:</span> {criticalWarnings.map((w, i) => <span key={i}>{i > 0 && " | "}{w}</span>)}
                   </div>}
-                  {skippedTabs.length > 0 && <div style={{ padding: "4px 10px", background: th.textMuted + "08", border: `1px solid ${th.border}22`, borderRadius: 6, color: th.textMuted, fontSize: 9, marginBottom: 10, fontFamily: "-apple-system, sans-serif", cursor: "pointer" }}
+                  {skippedTabs.length > 0 && <div style={{ padding: "4px 10px", background: th.textMuted + "08", border: `1px solid ${th.border}22`, borderRadius: 6, color: th.textMuted, fontSize: LM_TYPOGRAPHY.meta, marginBottom: 10, fontFamily: "-apple-system, sans-serif", cursor: "pointer" }}
                     onClick={(e) => { const el = e.currentTarget.querySelector("[data-skip-detail]"); if (el) el.style.display = el.style.display === "none" ? "block" : "none"; }}>
                     <span>{skippedTabs.length} tab{skippedTabs.length > 1 ? "s" : ""} skipped (no logon data) — click to expand</span>
                     <div data-skip-detail="" style={{ display: "none", marginTop: 4, lineHeight: 1.5 }}>{skippedTabs.map((w, i) => <div key={i}>{w}</div>)}</div>
@@ -1968,14 +1667,14 @@ export default function LateralMovementModal() {
                     <div onClick={() => setModal((p) => ({ ...p, _coverageExpanded: !p._coverageExpanded }))}
                       style={{ padding: "6px 10px", display: "flex", alignItems: "center", gap: 8, cursor: "pointer", userSelect: "none" }}>
                       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke={lvlColor} strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" style={{ transform: expanded ? "rotate(90deg)" : "rotate(0deg)", transition: "transform var(--m-base)" }}><polyline points="9 18 15 12 9 6"/></svg>
-                      <span style={{ fontSize: 10, fontWeight: 600, color: th.text }}>Telemetry Coverage</span>
+                      <span style={{ fontSize: LM_TYPOGRAPHY.control, fontWeight: 600, color: th.text }}>Telemetry Coverage</span>
                       <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                         <div style={{ width: 50, height: 4, borderRadius: 2, background: th.border + "44", overflow: "hidden" }}>
                           <div style={{ width: `${ds.score || 0}%`, height: "100%", background: lvlColor, borderRadius: 2 }} />
                         </div>
-                        <span style={{ fontSize: 9, color: lvlColor, fontWeight: 700 }}>{lvlLabel} {ds.score || 0}%</span>
+                        <span style={{ fontSize: LM_TYPOGRAPHY.meta, color: lvlColor, fontWeight: 700 }}>{lvlLabel} {ds.score || 0}%</span>
                       </div>
-                      <div style={{ display: "flex", gap: 4, marginLeft: "auto", fontSize: 9, color: th.textMuted }}>
+                      <div style={{ display: "flex", gap: 4, marginLeft: "auto", fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted }}>
                         {errCount > 0 && <span style={{ color: th.sev.critical, fontWeight: 600 }}>{errCount} error{errCount !== 1 ? "s" : ""}</span>}
                         {warnCount > 0 && <span style={{ color: th.sev.med, fontWeight: 600 }}>{warnCount} warn{warnCount !== 1 ? "s" : ""}</span>}
                         {infoCount > 0 && <span>{infoCount} info</span>}
@@ -1986,13 +1685,13 @@ export default function LateralMovementModal() {
                       <div style={{ padding: "8px 10px 10px", borderTop: `1px solid ${lvlColor}20` }}>
                         {/* Per-category presence */}
                         <div style={{ marginBottom: 8 }}>
-                          <div style={{ fontSize: 8, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, marginBottom: 4 }}>Categories</div>
+                          <div style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, marginBottom: 4 }}>Categories</div>
                           <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
                             {Object.entries(cats).map(([id, c]) => {
                               const color = c.present ? th.sev.clean : (c.critical ? th.sev.critical : th.textMuted);
                               return (
                                 <span key={id} title={c.present ? `${c.label}: ${c.count.toLocaleString()} events across all hosts` : `${c.label}: missing${c.critical ? " (critical)" : ""}`}
-                                  style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 7px", background: color + (c.present ? "18" : "10"), color, borderRadius: 4, fontSize: 9, fontWeight: 600, opacity: c.present ? 1 : 0.6, border: `1px solid ${color}${c.present ? "33" : "22"}` }}>
+                                  style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 7px", background: color + (c.present ? "18" : "10"), color, borderRadius: 4, fontSize: LM_TYPOGRAPHY.meta, fontWeight: 600, opacity: c.present ? 1 : 0.6, border: `1px solid ${color}${c.present ? "33" : "22"}` }}>
                                   <span style={{ width: 5, height: 5, borderRadius: 3, background: color }} />
                                   {c.label}{c.present ? ` (${c.count > 9999 ? Math.round(c.count / 1000) + "k" : c.count.toLocaleString()})` : ""}
                                 </span>
@@ -2003,19 +1702,19 @@ export default function LateralMovementModal() {
                         {/* Warnings list */}
                         {wList.length > 0 && (
                           <div>
-                            <div style={{ fontSize: 8, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, marginBottom: 4 }}>Coverage Warnings</div>
+                            <div style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, marginBottom: 4 }}>Coverage Warnings</div>
                             <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
                               {wList.map((w, i) => {
                                 const c = w.level === "error" ? th.sev.critical : w.level === "warn" ? th.sev.med : th.textMuted;
                                 return (
-                                  <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 6, fontSize: 9, color: th.textDim, padding: "3px 6px", background: c + "08", borderLeft: `2px solid ${c}`, borderRadius: 3 }}>
-                                    <span style={{ color: c, fontWeight: 700, fontSize: 8, textTransform: "uppercase", flexShrink: 0 }}>{w.level}</span>
+                                  <div key={i} style={{ display: "flex", alignItems: "flex-start", gap: 6, fontSize: LM_TYPOGRAPHY.meta, color: th.textDim, padding: "3px 6px", background: c + "08", borderLeft: `2px solid ${c}`, borderRadius: 3 }}>
+                                    <span style={{ color: c, fontWeight: 700, fontSize: LM_TYPOGRAPHY.badge, textTransform: "uppercase", flexShrink: 0 }}>{w.level}</span>
                                     <span>{w.text}</span>
                                   </div>
                                 );
                               })}
                             </div>
-                            <div style={{ fontSize: 8, color: th.textMuted, marginTop: 6, fontStyle: "italic" }}>
+                            <div style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, marginTop: 6, fontStyle: "italic" }}>
                               Click any host in the Network Graph to see its individual telemetry coverage and identify which hops have the weakest evidence.
                             </div>
                           </div>
@@ -2030,7 +1729,7 @@ export default function LateralMovementModal() {
               <div style={{ display: "inline-flex", background: th.panelBg, borderRadius: 8, padding: 2, marginBottom: 12, border: `1px solid ${th.border}44`, gap: 1 }}>
                 {[
                   { id: "graph", label: "Network Graph", icon: "M22 12h-4l-3 9L9 3l-3 9H2" },
-                  { id: "rdp", label: `RDP Sessions (${data.rdpSessions?.length || 0})`, icon: "M2 3h20v14H2zM8 21h8M12 17v4" },
+                  { id: "rdp", label: `RDP Activity (${data.stats.rdpActivityCount ?? data.rdpSessions?.length ?? 0})`, icon: "M2 3h20v14H2zM8 21h8M12 17v4" },
                   { id: "accounts", label: `Accounts (${data.accounts?.length || 0})`, icon: "M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2M12 11a4 4 0 1 0 0-8 4 4 0 0 0 0 8" },
                   { id: "chains", label: `Chains (${data.chains.length})`, icon: "M13 17l5-5-5-5M6 17l5-5-5-5" },
                   { id: "table", label: `Connections (${data.edges.length})`, icon: "M3 3h18v18H3zM3 9h18M3 15h18M9 3v18M15 3v18" },
@@ -2038,7 +1737,7 @@ export default function LateralMovementModal() {
                   ...((data.findings || []).length > 0 ? [{ id: "findings", label: `Findings (${data.findings.length})${(data.incidents || []).length > 0 ? ` / ${data.incidents.length} incidents` : ""}`, icon: "M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0zM12 9v4M12 17h.01" }] : []),
                 ].map((tab) => (
                   <button key={tab.id} onClick={() => setModal((p) => ({ ...p, viewTab: tab.id, selectedNode: null, selectedEdge: null }))}
-                    style={{ padding: "5px 12px", background: viewTab === tab.id ? `linear-gradient(180deg, ${th.accent}ee, ${th.accent})` : "transparent", color: viewTab === tab.id ? "#fff" : th.textDim, border: "none", borderRadius: 6, fontSize: 11, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: viewTab === tab.id ? 600 : 400, transition: "all var(--m-base)", display: "flex", alignItems: "center", gap: 5, boxShadow: viewTab === tab.id ? `0 1px 4px ${th.accent}44` : "none" }}
+                    style={{ padding: "5px 12px", background: viewTab === tab.id ? `linear-gradient(180deg, ${th.accent}ee, ${th.accent})` : "transparent", color: viewTab === tab.id ? "#fff" : th.textDim, border: "none", borderRadius: 6, fontSize: LM_TYPOGRAPHY.body, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: viewTab === tab.id ? 600 : 400, transition: "all var(--m-base)", display: "flex", alignItems: "center", gap: 5, boxShadow: viewTab === tab.id ? `0 1px 4px ${th.accent}44` : "none" }}
                     onMouseEnter={(ev) => { if (viewTab !== tab.id) ev.currentTarget.style.background = th.textMuted + "11"; }}
                     onMouseLeave={(ev) => { if (viewTab !== tab.id) ev.currentTarget.style.background = "transparent"; }}>
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d={tab.icon}/></svg>
@@ -2052,7 +1751,7 @@ export default function LateralMovementModal() {
               {/* Execution Sessions tab */}
               {viewTab === "execSessions" && (() => {
                 const eSessions = data.executionSessions || [];
-                if (eSessions.length === 0) return <div style={{ padding: 40, textAlign: "center", color: th.textMuted, fontSize: 12 }}>No execution sessions detected.</div>;
+                if (eSessions.length === 0) return <div style={{ padding: 40, textAlign: "center", color: th.textMuted, fontSize: LM_TYPOGRAPHY.title }}>No execution sessions detected.</div>;
 
                 const esSortCol = modal.esSortCol || "Score";
                 const esSortDir = modal.esSortDir || "desc";
@@ -2095,8 +1794,8 @@ export default function LateralMovementModal() {
                         { val: [...new Set(eSessions.map(s => s.technique))].length, label: "techniques", color: th.textDim },
                       ].map((c, i) => (
                         <div key={i} style={{ flex: 1, textAlign: "center", padding: "10px 8px", background: `${c.color}08`, border: `1px solid ${c.color}22`, borderRadius: 8 }}>
-                          <div style={{ fontSize: 18, fontWeight: 700, color: c.color, fontFamily: "-apple-system, sans-serif" }}>{c.val}</div>
-                          <div style={{ fontSize: 9, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "-apple-system, sans-serif" }}>{c.label}</div>
+                          <div style={{ fontSize: LM_TYPOGRAPHY.metric, fontWeight: 700, color: c.color, fontFamily: "-apple-system, sans-serif" }}>{c.val}</div>
+                          <div style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "-apple-system, sans-serif" }}>{c.label}</div>
                         </div>
                       ))}
                     </div>
@@ -2104,14 +1803,27 @@ export default function LateralMovementModal() {
                     {(() => {
                       const esViewMode = modal.esViewMode || "table";
                       const copyEs = () => {
-                        const header = ["Score", "Severity", "Technique", "Source", "Target", "Users", "Findings", "Events", "Start", "End", "Status"].join("\t");
-                        const lines = sorted.map(s => [s.triageScore, s.severity, s.technique, s.source, s.target, (s.users || []).join("; "), s.findingCount, s.eventCount, fmtTs(s.startTime), fmtTs(s.endTime), s.status].join("\t"));
+                        const header = ["Score", "Severity", "Technique", "Source", "Target", "Attributed Users", "Service Names", "Image Paths", "Event Accounts", "Service Accounts", "Command Lines", "Findings", "Events", "Start", "End", "Status"].join("\t");
+                        const lines = sorted.map(s => [
+                          s.triageScore, s.severity, s.technique, s.source, s.target,
+                          (s.users || []).join("; "), (s.serviceNames || []).join("; "),
+                          (s.imagePaths || []).join("; "), (s.eventActors || []).join("; "),
+                          (s.serviceAccounts || []).join("; "), (s.commandLines || []).join("; "), s.findingCount, s.eventCount,
+                          fmtTs(s.startTime), fmtTs(s.endTime), s.status,
+                        ].join("\t"));
                         navigator.clipboard?.writeText?.([header, ...lines].join("\n"));
                       };
                       const exportEsCsv = () => {
-                        const header = "Score,Severity,Technique,Source,Target,Users,Findings,Events,Start,End,Status,Categories,Evidence Pills";
+                        const header = "Score,Severity,Technique,Source,Target,Attributed Users,Service Names,Image Paths,Event Accounts,Service Accounts,Command Lines,Findings,Events,Start,End,Status,Categories,Evidence Pills";
                         const csvEsc = csvCell; // shared encoder: RFC-4180 + formula-injection guard
-                        const lines = sorted.map(s => [s.triageScore, s.severity, s.technique, s.source, s.target, (s.users || []).join("; "), s.findingCount, s.eventCount, fmtTs(s.startTime), fmtTs(s.endTime), s.status, (s.categories || []).join("; "), (s.evidencePills || []).map(p => p.text).join("; ")].map(csvEsc).join(","));
+                        const lines = sorted.map(s => [
+                          s.triageScore, s.severity, s.technique, s.source, s.target,
+                          (s.users || []).join("; "), (s.serviceNames || []).join("; "),
+                          (s.imagePaths || []).join("; "), (s.eventActors || []).join("; "),
+                          (s.serviceAccounts || []).join("; "), (s.commandLines || []).join("; "), s.findingCount, s.eventCount,
+                          fmtTs(s.startTime), fmtTs(s.endTime), s.status,
+                          (s.categories || []).join("; "), (s.evidencePills || []).map(p => p.text).join("; "),
+                        ].map(csvEsc).join(","));
                         const blob = new Blob([header + "\n" + lines.join("\n")], { type: "text/csv" });
                         const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = "execution-sessions.csv"; a.click(); URL.revokeObjectURL(a.href);
                       };
@@ -2119,15 +1831,15 @@ export default function LateralMovementModal() {
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
                           <div style={{ display: "inline-flex", background: th.panelBg, borderRadius: 6, padding: 2, border: `1px solid ${th.border}44`, gap: 1 }}>
                             {[{ id: "table", label: "Table" }, { id: "timeline", label: "Timeline" }].map((m) => (
-                              <button key={m.id} onClick={() => setModal((p) => ({ ...p, esViewMode: m.id }))} style={{ padding: "2px 10px", background: esViewMode === m.id ? th.accent : "transparent", color: esViewMode === m.id ? "#fff" : th.textDim, border: "none", borderRadius: 4, fontSize: 9, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: esViewMode === m.id ? 600 : 400, transition: "all var(--m-base)" }}>{m.label}</button>
+                              <button key={m.id} onClick={() => setModal((p) => ({ ...p, esViewMode: m.id }))} style={{ padding: "2px 10px", background: esViewMode === m.id ? th.accent : "transparent", color: esViewMode === m.id ? "#fff" : th.textDim, border: "none", borderRadius: 4, fontSize: LM_TYPOGRAPHY.meta, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: esViewMode === m.id ? 600 : 400, transition: "all var(--m-base)" }}>{m.label}</button>
                             ))}
                           </div>
                           <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                            <button onClick={copyEs} style={{ padding: "3px 10px", fontSize: 10, background: th.btnBg, color: th.text, border: `1px solid ${th.border}`, borderRadius: 4, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}
+                            <button onClick={copyEs} style={{ padding: "3px 10px", fontSize: LM_TYPOGRAPHY.control, background: th.btnBg, color: th.text, border: `1px solid ${th.border}`, borderRadius: 4, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}
                               onMouseEnter={(ev) => { ev.currentTarget.style.background = th.accent + "22"; }} onMouseLeave={(ev) => { ev.currentTarget.style.background = th.btnBg; }}>
                               Copy All ({sorted.length})
                             </button>
-                            <button onClick={exportEsCsv} style={{ padding: "3px 10px", fontSize: 10, background: th.btnBg, color: th.text, border: `1px solid ${th.border}`, borderRadius: 4, cursor: "pointer", fontFamily: "-apple-system, sans-serif", display: "flex", alignItems: "center", gap: 4 }}
+                            <button onClick={exportEsCsv} style={{ padding: "3px 10px", fontSize: LM_TYPOGRAPHY.control, background: th.btnBg, color: th.text, border: `1px solid ${th.border}`, borderRadius: 4, cursor: "pointer", fontFamily: "-apple-system, sans-serif", display: "flex", alignItems: "center", gap: 4 }}
                               onMouseEnter={(ev) => { ev.currentTarget.style.background = th.accent + "22"; }} onMouseLeave={(ev) => { ev.currentTarget.style.background = th.btnBg; }}>
                               <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                               Export CSV
@@ -2147,7 +1859,7 @@ export default function LateralMovementModal() {
                         if (et && et > tMax) tMax = et;
                         if (st && !et && st > tMax) tMax = st;
                       }
-                      if (tMin === Infinity || tMax === -Infinity) return <div style={{ padding: 20, color: th.textMuted, fontSize: 12, textAlign: "center" }}>No timestamps available for timeline.</div>;
+                      if (tMin === Infinity || tMax === -Infinity) return <div style={{ padding: 20, color: th.textMuted, fontSize: LM_TYPOGRAPHY.title, textAlign: "center" }}>No timestamps available for timeline.</div>;
                       const span = Math.max(tMax - tMin, 1);
                       const BAR_H = 20, ROW_H = 28, PAD_L = 160;
                       const fmtLabel = (ms) => { const d = new Date(ms); const p = (n) => String(n).padStart(2, "0"); return `${d.getUTCFullYear()}-${p(d.getUTCMonth()+1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())} UTC`; };
@@ -2163,7 +1875,7 @@ export default function LateralMovementModal() {
                       return (
                         <div style={{ border: `1px solid ${th.border}44`, borderRadius: 6, overflow: "hidden", background: th.panelBg }}>
                           {/* Time axis header */}
-                          <div style={{ display: "flex", padding: "4px 10px 4px " + PAD_L + "px", borderBottom: `1px solid ${th.border}33`, fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif", justifyContent: "space-between" }}>
+                          <div style={{ display: "flex", padding: "4px 10px 4px " + PAD_L + "px", borderBottom: `1px solid ${th.border}33`, fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, fontFamily: "-apple-system, sans-serif", justifyContent: "space-between" }}>
                             <span>{fmtLabel(tMin)}</span>
                             <span>{fmtLabel(tMin + span * 0.25)}</span>
                             <span>{fmtLabel(tMin + span * 0.5)}</span>
@@ -2180,20 +1892,20 @@ export default function LateralMovementModal() {
                               const barColor = techColors[s.technique] || th.accent;
                               return (
                                 <div key={s.id} onClick={() => setModal((p) => ({ ...p, esExpanded: p.esExpanded === s.id ? null : s.id, esViewMode: "table" }))}
-                                  style={{ display: "flex", alignItems: "center", height: ROW_H, borderBottom: `1px solid ${th.border}15`, cursor: "pointer", fontSize: 10, fontFamily: "-apple-system, sans-serif" }}
+                                  style={{ display: "flex", alignItems: "center", height: ROW_H, borderBottom: `1px solid ${th.border}15`, cursor: "pointer", fontSize: LM_TYPOGRAPHY.control, fontFamily: "-apple-system, sans-serif" }}
                                   onMouseEnter={(e) => { e.currentTarget.style.background = th.btnBg + "88"; }}
                                   onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}>
                                   {/* Label */}
                                   <div style={{ width: PAD_L, flexShrink: 0, padding: "0 8px", display: "flex", alignItems: "center", gap: 4, overflow: "hidden" }}>
-                                    <span style={{ fontFamily: "monospace", fontSize: 9, color: sc >= 30 ? th.sev.critical : sc >= 15 ? th.sev.high : th.textMuted, fontWeight: 700, flexShrink: 0, width: 22 }}>{sc}</span>
-                                    <span style={{ padding: "1px 4px", background: barColor + "22", color: barColor, borderRadius: 3, fontSize: 8, fontWeight: 600, flexShrink: 0, whiteSpace: "nowrap" }}>{s.technique}</span>
+                                    <span style={{ fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.meta, color: sc >= 30 ? th.sev.critical : sc >= 15 ? th.sev.high : th.textMuted, fontWeight: 700, flexShrink: 0, width: 22 }}>{sc}</span>
+                                    <span style={{ padding: "1px 4px", background: barColor + "22", color: barColor, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 600, flexShrink: 0, whiteSpace: "nowrap" }}>{s.technique}</span>
                                     <span style={{ color: th.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.users?.[0] || ""}</span>
                                   </div>
                                   {/* Bar area */}
                                   <div style={{ flex: 1, height: BAR_H, position: "relative", background: th.border + "11", marginRight: 8 }}>
                                     <div style={{ position: "absolute", left: `${leftPct}%`, width: `${widthPct}%`, height: "100%", background: `linear-gradient(90deg, ${barColor}cc, ${barColor}88)`, borderRadius: 3, minWidth: 3 }}
                                       title={`${s.technique}: ${s.source || "?"} → ${s.target || "?"}\n${(s.users || []).join(", ") || "(unknown)"}\n${fmtTs(s.startTime)} — ${fmtTs(s.endTime)}\nScore: ${sc} | ${s.eventCount} events | ${s.findingCount} findings`}>
-                                      {widthPct > 8 && <span style={{ position: "absolute", left: 4, top: 2, fontSize: 8, color: "#fff", fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", right: 4 }}>{s.source || "?"} → {s.target || "?"}</span>}
+                                      {widthPct > 8 && <span style={{ position: "absolute", left: 4, top: 2, fontSize: LM_TYPOGRAPHY.badge, color: "#fff", fontWeight: 600, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", right: 4 }}>{s.source || "?"} → {s.target || "?"}</span>}
                                     </div>
                                   </div>
                                 </div>
@@ -2201,14 +1913,14 @@ export default function LateralMovementModal() {
                             })}
                           </div>
                           {/* Legend */}
-                          <div style={{ padding: "6px 10px", borderTop: `1px solid ${th.border}22`, display: "flex", gap: 8, flexWrap: "wrap", fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>
+                          <div style={{ padding: "6px 10px", borderTop: `1px solid ${th.border}22`, display: "flex", gap: 8, flexWrap: "wrap", fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>
                             {Object.entries(techColors).map(([tech, color]) => (
                               <span key={tech} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
                                 <span style={{ width: 8, height: 8, borderRadius: 2, background: color, flexShrink: 0 }} />
                                 {tech}
                               </span>
                             ))}
-                            <span style={{ marginLeft: "auto", color: th.textDim, fontSize: 9 }}>Click bar → expand in table</span>
+                            <span style={{ marginLeft: "auto", color: th.textDim, fontSize: LM_TYPOGRAPHY.meta }}>Click bar → expand in table</span>
                           </div>
                         </div>
                       );
@@ -2218,15 +1930,15 @@ export default function LateralMovementModal() {
                     {(modal.esViewMode || "table") === "table" && (
                     <div style={{ border: `1px solid ${th.border}44`, borderRadius: 6, overflow: "hidden", background: th.panelBg }}>
                       {/* Header */}
-                      <div style={{ display: "flex", background: `${th.headerBg}88`, borderBottom: `1px solid ${th.border}44`, fontSize: 10, fontWeight: 600, color: th.accent, fontFamily: "-apple-system, sans-serif" }}>
+                      <div style={{ display: "flex", background: `${th.headerBg}88`, borderBottom: `1px solid ${th.border}44`, fontSize: LM_TYPOGRAPHY.control, fontWeight: 600, color: th.accent, fontFamily: "-apple-system, sans-serif" }}>
                         {esHeaders.map((h) => (
                           <div key={h} onClick={() => toggleSort(h)}
                             style={{ width: esColW[h] || 80, padding: "8px 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 4, userSelect: "none", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                             {h}
-                            {esSortCol === h && <span style={{ fontSize: 9, opacity: 0.7 }}>{esSortDir === "asc" ? "▲" : "▼"}</span>}
+                            {esSortCol === h && <span style={{ fontSize: LM_TYPOGRAPHY.meta, opacity: 0.7 }}>{esSortDir === "asc" ? "▲" : "▼"}</span>}
                           </div>
                         ))}
-                        <div style={{ padding: "8px 10px", flexShrink: 0, fontSize: 10, color: th.textMuted }}>Actions</div>
+                        <div style={{ padding: "8px 10px", flexShrink: 0, fontSize: LM_TYPOGRAPHY.control, color: th.textMuted }}>Actions</div>
                       </div>
                       {/* Body */}
                       <div style={{ maxHeight: 480, overflowY: "auto" }}>
@@ -2234,21 +1946,22 @@ export default function LateralMovementModal() {
                           const expanded = esExpanded === s.id;
                           const sc = s.triageScore || 0;
                           const stS = _statusStyle(s.status);
+                          const executionDetails = s.executionDetails || [];
                           return (
                             <Fragment key={s.id}>
                               <div onClick={() => setModal((p) => ({ ...p, esExpanded: expanded ? null : s.id }))}
-                                style={{ display: "flex", borderBottom: `1px solid ${th.border}22`, fontSize: 11, color: th.text, fontFamily: "-apple-system, sans-serif", alignItems: "center", minHeight: 34, cursor: "pointer", background: expanded ? `${_sevColor(s.severity)}08` : idx % 2 === 0 ? "transparent" : `${th.border}08` }}>
+                                style={{ display: "flex", borderBottom: `1px solid ${th.border}22`, fontSize: LM_TYPOGRAPHY.body, color: th.text, fontFamily: "-apple-system, sans-serif", alignItems: "center", minHeight: 34, cursor: "pointer", background: expanded ? `${_sevColor(s.severity)}08` : idx % 2 === 0 ? "transparent" : `${th.border}08` }}>
                                 {/* Score */}
                                 <div style={{ width: esColW.Score, padding: "4px 10px", flexShrink: 0 }}>
-                                  <span style={{ fontFamily: "monospace", fontSize: 11, color: sc >= 30 ? th.sev.critical : sc >= 15 ? th.sev.high : th.textMuted, fontWeight: 700 }}>{sc}</span>
+                                  <span style={{ fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.body, color: sc >= 30 ? th.sev.critical : sc >= 15 ? th.sev.high : th.textMuted, fontWeight: 700 }}>{sc}</span>
                                 </div>
                                 {/* Severity */}
                                 <div style={{ width: esColW.Sev, padding: "4px 8px", flexShrink: 0 }}>
-                                  <span style={{ padding: "2px 6px", background: `${_sevColor(s.severity)}22`, color: _sevColor(s.severity), borderRadius: 3, fontSize: 8, fontWeight: 700, textTransform: "uppercase" }}>{s.severity}</span>
+                                  <span style={{ padding: "2px 6px", background: `${_sevColor(s.severity)}22`, color: _sevColor(s.severity), borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700, textTransform: "uppercase" }}>{s.severity}</span>
                                 </div>
                                 {/* Technique */}
                                 <div style={{ width: esColW.Technique, padding: "4px 8px", flexShrink: 0 }}>
-                                  <span style={{ padding: "2px 6px", background: `${th.accent}15`, color: th.accent, borderRadius: 3, fontSize: 9, fontWeight: 600, whiteSpace: "nowrap" }}>{s.technique}</span>
+                                  <span style={{ padding: "2px 6px", background: `${th.accent}15`, color: th.accent, borderRadius: 3, fontSize: LM_TYPOGRAPHY.meta, fontWeight: 600, whiteSpace: "nowrap" }}>{s.technique}</span>
                                 </div>
                                 {/* Source */}
                                 <div style={{ width: esColW.Source, padding: "4px 8px", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.source || "\u2014"}</div>
@@ -2257,26 +1970,26 @@ export default function LateralMovementModal() {
                                 {/* Users */}
                                 <div style={{ width: esColW["User(s)"], padding: "4px 8px", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: th.textDim }}>{(s.users || []).join(", ") || "(unknown)"}</div>
                                 {/* Findings count */}
-                                <div style={{ width: esColW.Findings, padding: "4px 8px", flexShrink: 0, textAlign: "center", fontFamily: "monospace", fontSize: 10 }}>{s.findingCount}</div>
+                                <div style={{ width: esColW.Findings, padding: "4px 8px", flexShrink: 0, textAlign: "center", fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.control }}>{s.findingCount}</div>
                                 {/* Events count */}
-                                <div style={{ width: esColW.Events, padding: "4px 8px", flexShrink: 0, textAlign: "center", fontFamily: "monospace", fontSize: 10 }}>{s.eventCount}</div>
+                                <div style={{ width: esColW.Events, padding: "4px 8px", flexShrink: 0, textAlign: "center", fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.control }}>{s.eventCount}</div>
                                 {/* Start */}
-                                <div style={{ width: esColW.Start, padding: "4px 8px", flexShrink: 0, color: th.textDim, fontFamily: "monospace", fontSize: 10, whiteSpace: "nowrap" }}>{fmtTs(s.startTime)}</div>
+                                <div style={{ width: esColW.Start, padding: "4px 8px", flexShrink: 0, color: th.textDim, fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.control, whiteSpace: "nowrap" }}>{fmtTs(s.startTime)}</div>
                                 {/* End */}
-                                <div style={{ width: esColW.End, padding: "4px 8px", flexShrink: 0, color: th.textDim, fontFamily: "monospace", fontSize: 10, whiteSpace: "nowrap" }}>{fmtTs(s.endTime)}</div>
+                                <div style={{ width: esColW.End, padding: "4px 8px", flexShrink: 0, color: th.textDim, fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.control, whiteSpace: "nowrap" }}>{fmtTs(s.endTime)}</div>
                                 {/* Status */}
                                 <div style={{ width: esColW.Status, padding: "4px 8px", flexShrink: 0 }}>
-                                  <span style={{ padding: "2px 6px", background: stS.bg, color: stS.color, borderRadius: 3, fontSize: 8, fontWeight: 700 }}>{stS.label}</span>
+                                  <span style={{ padding: "2px 6px", background: stS.bg, color: stS.color, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700 }}>{stS.label}</span>
                                 </div>
                                 {/* Actions */}
                                 <div style={{ display: "flex", gap: 3, padding: "4px 8px", flexShrink: 0, alignItems: "center" }}>
                                   <button onClick={(ev) => { ev.stopPropagation(); _filterEvents({ category: s.categories?.[0], filterEids: s.filterEids, filterHosts: s.filterHosts, timeRange: { from: s.startTime, to: s.endTime }, evidenceRefs: s.evidenceRefs, itemRowids: s.itemRowids }, ev); }}
-                                    style={{ padding: "2px 6px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 3, fontSize: 8, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 600, whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 3 }}>
+                                    style={{ padding: "2px 6px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 600, whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 3 }}>
                                     <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke={th.accent} strokeWidth="2.5" strokeLinecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                                     Timeline
                                   </button>
                                   <button onClick={(ev) => { ev.stopPropagation(); _viewInGraph({ source: s.source, target: s.target }, ev); }}
-                                    style={{ padding: "2px 6px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 3, fontSize: 8, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500, whiteSpace: "nowrap" }}>
+                                    style={{ padding: "2px 6px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500, whiteSpace: "nowrap" }}>
                                     Graph
                                   </button>
                                   <EvidenceActions item={s} compact />
@@ -2289,40 +2002,90 @@ export default function LateralMovementModal() {
                                   {(s.evidencePills || []).length > 0 && (
                                     <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 10 }}>
                                       {s.evidencePills.map((p, pi) => (
-                                        <span key={pi} style={{ padding: "2px 7px", borderRadius: 3, fontSize: 8, fontWeight: 600, background: (_pillColor[p.type] || th.sev.low) + "18", color: _pillColor[p.type] || th.sev.low, fontFamily: "-apple-system, sans-serif" }}>{p.text}</span>
+                                        <span key={pi} style={{ padding: "2px 7px", borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 600, background: (_pillColor[p.type] || th.sev.low) + "18", color: _pillColor[p.type] || th.sev.low, fontFamily: "-apple-system, sans-serif" }}>{p.text}</span>
                                       ))}
                                     </div>
                                   )}
                                   {/* Session details */}
-                                  <div style={{ display: "flex", gap: 24 }}>
-                                    <div style={{ fontSize: 10, fontFamily: "-apple-system, sans-serif", color: th.textDim, lineHeight: 1.8 }}>
-                                      <div><span style={{ color: th.textMuted, width: 80, display: "inline-block" }}>Technique</span> <span style={{ color: th.accent, fontWeight: 600 }}>{s.technique}</span></div>
-                                      <div><span style={{ color: th.textMuted, width: 80, display: "inline-block" }}>Categories</span> {(s.categories || []).join(", ")}</div>
-                                      <div><span style={{ color: th.textMuted, width: 80, display: "inline-block" }}>Source</span> {s.source || "(unknown)"}</div>
-                                      <div><span style={{ color: th.textMuted, width: 80, display: "inline-block" }}>Target</span> {s.target || "(unknown)"}</div>
-                                      <div><span style={{ color: th.textMuted, width: 80, display: "inline-block" }}>User(s)</span> {(s.users || []).join(", ") || "(unknown)"}</div>
-                                      <div><span style={{ color: th.textMuted, width: 80, display: "inline-block" }}>Events</span> {s.eventCount}</div>
-                                      <div><span style={{ color: th.textMuted, width: 80, display: "inline-block" }}>Time</span> {fmtTs(s.startTime)} {"\u2014"} {fmtTs(s.endTime)}</div>
+                                  <div style={{ display: "grid", gridTemplateColumns: "minmax(330px, 0.9fr) minmax(360px, 1.1fr)", gap: 24 }}>
+                                    <div style={{ minWidth: 0, fontSize: LM_TYPOGRAPHY.control, fontFamily: "-apple-system, sans-serif", color: th.textDim, lineHeight: 1.6 }}>
+                                      {[
+                                        ["Technique", s.technique],
+                                        ["Categories", (s.categories || []).join(", ")],
+                                        ["Source host", s.source || "(unknown)"],
+                                        ["Target host", s.target || "(unknown)"],
+                                        ["Attributed user", (s.users || []).join(", ") || "(not established)"],
+                                        ["Event account", (s.eventActors || []).join(", ") || "(not recorded)"],
+                                        ["Service account", (s.serviceAccounts || []).join(", ") || "(not recorded)"],
+                                        ["Service", (s.serviceNames || []).join(", ") || "(not parsed)"],
+                                        ["Image / file path", (s.imagePaths || []).join(", ") || "(not parsed)"],
+                                        ["Command line", (s.commandLines || []).join(" | ") || "(not parsed)"],
+                                        ["Events", s.eventCount],
+                                        ["Time", `${fmtTs(s.startTime)} \u2014 ${fmtTs(s.endTime)}`],
+                                      ].map(([label, value]) => (
+                                        <div key={label} style={{ display: "grid", gridTemplateColumns: "110px minmax(0, 1fr)", gap: 8, padding: "2px 0" }}>
+                                          <span style={{ color: th.textMuted }}>{label}</span>
+                                          <span style={{ color: label === "Technique" ? th.accent : th.text, fontWeight: label === "Technique" ? 600 : 400, fontFamily: /path|command/i.test(label) ? "monospace" : "inherit", overflowWrap: "anywhere" }}>{value}</span>
+                                        </div>
+                                      ))}
                                       <div style={{ marginTop: 8 }}><EvidenceActions item={s} /></div>
                                     </div>
                                     {/* Related findings */}
                                     <div style={{ flex: 1, minWidth: 0 }}>
-                                      <div style={{ fontSize: 9, fontWeight: 600, color: th.textMuted, textTransform: "uppercase", marginBottom: 6, fontFamily: "-apple-system, sans-serif" }}>Related Findings ({s.findingCount})</div>
+                                      <div style={{ fontSize: LM_TYPOGRAPHY.meta, fontWeight: 600, color: th.textMuted, textTransform: "uppercase", marginBottom: 6, fontFamily: "-apple-system, sans-serif" }}>Related Findings ({s.findingCount})</div>
                                       <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
                                         {(s.findingIds || []).map(fid => {
                                           const f = (data.findings || []).find(ff => ff.id === fid);
                                           if (!f) return null;
                                           return (
                                             <div key={fid} onClick={(ev) => { ev.stopPropagation(); setModal((p) => ({ ...p, viewTab: "findings", findingsView: "alerts", expandedFinding: fid })); }}
-                                              style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 8px", borderRadius: 4, cursor: "pointer", background: `${_sevColor(f.severity)}08`, border: `1px solid ${_sevColor(f.severity)}22`, fontSize: 10, fontFamily: "-apple-system, sans-serif" }}>
-                                              <span style={{ padding: "1px 5px", background: `${_sevColor(f.severity)}22`, color: _sevColor(f.severity), borderRadius: 3, fontSize: 8, fontWeight: 700, textTransform: "uppercase", flexShrink: 0 }}>{f.severity}</span>
-                                              <span style={{ fontFamily: "monospace", fontSize: 9, color: th.accent, flexShrink: 0 }}>{f.triageScore}</span>
+                                              style={{ display: "flex", alignItems: "center", gap: 6, padding: "4px 8px", borderRadius: 4, cursor: "pointer", background: `${_sevColor(f.severity)}08`, border: `1px solid ${_sevColor(f.severity)}22`, fontSize: LM_TYPOGRAPHY.control, fontFamily: "-apple-system, sans-serif" }}>
+                                              <span style={{ padding: "1px 5px", background: `${_sevColor(f.severity)}22`, color: _sevColor(f.severity), borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700, textTransform: "uppercase", flexShrink: 0 }}>{f.severity}</span>
+                                              <span style={{ fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.meta, color: th.accent, flexShrink: 0 }}>{f.triageScore}</span>
                                               <span style={{ color: th.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{f.category}: {f.title}</span>
                                             </div>
                                           );
                                         })}
                                       </div>
                                     </div>
+                                  </div>
+                                  <div style={{ marginTop: 12 }}>
+                                    <div style={{ fontSize: LM_TYPOGRAPHY.meta, fontWeight: 600, color: th.textMuted, textTransform: "uppercase", marginBottom: 6, fontFamily: "-apple-system, sans-serif" }}>
+                                      Service execution evidence ({executionDetails.length})
+                                    </div>
+                                    {executionDetails.length > 0 ? (
+                                      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
+                                        {executionDetails.map((detail, detailIdx) => (
+                                          <div key={`${detail.eventId || "event"}-${detail.rowId ?? detailIdx}-${detail.timestamp || detailIdx}`}
+                                            style={{ display: "grid", gridTemplateColumns: "95px minmax(120px, 0.7fr) minmax(180px, 1.2fr) minmax(180px, 1.2fr)", gap: "3px 10px", padding: "7px 9px", background: `${th.textMuted}08`, border: `1px solid ${th.border}44`, borderRadius: 5, fontSize: LM_TYPOGRAPHY.control, fontFamily: "-apple-system, sans-serif" }}>
+                                            <span style={{ color: th.textMuted }}>Source event</span>
+                                            <span style={{ color: th.text, fontFamily: "monospace" }}>EID {detail.eventId || "?"} · {fmtTs(detail.timestamp)}</span>
+                                            <span style={{ color: th.textMuted }}>Target</span>
+                                            <span style={{ color: th.text }}>{detail.target || s.target || "(unknown)"}</span>
+                                            <span style={{ color: th.textMuted }}>Service</span>
+                                            <span style={{ color: th.text, overflowWrap: "anywhere" }}>{detail.serviceName || "(not recorded)"}</span>
+                                            <span style={{ color: th.textMuted }}>Image path</span>
+                                            <span style={{ color: th.text, fontFamily: "monospace", overflowWrap: "anywhere" }}>{detail.imagePath || "(not recorded)"}</span>
+                                            <span style={{ color: th.textMuted }}>Event account</span>
+                                            <span style={{ color: th.text }}>{detail.eventActor || "(not recorded)"}</span>
+                                            <span style={{ color: th.textMuted }}>Service account</span>
+                                            <span style={{ color: th.text }}>{detail.serviceAccount || "(not recorded)"}</span>
+                                            <span style={{ color: th.textMuted }}>Command line</span>
+                                            <span style={{ color: th.text, fontFamily: "monospace", overflowWrap: "anywhere" }}>{detail.commandLine || "(not recorded)"}</span>
+                                            <span style={{ color: th.textMuted }}>Attributed user</span>
+                                            <span style={{ color: th.text }}>{detail.attributedUser || "(not established)"}</span>
+                                            <span style={{ color: th.textMuted }}>Source host</span>
+                                            <span style={{ color: th.text }}>{detail.sourceHost || "(not established)"}</span>
+                                            <span style={{ color: th.textMuted }}>Detection reason</span>
+                                            <span style={{ color: th.text }}>{detail.reason || "(not recorded)"}</span>
+                                          </div>
+                                        ))}
+                                      </div>
+                                    ) : (
+                                      <div style={{ padding: "7px 9px", color: th.textMuted, background: `${th.textMuted}08`, border: `1px solid ${th.border}44`, borderRadius: 5, fontSize: LM_TYPOGRAPHY.control }}>
+                                        The source finding does not expose service-install fields. Use Open exact to inspect the underlying event row.
+                                      </div>
+                                    )}
                                   </div>
                                 </div>
                               )}
@@ -2346,12 +2109,7 @@ export default function LateralMovementModal() {
                 const sortBy = modal.findingsSortBy || "triage";
                 const groupBy = modal.findingsGroupBy || "default";
                 const expandedId = modal.expandedFinding;
-                const triageState = _triageState();
-                const reviewedCount = Object.keys(triageState.reviewed || {}).length;
-                const falsePositiveCount = Object.keys(triageState.falsePositive || {}).length;
-                const visibleFindings = modal.lmHideFalsePositives
-                  ? findings.filter((f) => !_itemTriage(f).falsePositive)
-                  : findings;
+                const severityRank = { critical: 0, high: 1, medium: 2, low: 3 };
 
                 const _dsEnd = data.stats?.datasetEnd ? new Date(data.stats.datasetEnd) : null;
                 const _recency = (f) => {
@@ -2366,12 +2124,14 @@ export default function LateralMovementModal() {
                   return { label: `${Math.round(diffMs / 86400000)}d ago`, active: false };
                 };
 
-                const sortedFindings = [...visibleFindings].sort((a, b) => {
-                  const at = _itemTriage(a), bt = _itemTriage(b);
-                  if (at.falsePositive !== bt.falsePositive) return at.falsePositive ? 1 : -1;
-                  if (at.reviewed !== bt.reviewed) return at.reviewed ? 1 : -1;
-                  if (sortBy === "triage") return (b.triageScore || 0) - (a.triageScore || 0);
-                  if (sortBy === "severity") { const so = { critical: 0, high: 1, medium: 2, low: 3 }; return (so[a.severity] ?? 4) - (so[b.severity] ?? 4); }
+                const sortedFindings = [...findings].sort((a, b) => {
+                  if (sortBy === "triage") {
+                    return ((b.triageScore || 0) - (a.triageScore || 0))
+                      || ((severityRank[a.severity] ?? 4) - (severityRank[b.severity] ?? 4))
+                      || (((b.timeRange?.to) || "").localeCompare((a.timeRange?.to) || ""))
+                      || String(a.title || "").localeCompare(String(b.title || ""));
+                  }
+                  if (sortBy === "severity") return ((severityRank[a.severity] ?? 4) - (severityRank[b.severity] ?? 4)) || ((b.triageScore || 0) - (a.triageScore || 0));
                   if (sortBy === "recency") return ((b.timeRange?.to) || "").localeCompare((a.timeRange?.to) || "");
                   if (sortBy === "events") return (b.eventCount || 0) - (a.eventCount || 0);
                   return 0;
@@ -2397,36 +2157,33 @@ export default function LateralMovementModal() {
 
                 // _filterEvents and _viewInGraph hoisted to component scope above
 
-                const _btnS = { padding: "2px 8px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 4, fontSize: 9, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 };
+                const _btnS = { padding: "2px 8px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 4, fontSize: LM_TYPOGRAPHY.meta, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 };
                 const _btnActive = (active) => active ? { ..._btnS, background: th.accent, color: "#fff" } : _btnS;
 
                 const _renderCard = (f) => {
                   const isExpanded = expandedId === f.id;
                   const rec = _recency(f);
                   const pills = f.evidencePills || [];
-                  const triage = _itemTriage(f);
                   return (
-                    <div key={f.id} style={{ borderRadius: 6, border: `1px solid ${LM_SEV_COLORS[f.severity]}${isExpanded ? "44" : "22"}`, background: `${LM_SEV_COLORS[f.severity]}${isExpanded ? "0a" : "04"}`, cursor: "pointer", transition: "border-color var(--m-base)", opacity: triage.falsePositive ? 0.48 : triage.reviewed ? 0.78 : 1 }}
+                    <div key={f.id} style={{ borderRadius: 6, border: `1px solid ${isExpanded ? th.accent + "55" : th.border + "66"}`, background: isExpanded ? `${th.accent}08` : th.panelBg, cursor: "pointer", transition: "border-color var(--m-base)" }}
                       onClick={() => setModal((p) => ({ ...p, expandedFinding: isExpanded ? null : f.id }))}
-                      onMouseEnter={(e) => { if (!isExpanded) e.currentTarget.style.borderColor = LM_SEV_COLORS[f.severity] + "44"; }}
-                      onMouseLeave={(e) => { if (!isExpanded) e.currentTarget.style.borderColor = LM_SEV_COLORS[f.severity] + "22"; }}>
+                      onMouseEnter={(e) => { if (!isExpanded) e.currentTarget.style.borderColor = th.accent + "44"; }}
+                      onMouseLeave={(e) => { if (!isExpanded) e.currentTarget.style.borderColor = th.border + "66"; }}>
                       <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", minHeight: 28 }}>
-                        <span style={{ padding: "1px 6px", background: LM_SEV_COLORS[f.severity] + "22", color: LM_SEV_COLORS[f.severity], borderRadius: 3, fontSize: 8, fontWeight: 700, textTransform: "uppercase", fontFamily: "-apple-system, sans-serif", letterSpacing: "0.03em", flexShrink: 0 }}>{f.severity}</span>
-                        <span style={{ fontFamily: "monospace", fontSize: 9, color: th.accent, background: `${th.accent}15`, padding: "1px 4px", borderRadius: 3, fontWeight: 600, flexShrink: 0, minWidth: 20, textAlign: "center" }}>{f.triageScore || 0}</span>
+                        <span style={{ padding: "1px 6px", background: `${th.accent}16`, color: th.accent, border: `1px solid ${th.accent}28`, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700, textTransform: "uppercase", fontFamily: "-apple-system, sans-serif", letterSpacing: "0.03em", flexShrink: 0 }}>{f.severity}</span>
+                        <span style={{ fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.meta, color: th.accent, background: `${th.accent}15`, padding: "1px 4px", borderRadius: 3, fontWeight: 600, flexShrink: 0, minWidth: 20, textAlign: "center" }}>{f.triageScore || 0}</span>
                         <MitreBadge id={f.mitre} />
-                        {triage.falsePositive && <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: `${th.sev.med}22`, color: th.sev.med, fontWeight: 700, fontFamily: "-apple-system, sans-serif", flexShrink: 0, textTransform: "uppercase" }}>FP</span>}
-                        {!triage.falsePositive && triage.reviewed && <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: `${th.sev.clean}22`, color: th.sev.clean, fontWeight: 700, fontFamily: "-apple-system, sans-serif", flexShrink: 0, textTransform: "uppercase" }}>reviewed</span>}
-                        <span style={{ fontSize: 11, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.title}</span>
-                        {rec && <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, fontWeight: 600, fontFamily: "-apple-system, sans-serif", flexShrink: 0, background: rec.active ? th.sev.clean + "22" : `${th.textMuted}15`, color: rec.active ? th.sev.clean : th.textMuted }}>{rec.active ? "ACTIVE " : ""}{rec.label}</span>}
+                        <span style={{ fontSize: LM_TYPOGRAPHY.body, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.title}</span>
+                        {rec && <span style={{ fontSize: LM_TYPOGRAPHY.badge, padding: "1px 5px", borderRadius: 3, fontWeight: 600, fontFamily: "-apple-system, sans-serif", flexShrink: 0, background: rec.active ? `${th.accent}14` : `${th.textMuted}12`, color: rec.active ? th.accent : th.textMuted }}>{rec.active ? "ACTIVE " : ""}{rec.label}</span>}
                         {pills.slice(0, 3).map((p, i) => (
-                          <span key={i} style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: (_pillColors[p.type] || th.sev.low) + "18", color: _pillColors[p.type] || th.sev.low, fontWeight: 500, fontFamily: "-apple-system, sans-serif", flexShrink: 0, whiteSpace: "nowrap" }}>{p.text}</span>
+                          <span key={i} style={{ fontSize: LM_TYPOGRAPHY.badge, padding: "1px 5px", borderRadius: 3, background: `${th.textMuted}12`, color: th.textDim, border: `1px solid ${th.border}44`, fontWeight: 500, fontFamily: "-apple-system, sans-serif", flexShrink: 0, whiteSpace: "nowrap" }}>{p.text}</span>
                         ))}
-                        {(f.relatedFindingIds || []).length > 0 && <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: `${th.accent}15`, color: th.accent, fontWeight: 500, fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>+{f.relatedFindingIds.length} related</span>}
+                        {(f.relatedFindingIds || []).length > 0 && <span style={{ fontSize: LM_TYPOGRAPHY.badge, padding: "1px 5px", borderRadius: 3, background: `${th.accent}15`, color: th.accent, fontWeight: 500, fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>+{f.relatedFindingIds.length} related</span>}
                       </div>
                       {isExpanded && (
-                        <div style={{ padding: "8px 10px 10px", borderTop: `1px solid ${LM_SEV_COLORS[f.severity]}22` }} onClick={(e) => e.stopPropagation()}>
-                          <div style={{ fontSize: 11, color: th.textDim, fontFamily: "-apple-system, sans-serif", marginBottom: 8, lineHeight: 1.5 }}>{f.description}</div>
-                          <div style={{ fontSize: 10, color: th.textMuted, fontFamily: "monospace", marginBottom: 6 }}>
+                        <div style={{ padding: "8px 10px 10px", borderTop: `1px solid ${th.border}66` }} onClick={(e) => e.stopPropagation()}>
+                          <div style={{ fontSize: LM_TYPOGRAPHY.body, color: th.textDim, fontFamily: "-apple-system, sans-serif", marginBottom: 8, lineHeight: 1.5 }}>{f.description}</div>
+                          <div style={{ fontSize: LM_TYPOGRAPHY.control, color: th.textMuted, fontFamily: "monospace", marginBottom: 6 }}>
                             {f.source}{f.target && f.target !== f.source ? ` \u2192 ${f.target}` : ""}
                             {f.timeRange?.from && <span style={{ marginLeft: 12 }}>{fmtTs(f.timeRange.from)}{f.timeRange.to && f.timeRange.to !== f.timeRange.from ? ` \u2014 ${fmtTs(f.timeRange.to)}` : ""}</span>}
                             <span style={{ marginLeft: 12 }}>{f.eventCount} event{f.eventCount !== 1 ? "s" : ""}</span>
@@ -2434,21 +2191,21 @@ export default function LateralMovementModal() {
                           {pills.length > 0 && (
                             <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
                               {pills.map((p, i) => (
-                                <span key={i} style={{ fontSize: 9, padding: "2px 7px", borderRadius: 4, background: (_pillColors[p.type] || th.sev.low) + "18", color: _pillColors[p.type] || th.sev.low, fontWeight: 500, fontFamily: "-apple-system, sans-serif" }}>{p.text}</span>
+                                <span key={i} style={{ fontSize: LM_TYPOGRAPHY.meta, padding: "2px 7px", borderRadius: 4, background: `${th.textMuted}12`, color: th.textDim, border: `1px solid ${th.border}44`, fontWeight: 500, fontFamily: "-apple-system, sans-serif" }}>{p.text}</span>
                               ))}
                             </div>
                           )}
                           {(f.relatedFindingIds || []).length > 0 && (
                             <div style={{ marginBottom: 8 }}>
-                              <div style={{ fontSize: 9, color: th.textMuted, fontWeight: 600, marginBottom: 4, fontFamily: "-apple-system, sans-serif", textTransform: "uppercase", letterSpacing: "0.04em" }}>Related Findings</div>
+                              <div style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, fontWeight: 600, marginBottom: 4, fontFamily: "-apple-system, sans-serif", textTransform: "uppercase", letterSpacing: "0.04em" }}>Related Findings</div>
                               <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
                                 {f.relatedFindingIds.slice(0, 4).map(rid => {
                                   const rf = findings.find(x => x.id === rid);
                                   if (!rf) return null;
                                   return (
-                                    <span key={rid} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 7px", background: `${LM_SEV_COLORS[rf.severity]}10`, border: `1px solid ${LM_SEV_COLORS[rf.severity]}22`, borderRadius: 4, fontSize: 9, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}
+                                    <span key={rid} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 7px", background: `${th.textMuted}0d`, border: `1px solid ${th.border}55`, borderRadius: 4, fontSize: LM_TYPOGRAPHY.meta, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}
                                       onClick={(e) => { e.stopPropagation(); setModal((p) => ({ ...p, expandedFinding: rid, findingsView: "alerts" })); }}>
-                                      <span style={{ color: LM_SEV_COLORS[rf.severity], fontWeight: 600, textTransform: "uppercase", fontSize: 8 }}>{rf.severity}</span>
+                                      <span style={{ color: th.accent, fontWeight: 600, textTransform: "uppercase", fontSize: LM_TYPOGRAPHY.badge }}>{rf.severity}</span>
                                       <span style={{ color: th.text, maxWidth: 160, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{rf.title}</span>
                                     </span>
                                   );
@@ -2485,37 +2242,26 @@ export default function LateralMovementModal() {
                 return (
                   <div>
                     <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 10, flexWrap: "wrap" }}>
-                      <button onClick={() => setModal((p) => ({ ...p, findingsView: "alerts" }))} style={_btnActive(findingsView === "alerts")}>Alerts ({modal.lmHideFalsePositives ? sortedFindings.length : findings.length})</button>
+                      <button onClick={() => setModal((p) => ({ ...p, findingsView: "alerts" }))} style={_btnActive(findingsView === "alerts")}>Alerts ({findings.length})</button>
                       {allIncidents.length > 0 && <button onClick={() => setModal((p) => ({ ...p, findingsView: "incidents" }))} style={_btnActive(findingsView === "incidents")}>Incidents ({allIncidents.length})</button>}
                       {(data.campaigns || []).length > 0 && <button onClick={() => setModal((p) => ({ ...p, findingsView: "campaigns" }))} style={_btnActive(findingsView === "campaigns")}>Campaigns ({data.campaigns.length})</button>}
                       <span style={{ width: 1, height: 16, background: th.border, margin: "0 4px" }} />
-                      <span style={{ fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>Sort:</span>
-                      <select value={sortBy} onChange={(e) => setModal((p) => ({ ...p, findingsSortBy: e.target.value }))} style={{ fontSize: 9, padding: "2px 4px", background: th.bg, color: th.text, border: `1px solid ${th.border}`, borderRadius: 3, fontFamily: "-apple-system, sans-serif" }}>
+                      <span style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>Sort:</span>
+                      <select value={sortBy} onChange={(e) => setModal((p) => ({ ...p, findingsSortBy: e.target.value }))} style={{ fontSize: LM_TYPOGRAPHY.meta, padding: "2px 4px", background: th.bg, color: th.text, border: `1px solid ${th.border}`, borderRadius: 3, fontFamily: "-apple-system, sans-serif" }}>
                         <option value="triage">Priority</option><option value="severity">Severity</option><option value="recency">Recency</option><option value="events">Events</option>
                       </select>
                       {findingsView === "alerts" && <>
-                        <span style={{ fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>Group:</span>
-                        <select value={groupBy} onChange={(e) => setModal((p) => ({ ...p, findingsGroupBy: e.target.value }))} style={{ fontSize: 9, padding: "2px 4px", background: th.bg, color: th.text, border: `1px solid ${th.border}`, borderRadius: 3, fontFamily: "-apple-system, sans-serif" }}>
+                        <span style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>Group:</span>
+                        <select value={groupBy} onChange={(e) => setModal((p) => ({ ...p, findingsGroupBy: e.target.value }))} style={{ fontSize: LM_TYPOGRAPHY.meta, padding: "2px 4px", background: th.bg, color: th.text, border: `1px solid ${th.border}`, borderRadius: 3, fontFamily: "-apple-system, sans-serif" }}>
                           <option value="default">None</option><option value="target">Target</option><option value="source">Source</option><option value="user">User</option><option value="technique">Technique</option>
                         </select>
                       </>}
                       <span style={{ width: 1, height: 16, background: th.border, margin: "0 4px" }} />
                       {Object.entries(sevCounts).filter(([, v]) => v > 0).map(([sev, cnt]) => (
-                        <span key={sev} style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "2px 7px", background: LM_SEV_COLORS[sev] + "15", color: LM_SEV_COLORS[sev], borderRadius: 4, fontSize: 9, fontWeight: 600, fontFamily: "-apple-system, sans-serif", textTransform: "uppercase" }}>
+                        <span key={sev} style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "2px 7px", background: `${th.accent}12`, color: th.accent, border: `1px solid ${th.accent}22`, borderRadius: 4, fontSize: LM_TYPOGRAPHY.meta, fontWeight: 600, fontFamily: "-apple-system, sans-serif", textTransform: "uppercase" }}>
                           {cnt} {sev}
                         </span>
                       ))}
-                      <span style={{ width: 1, height: 16, background: th.border, margin: "0 4px" }} />
-                      <label style={{ display: "inline-flex", alignItems: "center", gap: 4, color: th.textMuted, fontSize: 9, fontFamily: "-apple-system, sans-serif", cursor: "pointer" }}>
-                        <input type="checkbox" checked={!!modal.lmHideFalsePositives} onChange={() => setModal((p) => ({ ...p, lmHideFalsePositives: !p.lmHideFalsePositives }))} style={{ margin: 0, accentColor: th.accent }} />
-                        Hide FP
-                      </label>
-                      {(reviewedCount > 0 || falsePositiveCount > 0) && (
-                        <>
-                          <span style={{ fontSize: 9, color: th.textMuted, fontFamily: "monospace" }}>{reviewedCount} reviewed / {falsePositiveCount} FP</span>
-                          <button onClick={_clearLmTriageState} style={{ ..._btnS, color: th.textMuted, background: `${th.textMuted}0d`, borderColor: `${th.border}44` }}>Clear marks</button>
-                        </>
-                      )}
                     </div>
 
                     {findingsView === "alerts" && (() => {
@@ -2539,7 +2285,7 @@ export default function LateralMovementModal() {
                             budget -= shown.length;
                             return (
                               <div key={gKey}>
-                                <div style={{ fontSize: 10, fontWeight: 600, color: th.textDim, padding: "6px 0 4px", fontFamily: "-apple-system, sans-serif", borderBottom: `1px solid ${th.border}`, marginBottom: 4 }}>
+                                <div style={{ fontSize: LM_TYPOGRAPHY.control, fontWeight: 600, color: th.textDim, padding: "6px 0 4px", fontFamily: "-apple-system, sans-serif", borderBottom: `1px solid ${th.border}`, marginBottom: 4 }}>
                                   {gKey} <span style={{ fontWeight: 400, color: th.textMuted }}>({gFindings.length} findings) | Top score: {Math.max(...gFindings.map(f => f.triageScore || 0))}</span>
                                 </div>
                                 {shown.map(f => _renderCard(f))}
@@ -2547,12 +2293,12 @@ export default function LateralMovementModal() {
                             );
                           }) : sortedFindings.slice(0, limit).map(f => _renderCard(f))}
                           {hidden > 0 && (
-                            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "10px 0 4px", fontSize: 10, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>
+                            <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "10px 0 4px", fontSize: LM_TYPOGRAPHY.control, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>
                               <span>Showing {total - hidden} of {total} findings (highest triage score first)</span>
                               <button onClick={() => setModal((p) => ({ ...p, lmAlertLimit: (p.lmAlertLimit || 300) + 300 }))}
-                                style={{ ...ms.bs, borderRadius: 6, fontSize: 10, padding: "3px 10px" }}>Show 300 more</button>
+                                style={{ ...ms.bs, borderRadius: 6, fontSize: LM_TYPOGRAPHY.control, padding: "3px 10px" }}>Show 300 more</button>
                               <button onClick={() => setModal((p) => ({ ...p, lmAlertLimit: total }))}
-                                style={{ ...ms.bs, borderRadius: 6, fontSize: 10, padding: "3px 10px" }}>Show all {total}</button>
+                                style={{ ...ms.bs, borderRadius: 6, fontSize: LM_TYPOGRAPHY.control, padding: "3px 10px" }}>Show all {total}</button>
                             </div>
                           )}
                         </div>
@@ -2569,24 +2315,24 @@ export default function LateralMovementModal() {
                             return { text: t, color };
                           });
                           return (
-                            <div key={inc.id} style={{ padding: "10px 12px", background: `${LM_SEV_COLORS[inc.severity]}08`, border: `1px solid ${LM_SEV_COLORS[inc.severity]}30`, borderRadius: 8 }}>
+                            <div key={inc.id} style={{ padding: "10px 12px", background: `${th.accent}06`, border: `1px solid ${th.border}66`, borderRadius: 8 }}>
                               <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
-                                <span style={{ padding: "1px 6px", background: LM_SEV_COLORS[inc.severity] + "22", color: LM_SEV_COLORS[inc.severity], borderRadius: 3, fontSize: 8, fontWeight: 700, textTransform: "uppercase", fontFamily: "-apple-system, sans-serif" }}>{inc.severity}</span>
-                                <span style={{ fontFamily: "monospace", fontSize: 9, color: th.accent, background: `${th.accent}15`, padding: "1px 4px", borderRadius: 3, fontWeight: 600 }}>{inc.triageScore}</span>
-                                {techPills.map((tp, i) => <span key={i} style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: tp.color + "18", color: tp.color, fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>{tp.text}</span>)}
-                                {rec && <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, fontWeight: 600, fontFamily: "-apple-system, sans-serif", marginLeft: "auto", background: rec.active ? th.sev.clean + "22" : `${th.textMuted}15`, color: rec.active ? th.sev.clean : th.textMuted }}>{rec.active ? "ACTIVE " : ""}{rec.label}</span>}
+                                <span style={{ padding: "1px 6px", background: `${th.accent}16`, color: th.accent, border: `1px solid ${th.accent}28`, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700, textTransform: "uppercase", fontFamily: "-apple-system, sans-serif" }}>{inc.severity}</span>
+                                <span style={{ fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.meta, color: th.accent, background: `${th.accent}15`, padding: "1px 4px", borderRadius: 3, fontWeight: 600 }}>{inc.triageScore}</span>
+                                {techPills.map((tp, i) => <span key={i} style={{ fontSize: LM_TYPOGRAPHY.badge, padding: "1px 5px", borderRadius: 3, background: tp.color + "18", color: tp.color, fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>{tp.text}</span>)}
+                                {rec && <span style={{ fontSize: LM_TYPOGRAPHY.badge, padding: "1px 5px", borderRadius: 3, fontWeight: 600, fontFamily: "-apple-system, sans-serif", marginLeft: "auto", background: rec.active ? `${th.accent}14` : `${th.textMuted}12`, color: rec.active ? th.accent : th.textMuted }}>{rec.active ? "ACTIVE " : ""}{rec.label}</span>}
                               </div>
-                              <div style={{ fontSize: 11, color: th.text, fontFamily: "-apple-system, sans-serif", marginBottom: 6, lineHeight: 1.5 }}>{inc.narrative}</div>
-                              <div style={{ fontSize: 10, color: th.textMuted, fontFamily: "monospace", marginBottom: 6 }}>
+                              <div style={{ fontSize: LM_TYPOGRAPHY.body, color: th.text, fontFamily: "-apple-system, sans-serif", marginBottom: 6, lineHeight: 1.5 }}>{inc.narrative}</div>
+                              <div style={{ fontSize: LM_TYPOGRAPHY.control, color: th.textMuted, fontFamily: "monospace", marginBottom: 6 }}>
                                 {inc.source} {"\u2192"} {inc.target}
                                 {inc.users.length > 0 && <span style={{ marginLeft: 10 }}>users: {inc.users.slice(0, 3).join(", ")}{inc.users.length > 3 ? ` +${inc.users.length - 3}` : ""}</span>}
                                 <span style={{ marginLeft: 10 }}>{inc.eventCount} events</span>
                               </div>
                               <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
                                 {memberFindings.map(mf => (
-                                  <span key={mf.id} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 7px", background: `${LM_SEV_COLORS[mf.severity]}10`, border: `1px solid ${LM_SEV_COLORS[mf.severity]}22`, borderRadius: 4, fontSize: 9, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}
+                                  <span key={mf.id} style={{ display: "inline-flex", alignItems: "center", gap: 4, padding: "2px 7px", background: `${th.textMuted}0d`, border: `1px solid ${th.border}55`, borderRadius: 4, fontSize: LM_TYPOGRAPHY.meta, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}
                                     onClick={() => setModal((p) => ({ ...p, findingsView: "alerts", expandedFinding: mf.id }))}>
-                                    <span style={{ color: LM_SEV_COLORS[mf.severity], fontWeight: 600, textTransform: "uppercase", fontSize: 8 }}>{mf.severity}</span>
+                                    <span style={{ color: th.accent, fontWeight: 600, textTransform: "uppercase", fontSize: LM_TYPOGRAPHY.badge }}>{mf.severity}</span>
                                     <span style={{ color: th.text, maxWidth: 180, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{mf.category}</span>
                                   </span>
                                 ))}
@@ -2628,20 +2374,20 @@ export default function LateralMovementModal() {
                             </div>
                           );
                         })}
-                        {allIncidents.length === 0 && <div style={{ fontSize: 11, color: th.textMuted, fontFamily: "-apple-system, sans-serif", padding: 20, textAlign: "center" }}>No incidents — findings are not clustered into multi-detection groups.</div>}
+                        {allIncidents.length === 0 && <div style={{ fontSize: LM_TYPOGRAPHY.body, color: th.textMuted, fontFamily: "-apple-system, sans-serif", padding: 20, textAlign: "center" }}>No incidents — findings are not clustered into multi-detection groups.</div>}
                       </div>
                     )}
 
                     {/* Campaigns sub-view */}
                     {findingsView === "campaigns" && (() => {
                       const allCampaigns = data.campaigns || [];
-                      if (allCampaigns.length === 0) return <div style={{ padding: 20, textAlign: "center", color: th.textMuted, fontSize: 12 }}>No campaigns — at least 2 related incidents are needed to form a storyline.</div>;
+                      if (allCampaigns.length === 0) return <div style={{ padding: 20, textAlign: "center", color: th.textMuted, fontSize: LM_TYPOGRAPHY.title }}>No campaigns — at least 2 related incidents are needed to form a storyline.</div>;
                       const expandedCamp = modal.expandedCampaign;
                       return (
                         <div style={{ maxHeight: lmH - 250, overflowY: "auto", display: "flex", flexDirection: "column", gap: 10 }}>
                           {allCampaigns.map((camp) => {
                             const isExp = expandedCamp === camp.id;
-                            const campSevColor = camp.severity === "critical" ? th.sev.critical : camp.severity === "high" ? th.sev.high : camp.severity === "medium" ? th.sev.med : th.textMuted;
+                            const campSevColor = th.accent;
                             const memberIncs = (camp.incidentIds || []).map(id => allIncidents.find(inc => inc.id === id)).filter(Boolean);
                             return (
                               <div key={camp.id} style={{ borderRadius: 8, border: `1px solid ${campSevColor}${isExp ? "55" : "22"}`, background: `${campSevColor}${isExp ? "0c" : "04"}`, overflow: "hidden" }}>
@@ -2650,25 +2396,25 @@ export default function LateralMovementModal() {
                                   style={{ padding: "10px 14px", cursor: "pointer", display: "flex", alignItems: "flex-start", gap: 8 }}>
                                   <div style={{ display: "flex", flexDirection: "column", gap: 4, flex: 1, minWidth: 0 }}>
                                     <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-                                      <span style={{ padding: "2px 8px", background: campSevColor + "22", color: campSevColor, borderRadius: 4, fontSize: 9, fontWeight: 700, textTransform: "uppercase", fontFamily: "-apple-system, sans-serif" }}>{camp.severity}</span>
-                                      <span style={{ fontFamily: "monospace", fontSize: 10, color: th.accent, background: `${th.accent}15`, padding: "2px 6px", borderRadius: 4, fontWeight: 700 }}>{camp.triageScore}</span>
-                                      <span style={{ fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>{camp.incidentCount} incidents | {camp.findingCount} findings | {camp.eventCount} events</span>
+                                      <span style={{ padding: "2px 8px", background: campSevColor + "22", color: campSevColor, borderRadius: 4, fontSize: LM_TYPOGRAPHY.meta, fontWeight: 700, textTransform: "uppercase", fontFamily: "-apple-system, sans-serif" }}>{camp.severity}</span>
+                                      <span style={{ fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.control, color: th.accent, background: `${th.accent}15`, padding: "2px 6px", borderRadius: 4, fontWeight: 700 }}>{camp.triageScore}</span>
+                                      <span style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>{camp.incidentCount} incidents | {camp.findingCount} findings | {camp.eventCount} events</span>
                                     </div>
-                                    <div style={{ fontSize: 12, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif", lineHeight: 1.4 }}>
+                                    <div style={{ fontSize: LM_TYPOGRAPHY.title, fontWeight: 600, color: th.text, fontFamily: "-apple-system, sans-serif", lineHeight: 1.4 }}>
                                       {camp.hopPairs.join(" \u2192 ")}
                                     </div>
-                                    <div style={{ fontSize: 10, color: th.textDim, fontFamily: "-apple-system, sans-serif", lineHeight: 1.5 }}>{camp.narrative}</div>
+                                    <div style={{ fontSize: LM_TYPOGRAPHY.control, color: th.textDim, fontFamily: "-apple-system, sans-serif", lineHeight: 1.5 }}>{camp.narrative}</div>
                                     <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginTop: 2 }}>
                                       {(camp.users || []).slice(0, 5).map((u, i) => (
-                                        <span key={i} style={{ padding: "1px 5px", background: `${th.accent}12`, color: th.accent, borderRadius: 3, fontSize: 8, fontWeight: 500, fontFamily: "-apple-system, sans-serif" }}>{u}</span>
+                                        <span key={i} style={{ padding: "1px 5px", background: `${th.accent}12`, color: th.accent, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 500, fontFamily: "-apple-system, sans-serif" }}>{u}</span>
                                       ))}
-                                      {(camp.users || []).length > 5 && <span style={{ fontSize: 8, color: th.textMuted }}>+{camp.users.length - 5}</span>}
+                                      {(camp.users || []).length > 5 && <span style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted }}>+{camp.users.length - 5}</span>}
                                       {(camp.techniques || []).slice(0, 6).map((t, i) => (
-                                        <span key={`t${i}`} style={{ padding: "1px 5px", background: `${th.textMuted}12`, color: th.textDim, borderRadius: 3, fontSize: 8, fontFamily: "-apple-system, sans-serif" }}>{t}</span>
+                                        <span key={`t${i}`} style={{ padding: "1px 5px", background: `${th.textMuted}12`, color: th.textDim, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontFamily: "-apple-system, sans-serif" }}>{t}</span>
                                       ))}
                                     </div>
                                   </div>
-                                  <span style={{ fontSize: 12, color: th.textMuted, flexShrink: 0, padding: "2px 4px" }}>{isExp ? "▼" : "▶"}</span>
+                                  <span style={{ fontSize: LM_TYPOGRAPHY.title, color: th.textMuted, flexShrink: 0, padding: "2px 4px" }}>{isExp ? "▼" : "▶"}</span>
                                 </div>
                                 {/* Expanded: member incidents + timeline + actions */}
                                 {isExp && (
@@ -2677,23 +2423,23 @@ export default function LateralMovementModal() {
                                     <div style={{ display: "flex", alignItems: "center", gap: 4, padding: "10px 0", flexWrap: "wrap" }}>
                                       {camp.hopPairs.map((hop, hi) => (
                                         <Fragment key={hi}>
-                                          {hi > 0 && <span style={{ color: th.accent, fontSize: 10, fontWeight: 700 }}>{"\u2192"}</span>}
-                                          <span style={{ padding: "3px 8px", background: `${campSevColor}15`, color: campSevColor, borderRadius: 4, fontSize: 10, fontWeight: 600, fontFamily: "monospace", whiteSpace: "nowrap" }}>{hop}</span>
+                                          {hi > 0 && <span style={{ color: th.accent, fontSize: LM_TYPOGRAPHY.control, fontWeight: 700 }}>{"\u2192"}</span>}
+                                          <span style={{ padding: "3px 8px", background: `${campSevColor}15`, color: campSevColor, borderRadius: 4, fontSize: LM_TYPOGRAPHY.control, fontWeight: 600, fontFamily: "monospace", whiteSpace: "nowrap" }}>{hop}</span>
                                         </Fragment>
                                       ))}
                                     </div>
                                     {/* Member incidents */}
-                                    <div style={{ fontSize: 9, fontWeight: 600, color: th.textMuted, textTransform: "uppercase", marginBottom: 6, fontFamily: "-apple-system, sans-serif" }}>Member Incidents ({memberIncs.length})</div>
+                                    <div style={{ fontSize: LM_TYPOGRAPHY.meta, fontWeight: 600, color: th.textMuted, textTransform: "uppercase", marginBottom: 6, fontFamily: "-apple-system, sans-serif" }}>Member Incidents ({memberIncs.length})</div>
                                     <div style={{ display: "flex", flexDirection: "column", gap: 4, marginBottom: 10 }}>
                                       {memberIncs.map((inc) => {
-                                        const incSevColor = inc.severity === "critical" ? th.sev.critical : inc.severity === "high" ? th.sev.high : inc.severity === "medium" ? th.sev.med : th.textMuted;
+                                        const incSevColor = th.accent;
                                         return (
                                           <div key={inc.id} onClick={() => setModal((p) => ({ ...p, findingsView: "incidents", expandedCampaign: null }))}
-                                            style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 4, cursor: "pointer", background: `${incSevColor}08`, border: `1px solid ${incSevColor}22`, fontSize: 10, fontFamily: "-apple-system, sans-serif" }}>
-                                            <span style={{ padding: "1px 5px", background: `${incSevColor}22`, color: incSevColor, borderRadius: 3, fontSize: 8, fontWeight: 700, textTransform: "uppercase", flexShrink: 0 }}>{inc.severity}</span>
-                                            <span style={{ fontFamily: "monospace", fontSize: 9, color: th.accent, flexShrink: 0 }}>{inc.triageScore}</span>
+                                            style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", borderRadius: 4, cursor: "pointer", background: `${incSevColor}08`, border: `1px solid ${incSevColor}22`, fontSize: LM_TYPOGRAPHY.control, fontFamily: "-apple-system, sans-serif" }}>
+                                            <span style={{ padding: "1px 5px", background: `${incSevColor}22`, color: incSevColor, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700, textTransform: "uppercase", flexShrink: 0 }}>{inc.severity}</span>
+                                            <span style={{ fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.meta, color: th.accent, flexShrink: 0 }}>{inc.triageScore}</span>
                                             <span style={{ color: th.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{inc.source} {"\u2192"} {inc.target}: {inc.category}</span>
-                                            <span style={{ color: th.textMuted, fontSize: 9, flexShrink: 0 }}>{inc.eventCount} events</span>
+                                            <span style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.meta, flexShrink: 0 }}>{inc.eventCount} events</span>
                                           </div>
                                         );
                                       })}
@@ -2733,7 +2479,7 @@ export default function LateralMovementModal() {
                 );
               })()}
 
-              {/* Graph tab — placeholder: too large to inline, will be completed in Part 2 */}
+              {/* Directed machine graph with an optional evidence-backed identity overlay. */}
               {viewTab === "graph" && (() => {
                 const _techColor = (tech) => {
                   if (!tech) return th.textMuted;
@@ -2744,15 +2490,55 @@ export default function LateralMovementModal() {
                   if (tech.includes("Scheduled Task") || tech.includes("WMI") || tech.includes("WinRM")) return th.sev.high;
                   return th.textMuted;
                 };
-                const W = 700, H = 450;
-                const graphNodes = data.nodes.length > 500 ? data.nodes.sort((a, b) => b.eventCount - a.eventCount).slice(0, 500) : data.nodes;
-                const graphIds = new Set(graphNodes.map((n) => n.id));
-                const graphEdges = data.edges.filter((e) => graphIds.has(e.source) && graphIds.has(e.target));
+                const W = LATERAL_GRAPH_DEFAULTS.width;
+                const H = LATERAL_GRAPH_DEFAULTS.height;
+                const graphMode = modal.lmGraphMode || "machines";
+                const {
+                  machineNodes,
+                  machineEdges,
+                  machineEligibleEdgeCount,
+                  identityGraph,
+                  identityNodes,
+                  identityEdges,
+                  identityEligibleEdgeCount,
+                } = lateralGraphModel;
+                const graphNodes = graphMode === "identities" ? identityNodes : machineNodes;
+                const graphEdges = graphMode === "identities" ? identityEdges : machineEdges;
+                const graphEligibleEdgeCount = graphMode === "identities"
+                  ? identityEligibleEdgeCount
+                  : machineEligibleEdgeCount;
+                const graphEdgeKeys = new Set(graphEdges.map((e) => `${e.source}->${e.target}`));
+                const graphHostCount = graphNodes.filter((node) => node.nodeType !== "identity").length;
+                const graphIdentityCount = graphNodes.filter((node) => node.nodeType === "identity").length;
+                const setGraphMode = (nextMode) => {
+                  const nextGraph = nextMode === "identities"
+                    ? { nodes: identityNodes, edges: identityEdges }
+                    : { nodes: machineNodes, edges: machineEdges };
+                  setModal((prev) => ({
+                    ...prev,
+                    lmGraphMode: nextMode,
+                    positions: computeForceLayout(nextGraph.nodes, nextGraph.edges),
+                    selectedNode: null,
+                    selectedEdge: null,
+                    viewBox: { x: 0, y: 0, w: W, h: H },
+                  }));
+                };
+                const edgeFailureCount = (edge) =>
+                  Number(edge.eventBreakdown?.["4625"] || 0)
+                  + Number(edge.eventBreakdown?.["4771"] || 0);
+                const edgeSuccessCount = (edge) =>
+                  Number(edge.eventBreakdown?.["4624"] || 0)
+                  + Number(edge.eventBreakdown?.["1149"] || 0)
+                  + Number(edge.eventBreakdown?.["21"] || 0)
+                  + Number(edge.eventBreakdown?.["22"] || 0);
+                const edgeFailureOnly = (edge) => edgeFailureCount(edge) > 0 && edgeSuccessCount(edge) === 0;
+                const edgeMixedOutcome = (edge) => edgeFailureCount(edge) > 0 && edgeSuccessCount(edge) > 0;
+                const maxGraphLevel = Math.max(0, ...Object.values(positions).map((p) => Number(p?.level) || 0));
                 const vb = modal.viewBox || { x: 0, y: 0, w: W, h: H };
                 const isIP = (s) => /^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(s);
                 const isDC = (s) => /DC\d*$/i.test(s) || /domain.controller/i.test(s);
                 const logonLabel = (types) => { const t = types.map(String); if (t.includes("10")) return "RDP"; if (t.includes("12")) return "Cached RDP"; if (t.includes("8")) return "Cleartext"; if (t.includes("3")) return "Net"; if (t.includes("4")) return "Batch"; if (t.includes("5")) return "Service"; if (t.includes("2")) return "Local"; if (t.includes("7")) return "Unlock"; if (t.includes("9")) return "RunAs"; if (t.includes("11")) return "Cached"; if (t.includes("13")) return "Cached Unlock"; return t.join(","); };
-                const tbtn = { padding: "4px 10px", background: `${th.panelBg}cc`, color: th.textDim, border: `1px solid ${th.border}44`, borderRadius: 6, fontSize: 10, cursor: "pointer", fontFamily: "-apple-system, sans-serif", display: "flex", alignItems: "center", gap: 4, backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)", transition: "all var(--m-base)", fontWeight: 500 };
+                const tbtn = { padding: "4px 10px", background: `${th.panelBg}cc`, color: th.textDim, border: `1px solid ${th.border}44`, borderRadius: 6, fontSize: LM_TYPOGRAPHY.control, cursor: "pointer", fontFamily: "-apple-system, sans-serif", display: "flex", alignItems: "center", gap: 4, backdropFilter: "blur(8px)", WebkitBackdropFilter: "blur(8px)", transition: "all var(--m-base)", fontWeight: 500 };
 
                 const svgToWorld = (clientX, clientY, svgEl) => {
                   if (!svgEl) return { x: 0, y: 0 };
@@ -2802,7 +2588,17 @@ export default function LateralMovementModal() {
                     moved = true;
                     const curWorld = svgToWorld(me.clientX, me.clientY, svg);
                     const dx = curWorld.x - startWorld.x, dy = curWorld.y - startWorld.y;
-                    setModal((p) => ({ ...p, positions: { ...p.positions, [nodeId]: { x: startPos.x + dx, y: startPos.y + dy } } }));
+                    setModal((p) => ({
+                      ...p,
+                      positions: {
+                        ...p.positions,
+                        [nodeId]: {
+                          ...(p.positions?.[nodeId] || {}),
+                          x: startPos.x + dx,
+                          y: startPos.y + dy,
+                        },
+                      },
+                    }));
                   };
                   const onUp = () => {
                     document.removeEventListener("mousemove", onMove);
@@ -2824,6 +2620,20 @@ export default function LateralMovementModal() {
                   <div>
                     {/* Toolbar */}
                     <div style={{ display: "flex", gap: 3, marginBottom: 8, alignItems: "center", padding: "4px 6px", background: `${th.panelBg}88`, borderRadius: 8, border: `1px solid ${th.border}22` }}>
+                      <div style={{ display: "inline-flex", padding: 2, borderRadius: 6, background: `${th.textMuted}0d`, border: `1px solid ${th.border}33`, marginRight: 3 }}>
+                        {[
+                          { id: "machines", label: "Machines" },
+                          { id: "identities", label: "Machines + Users" },
+                        ].map((mode) => {
+                          const active = graphMode === mode.id;
+                          return (
+                            <button key={mode.id} onClick={() => setGraphMode(mode.id)}
+                              style={{ padding: "3px 9px", border: "none", borderRadius: 4, background: active ? th.accent : "transparent", color: active ? "#fff" : th.textDim, fontSize: LM_TYPOGRAPHY.control, fontWeight: active ? 600 : 500, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}>
+                              {mode.label}
+                            </button>
+                          );
+                        })}
+                      </div>
                       <button onClick={() => zoomBy(1 / 1.3)} style={tbtn} title="Zoom In">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={th.textDim} strokeWidth="2"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="11" y1="8" x2="11" y2="14"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
                       </button>
@@ -2834,11 +2644,19 @@ export default function LateralMovementModal() {
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={th.textDim} strokeWidth="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
                         Reset
                       </button>
+                      {(selectedNode || selectedEdge) && <button onClick={() => {
+                        const selectedPositions = selectedNode
+                          ? [positions[selectedNode]].filter(Boolean)
+                          : [positions[selectedEdge?.source], positions[selectedEdge?.target]].filter(Boolean);
+                        if (selectedPositions.length === 0) return;
+                        const cx = selectedPositions.reduce((sum, point) => sum + point.x, 0) / selectedPositions.length;
+                        const cy = selectedPositions.reduce((sum, point) => sum + point.y, 0) / selectedPositions.length;
+                        setModal((prev) => ({ ...prev, viewBox: { x: cx - 120, y: cy - 80, w: 240, h: 160 } }));
+                      }} style={{ ...tbtn, color: th.accent, borderColor: `${th.accent}33`, background: `${th.accent}12` }} title="Center and zoom the selected path">
+                        Focus
+                      </button>}
                       <button onClick={() => {
-                        const layoutNodes = data.nodes.length > 500 ? data.nodes.sort((a, b) => b.eventCount - a.eventCount).slice(0, 500) : data.nodes;
-                        const ids = new Set(layoutNodes.map((n) => n.id));
-                        const le = data.edges.filter((e) => ids.has(e.source) && ids.has(e.target));
-                        const pos = computeForceLayout(layoutNodes, le);
+                        const pos = computeForceLayout(graphNodes, graphEdges);
                         setModal((p) => ({ ...p, positions: pos, viewBox: { x: 0, y: 0, w: W, h: H } }));
                       }} style={tbtn} title="Redraw Layout">
                         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke={th.textDim} strokeWidth="2"><polyline points="1 4 1 10 7 10"/><polyline points="23 20 23 14 17 14"/><path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"/></svg>
@@ -2856,21 +2674,36 @@ export default function LateralMovementModal() {
                         const url = URL.createObjectURL(svgBlob);
                         const img = new Image();
                         img.onload = () => {
-                          canvas.width = img.width * 2;
-                          canvas.height = img.height * 2;
-                          const ctx = canvas.getContext("2d");
-                          ctx.scale(2, 2);
-                          ctx.fillStyle = th.panelBg;
-                          ctx.fillRect(0, 0, img.width, img.height);
-                          ctx.drawImage(img, 0, 0);
+                          try {
+                            canvas.width = img.width * 2;
+                            canvas.height = img.height * 2;
+                            const ctx = canvas.getContext("2d");
+                            if (!ctx) throw new Error("Canvas rendering is unavailable.");
+                            ctx.scale(2, 2);
+                            ctx.fillStyle = th.panelBg;
+                            ctx.fillRect(0, 0, img.width, img.height);
+                            ctx.drawImage(img, 0, 0);
+                            canvas.toBlob((blob) => {
+                              if (!blob) {
+                                toast.error("Graph export failed", { detail: "The PNG encoder returned no image." });
+                                return;
+                              }
+                              const downloadUrl = URL.createObjectURL(blob);
+                              const a = document.createElement("a");
+                              a.href = downloadUrl;
+                              a.download = "lateral-movement-graph.png";
+                              a.click();
+                              setTimeout(() => URL.revokeObjectURL(downloadUrl), 0);
+                            }, "image/png");
+                          } catch (err) {
+                            toast.error("Graph export failed", { detail: err?.message || "Could not render the graph image." });
+                          } finally {
+                            URL.revokeObjectURL(url);
+                          }
+                        };
+                        img.onerror = () => {
                           URL.revokeObjectURL(url);
-                          canvas.toBlob((blob) => {
-                            const a = document.createElement("a");
-                            a.href = URL.createObjectURL(blob);
-                            a.download = "lateral-movement-graph.png";
-                            a.click();
-                            URL.revokeObjectURL(a.href);
-                          }, "image/png");
+                          toast.error("Graph export failed", { detail: "The graph SVG could not be loaded for PNG rendering." });
                         };
                         img.src = url;
                       }} style={tbtn} title="Export as PNG">
@@ -2894,7 +2727,6 @@ export default function LateralMovementModal() {
                         const payload = {
                           exportedAt: new Date().toISOString(),
                           stats: data.stats,
-                          triageState: _triageState(),
                           findings: data.findings || [],
                           edges: (data.edges || []).map((e) => ({ source: e.source, target: e.target, count: e.count, logonTypes: e.logonTypes, users: e.users, timeRange: e.timeRange })),
                           nodes: (data.nodes || []).map((n) => ({ host: n.id, eventCount: n.eventCount, isOutlier: n.isOutlier, isBoth: n.isBoth, isSource: n.isSource, isTarget: n.isTarget })),
@@ -2928,7 +2760,20 @@ export default function LateralMovementModal() {
                         );
                       })()}
                       <div style={{ flex: 1 }} />
-                      <span style={{ fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>{selectedNode || selectedEdge ? "Zoom locked \u00B7 Click background to deselect & unlock" : "Scroll to zoom \u00B7 Drag background to pan \u00B7 Drag nodes to reposition"}</span>
+                      <span style={{ display: "inline-flex", gap: 7, alignItems: "center", fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>
+                        <span>{graphHostCount} machine{graphHostCount === 1 ? "" : "s"}</span>
+                        {graphMode === "identities" && <span>{graphIdentityCount} user{graphIdentityCount === 1 ? "" : "s"}</span>}
+                        <span>
+                          {graphEligibleEdgeCount > graphEdges.length ? "top " : ""}
+                          {graphEdges.length}
+                          {graphEligibleEdgeCount > graphEdges.length ? ` of ${graphEligibleEdgeCount}` : ""}
+                          {" "}directed link{graphEdges.length === 1 ? "" : "s"}
+                        </span>
+                        {graphMode === "identities" && identityGraph.unattributedEdges.length > 0 && <span>{identityGraph.unattributedEdges.length} unattributed</span>}
+                        {graphEdges.some(edgeMixedOutcome) && <span style={{ color: th.sev.high }}>mixed outcomes</span>}
+                      </span>
+                      <div style={{ width: 1, height: 16, background: th.border + "44", margin: "0 4px" }} />
+                      <span style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>{selectedNode || selectedEdge ? "Zoom locked \u00B7 Click background to deselect & unlock" : "Scroll to zoom \u00B7 Drag background to pan \u00B7 Drag nodes to reposition"}</span>
                     </div>
 
                     <svg data-lm-graph="1" width="100%" height={480} viewBox={`${vb.x} ${vb.y} ${vb.w} ${vb.h}`}
@@ -2961,7 +2806,9 @@ export default function LateralMovementModal() {
                         if (!from || !to) return null;
                         const hl = isEdgeHL(e);
                         const op = selectedNode || selectedEdge ? (hl ? 0.9 : 0.1) : 0.6;
-                        const col = e.hasFailures ? (th.danger) : logonColor(e.logonTypes);
+                        const failureOnly = edgeFailureOnly(e);
+                        const mixedOutcome = edgeMixedOutcome(e);
+                        const col = failureOnly ? th.danger : e.graphKind === "identity-link" ? th.accent : _techColor(e.technique) || logonColor(e.logonTypes);
                         const dx = to.x - from.x, dy = to.y - from.y;
                         const dist = Math.sqrt(dx * dx + dy * dy) || 1;
                         const toR = nodeRadius((graphNodes.find((n) => n.id === e.target) || {}).eventCount || 1) + 2;
@@ -2969,20 +2816,34 @@ export default function LateralMovementModal() {
                         const ux = dx / dist, uy = dy / dist;
                         const x1 = from.x + ux * fromR, y1 = from.y + uy * fromR;
                         const x2 = to.x - ux * toR, y2 = to.y - uy * toR;
-                        const mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
-                        const ang = Math.atan2(dy, dx) * 180 / Math.PI;
-                        const perpX = -uy * 4, perpY = ux * 4;
+                        const reverse = graphEdgeKeys.has(`${e.target}->${e.source}`);
+                        const curve = reverse ? (String(e.source).localeCompare(String(e.target)) < 0 ? 24 : -24) : 0;
+                        const cx = (x1 + x2) / 2 - uy * curve;
+                        const cy = (y1 + y2) / 2 + ux * curve;
+                        const path = `M ${x1} ${y1} Q ${cx} ${cy} ${x2} ${y2}`;
+                        const mx = 0.25 * x1 + 0.5 * cx + 0.25 * x2;
+                        const my = 0.25 * y1 + 0.5 * cy + 0.25 * y2;
+                        const ang = Math.atan2(y2 - cy, x2 - cx) * 180 / Math.PI;
+                        const countLabelBase = e.count > 999 ? Math.round(e.count / 1000) + "k" : e.count;
+                        const countLabel = e.attributionApproximate ? `~${countLabelBase}` : countLabelBase;
+                        const edgeLabel = e.graphKind === "identity-link"
+                          ? `${e.phase === "source-to-identity" ? "uses account" : (e.technique && e.technique !== "Unknown" ? e.technique : "access")} \u00b7 ${countLabel}`
+                          : `${e.technique && e.technique !== "Unknown" ? `${e.technique} \u00b7 ` : ""}${countLabel}`;
+                        const showEdgeLabel = e.graphKind !== "identity-link"
+                          || (e.phase !== "source-to-identity" && (graphEdges.length <= 12 || hl));
+                        const edgeLabelW = Math.min(112, Math.max(28, edgeLabel.length * 5.2 + 12));
                         return (
                           <g key={`e-${i}`} style={{ cursor: "pointer" }} opacity={op}>
-                            <line x1={x1} y1={y1} x2={x2} y2={y2} stroke={col} strokeWidth={edgeWidth(e.count)} strokeDasharray={e.hasFailures ? "4,3" : "none"} />
-                            <line x1={x1} y1={y1} x2={x2} y2={y2} stroke="transparent" strokeWidth={12} onClick={(ev) => { ev.stopPropagation(); setModal((p) => ({ ...p, selectedEdge: e, selectedNode: null })); }} />
+                            <path d={path} fill="none" stroke={col} strokeWidth={edgeWidth(e.count)} strokeDasharray={failureOnly ? "5,4" : "none"} strokeLinecap="round" />
+                            {mixedOutcome && <path d={path} fill="none" stroke={th.danger} strokeWidth={1} strokeDasharray="3,5" strokeLinecap="round" opacity={0.85} />}
+                            <path d={path} fill="none" stroke="transparent" strokeWidth={14} onClick={(ev) => { ev.stopPropagation(); setModal((p) => ({ ...p, selectedEdge: e, selectedNode: null })); }} />
                             <polygon points="-5,-4 5,0 -5,4" transform={`translate(${x2},${y2}) rotate(${ang})`} fill={col} />
-                            <g transform={`translate(${mx + perpX}, ${my + perpY})`}>
-                              <rect x={-14} y={-7} width={28} height={14} rx={7} fill={th.panelBg} fillOpacity={0.9} stroke={col} strokeWidth={0.4} strokeOpacity={0.3} />
-                              <text textAnchor="middle" dy="3.5" fill={col} fontSize={7.5} fontWeight={600} fontFamily="-apple-system,sans-serif" fillOpacity={0.9}>
-                                {e.count > 999 ? Math.round(e.count / 1000) + "k" : e.count}
+                            {showEdgeLabel && <g transform={`translate(${mx}, ${my})`}>
+                              <rect x={-edgeLabelW / 2} y={-7} width={edgeLabelW} height={14} rx={7} fill={th.panelBg} fillOpacity={0.94} stroke={col} strokeWidth={0.5} strokeOpacity={0.45} />
+                              <text textAnchor="middle" dy="3.5" fill={col} fontSize={LM_TYPOGRAPHY.meta} fontWeight={600} fontFamily="-apple-system,sans-serif" fillOpacity={0.9}>
+                                {edgeLabel.length > 21 ? `${edgeLabel.slice(0, 20)}\u2026` : edgeLabel}
                               </text>
-                            </g>
+                            </g>}
                           </g>
                         );
                       })}
@@ -2995,18 +2856,35 @@ export default function LateralMovementModal() {
                         const dimmed = selectedNode && selectedNode !== n.id && !graphEdges.some((e) => (e.source === selectedNode && e.target === n.id) || (e.target === selectedNode && e.source === n.id));
                         const op = selectedNode ? (dimmed ? 0.12 : 1) : 1;
                         const col = nodeColor(n);
+                        const identityNode = n.nodeType === "identity";
                         const ip = isIP(n.id);
                         const dc = isDC(n.id);
                         const dangerCol = th.danger;
                         const gradId = col === dangerCol ? "lm-grad-red" : col === th.sev.clean ? "lm-grad-green" : col === th.sev.info ? "lm-grad-blue" : col === th.sev.custom ? "lm-grad-purple" : "lm-grad-accent";
-                        const labelText = n.label.length > 20 ? n.label.slice(0, 18) + "\u2026" : n.label;
+                        const fullLabel = String(n.label || n.id || "(unknown)");
+                        const labelText = fullLabel.length > 20 ? fullLabel.slice(0, 18) + "\u2026" : fullLabel;
                         const labelW = labelText.length * 5.5 + 12;
                         const isSel = selectedNode === n.id;
+                        const nodeLevel = Number(p.level) || 0;
+                        // Keep labels inside the directed flow: source labels open to
+                        // the right, terminal labels to the left, and all labels sit
+                        // above the edge centerline. This avoids the legend and the
+                        // dense under-node pile-up visible in the old force layout.
+                        const labelSide = maxGraphLevel > 0 && nodeLevel === maxGraphLevel ? -1 : 1;
+                        const labelX = labelSide < 0 ? p.x - r - 10 - labelW : p.x + r + 10;
+                        const labelY = p.y - r - 20;
                         return (
                           <g key={`n-${n.id}`} opacity={op} style={{ cursor: "grab" }}
                             onMouseDown={(ev) => onNodeDragStart(ev, n.id)} filter={isSel ? "url(#lm-glow)" : undefined}>
+                            <title>{identityNode ? `${fullLabel} | ${n.sourceHosts?.length || 0} source machines | ${n.targetHosts?.length || 0} target machines` : [fullLabel, ...(n.aliases || [])].filter(Boolean).join(" | ")}</title>
                             <circle cx={p.x} cy={p.y} r={r + 4} fill={col} fillOpacity={isSel ? 0.12 : 0.04} />
-                            {ip ? (
+                            {identityNode ? (
+                              <g>
+                                <circle cx={p.x} cy={p.y} r={r} fill={`url(#${gradId})`} stroke={col} strokeWidth={1.4} strokeDasharray={n.unresolved ? "3,2" : "none"} />
+                                <circle cx={p.x} cy={p.y - r * 0.27} r={r * 0.25} fill={col} fillOpacity={0.75} />
+                                <path d={`M ${p.x - r * 0.5} ${p.y + r * 0.5} Q ${p.x} ${p.y + r * 0.05} ${p.x + r * 0.5} ${p.y + r * 0.5}`} fill={col} fillOpacity={0.45} />
+                              </g>
+                            ) : ip ? (
                               <g>
                                 <circle cx={p.x} cy={p.y} r={r} fill={`url(#${gradId})`} stroke={col} strokeWidth={1.2} strokeDasharray="4,2.5" strokeOpacity={0.7} />
                                 <circle cx={p.x - r * 0.25} cy={p.y - r * 0.25} r={r * 0.15} fill={col} fillOpacity={0.15} />
@@ -3029,14 +2907,16 @@ export default function LateralMovementModal() {
                             {isSel && <circle cx={p.x} cy={p.y} r={r + 6} fill="none" stroke={th.accent} strokeWidth={1.5} strokeOpacity={0.5} strokeDasharray="4,3" />}
                             {n.isOutlier && <circle cx={p.x} cy={p.y} r={r + 4} fill="none" stroke={dangerCol} strokeWidth={1.2} strokeOpacity={0.6} strokeDasharray="3,2" style={{ animation: "tle-pulse 2s ease-in-out infinite" }}><title>{n.outlierReason}</title></circle>}
                             {isSusHost(n.id) && <g transform={`translate(${p.x + r - 2}, ${p.y - r - 2})`}><polygon points="0,-6 5.2,3 -5.2,3" fill={th.sev.high} stroke={th.modalBg} strokeWidth={1} /><text x={0} y={1.5} textAnchor="middle" fill={th.modalBg} fontSize={6} fontWeight={700}>!</text><title>Suspicious hostname pattern — possible threat actor workstation</title></g>}
-                            {ip ? (
+                            {identityNode ? (
+                              <text x={p.x} y={p.y + r * 0.88} textAnchor="middle" fill={col} fontSize={r * 0.38} fontWeight={700} fontFamily="-apple-system,sans-serif" fillOpacity={0.82}>{n.unresolved ? "?" : "USER"}</text>
+                            ) : ip ? (
                               <text x={p.x} y={p.y + 1} textAnchor="middle" dominantBaseline="middle" fill={col} fontSize={r * 0.6} fontWeight={600} fontFamily="-apple-system,sans-serif" fillOpacity={0.7}>IP</text>
                             ) : dc ? (
                               <text x={p.x} y={p.y + r * 0.7} textAnchor="middle" fill={col} fontSize={r * 0.5} fontWeight={600} fontFamily="-apple-system,sans-serif" fillOpacity={0.7}>DC</text>
                             ) : null}
-                            <g transform={`translate(${p.x}, ${p.y + r + 14})`}>
-                              <rect x={-labelW / 2} y={-8} width={labelW} height={15} rx={7} fill={th.panelBg} fillOpacity={0.85} stroke={col} strokeWidth={0.4} strokeOpacity={0.3} />
-                              <text textAnchor="middle" dy="3" fill={th.text} fontSize={8.5} fontWeight={500} fontFamily="-apple-system,sans-serif">{labelText}</text>
+                            <g transform={`translate(${labelX}, ${labelY})`}>
+                              <rect x={0} y={0} width={labelW} height={15} rx={7} fill={th.panelBg} fillOpacity={0.92} stroke={col} strokeWidth={0.5} strokeOpacity={0.4} />
+                              <text x={6} y={10.5} fill={th.text} fontSize={LM_TYPOGRAPHY.body} fontWeight={500} fontFamily="-apple-system,sans-serif">{labelText}</text>
                             </g>
                           </g>
                         );
@@ -3059,50 +2939,133 @@ export default function LateralMovementModal() {
                           const onUp = () => { document.body.style.cursor = ""; document.body.style.userSelect = ""; document.removeEventListener("mousemove", onMove); document.removeEventListener("mouseup", onUp); };
                           document.addEventListener("mousemove", onMove); document.addEventListener("mouseup", onUp);
                         }}>
-                        <rect x={-6} y={-6} width={155} height={180} rx={8} fill={th.panelBg} fillOpacity={0.88} stroke={th.border} strokeWidth={0.5} strokeOpacity={0.3} />
-                        <text x={0} y={6} fill={th.textMuted} fontSize={7.5} fontWeight={600} fontFamily="-apple-system,sans-serif" letterSpacing="0.08em" textTransform="uppercase">CONNECTIONS</text>
-                        {[
+                        <rect x={-6} y={-6} width={155} height={graphMode === "identities" ? 194 : 180} rx={8} fill={th.panelBg} fillOpacity={0.88} stroke={th.border} strokeWidth={0.5} strokeOpacity={0.3} />
+                        <text x={0} y={6} fill={th.textMuted} fontSize={LM_TYPOGRAPHY.meta} fontWeight={600} fontFamily="-apple-system,sans-serif" letterSpacing="0.08em" textTransform="uppercase">CONNECTIONS</text>
+                        {(graphMode === "identities" ? [
+                          { color: th.accent, label: "Machine uses account" },
+                          { color: th.accent, label: "Account accesses machine" },
+                          { color: th.danger, label: "Failure-only path", dashed: true },
+                        ] : [
                           { color: th.sev.info, label: "RDP (type 10/12)" },
                           { color: th.sev.clean, label: "Network (type 3)" },
                           { color: th.sev.med, label: "Interactive (type 2)" },
                           { color: th.sev.high, label: "RunAs (type 9)" },
                           { color: th.sev.low, label: "Service (type 5)" },
                           { color: th.sev.critical, label: "Cleartext (type 8)" },
-                          { color: th.danger, label: "Failed logon", dashed: true },
-                        ].map((item, i) => (
+                          { color: th.danger, label: "Failure-only connection", dashed: true },
+                        ]).map((item, i) => (
                           <g key={i} transform={`translate(4, ${i * 14 + 18})`}>
                             <line x1={0} y1={0} x2={14} y2={0} stroke={item.color} strokeWidth={2} strokeLinecap="round" strokeDasharray={item.dashed ? "3,2" : "none"} />
                             <circle cx={14} cy={0} r={1.5} fill={item.color} />
-                            <text x={20} y={3} fill={th.textMuted} fontSize={7} fontFamily="-apple-system,sans-serif">{item.label}</text>
+                            <text x={20} y={3} fill={th.textMuted} fontSize={LM_TYPOGRAPHY.meta} fontFamily="-apple-system,sans-serif">{item.label}</text>
                           </g>
                         ))}
                         <line x1={0} y1={118} x2={140} y2={118} stroke={th.border} strokeWidth={0.3} strokeOpacity={0.5} />
-                        <text x={0} y={130} fill={th.textMuted} fontSize={7.5} fontWeight={600} fontFamily="-apple-system,sans-serif" letterSpacing="0.08em">NODES</text>
+                        <text x={0} y={130} fill={th.textMuted} fontSize={LM_TYPOGRAPHY.meta} fontWeight={600} fontFamily="-apple-system,sans-serif" letterSpacing="0.08em">NODES</text>
                         <g transform="translate(4, 140)">
                           <circle cx={4} cy={0} r={3.5} fill="url(#lm-grad-green)" stroke={th.sev.clean} strokeWidth={0.8} strokeDasharray="2.5,1.5" />
-                          <text x={14} y={3} fill={th.textMuted} fontSize={7.5} fontFamily="-apple-system,sans-serif">IP</text>
+                          <text x={14} y={3} fill={th.textMuted} fontSize={LM_TYPOGRAPHY.meta} fontFamily="-apple-system,sans-serif">IP</text>
                         </g>
                         <g transform="translate(38, 140)">
                           <rect x={0} y={-4} width={8} height={8} rx={2} fill="url(#lm-grad-blue)" stroke={th.sev.info} strokeWidth={0.8} />
-                          <text x={14} y={3} fill={th.textMuted} fontSize={7.5} fontFamily="-apple-system,sans-serif">DC</text>
+                          <text x={14} y={3} fill={th.textMuted} fontSize={LM_TYPOGRAPHY.meta} fontFamily="-apple-system,sans-serif">DC</text>
                         </g>
                         <g transform="translate(68, 140)">
                           <rect x={0} y={-3} width={9} height={6} rx={2} fill="url(#lm-grad-purple)" stroke={th.sev.custom} strokeWidth={0.8} />
-                          <text x={15} y={3} fill={th.textMuted} fontSize={7.5} fontFamily="-apple-system,sans-serif">Host</text>
+                          <text x={15} y={3} fill={th.textMuted} fontSize={LM_TYPOGRAPHY.meta} fontFamily="-apple-system,sans-serif">Host</text>
                         </g>
                         <g transform="translate(4, 155)">
                           <rect x={0} y={-3} width={9} height={6} rx={2} fill="url(#lm-grad-red)" stroke={th.danger} strokeWidth={0.8} strokeDasharray="2,1.5" />
-                          <text x={15} y={3} fill={th.danger} fontSize={7.5} fontWeight={600} fontFamily="-apple-system,sans-serif">Outlier</text>
+                          <text x={15} y={3} fill={th.danger} fontSize={LM_TYPOGRAPHY.meta} fontWeight={600} fontFamily="-apple-system,sans-serif">Outlier</text>
                         </g>
                         <g transform="translate(68, 155)">
                           <polygon points="4,-5 8.2,2 -0.2,2" fill={th.sev.high} />
-                          <text x={14} y={3} fill={th.sev.high} fontSize={7.5} fontWeight={500} fontFamily="-apple-system,sans-serif">Sus Host</text>
+                          <text x={14} y={3} fill={th.sev.high} fontSize={LM_TYPOGRAPHY.meta} fontWeight={500} fontFamily="-apple-system,sans-serif">Sus Host</text>
                         </g>
+                        {graphMode === "identities" && (
+                          <g transform="translate(4, 171)">
+                            <circle cx={4} cy={0} r={4} fill="url(#lm-grad-accent)" stroke={th.accent} strokeWidth={0.9} />
+                            <circle cx={4} cy={-1.3} r={1.1} fill={th.accent} />
+                            <text x={14} y={3} fill={th.accent} fontSize={LM_TYPOGRAPHY.meta} fontWeight={600} fontFamily="-apple-system,sans-serif">User identity</text>
+                          </g>
+                        )}
                       </g>
                     </svg>
 
                     {/* Node detail panel */}
                     {selectedNode && (() => {
+                      const selectedGraphNode = graphNodes.find((node) => node.id === selectedNode);
+                      if (selectedGraphNode?.nodeType === "identity") {
+                        const identityEdges = selectedGraphNode.relatedHostEdges || [];
+                        const highRiskPaths = identityEdges.filter((edge) => (edge.riskScore || 0) >= 15);
+                        return (
+                          <div style={{ marginTop: 10, padding: 14, background: `linear-gradient(135deg, ${th.accent}08, ${th.panelBg}ee)`, borderRadius: 10, border: `1px solid ${th.accent}22`, backdropFilter: "blur(10px)", WebkitBackdropFilter: "blur(10px)" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+                              <span style={{ padding: "3px 10px", background: `${th.accent}18`, color: th.accent, borderRadius: 6, fontSize: LM_TYPOGRAPHY.control, fontWeight: 700, fontFamily: "-apple-system, sans-serif" }}>
+                                {selectedGraphNode.unresolved ? "Unresolved identity" : "User identity"}
+                              </span>
+                              <span style={{ fontWeight: 600, fontSize: LM_TYPOGRAPHY.heading, color: th.text, fontFamily: "-apple-system, sans-serif" }}>{selectedGraphNode.label}</span>
+                              {highRiskPaths.length > 0 && <span style={{ padding: "2px 6px", background: `${th.danger}14`, color: th.danger, borderRadius: 4, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700 }}>{highRiskPaths.length} HIGH-RISK PATH{highRiskPaths.length === 1 ? "" : "S"}</span>}
+                              {!selectedGraphNode.unresolved && modal.columns?.user && (
+                                <button onClick={() => {
+                                  up("columnFilters", { ...(ct.columnFilters || {}), [modal.columns.user]: selectedGraphNode.identity });
+                                  setModal(null);
+                                }} style={{ marginLeft: "auto", padding: "4px 12px", fontSize: LM_TYPOGRAPHY.control, background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 6, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 600 }}>
+                                  Filter user in timeline
+                                </button>
+                              )}
+                            </div>
+                            <div style={{ display: "grid", gridTemplateColumns: "260px minmax(0, 1fr)", gap: 20 }}>
+                              <div style={{ fontSize: LM_TYPOGRAPHY.control, color: th.textDim, fontFamily: "-apple-system, sans-serif", lineHeight: 1.55 }}>
+                                {[
+                                  ["Source machines", selectedGraphNode.sourceHosts?.length || 0],
+                                  ["Target machines", selectedGraphNode.targetHosts?.length || 0],
+                                  ["Associated activity", `${selectedGraphNode.attributionApproximate ? "~" : ""}${selectedGraphNode.eventCount || 0}`],
+                                  ["Highest path score", selectedGraphNode.riskScore || 0],
+                                  ["First observed", fmtTs(selectedGraphNode.firstSeen) || "\u2014"],
+                                  ["Last observed", fmtTs(selectedGraphNode.lastSeen) || "\u2014"],
+                                ].map(([label, value]) => (
+                                  <div key={label} style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: 8, padding: "2px 0" }}>
+                                    <span style={{ color: th.textMuted }}>{label}</span>
+                                    <span style={{ color: th.text, overflowWrap: "anywhere" }}>{value}</span>
+                                  </div>
+                                ))}
+                                {(selectedGraphNode.techniques || []).length > 0 && (
+                                  <div style={{ marginTop: 8 }}>
+                                    <div style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.badge, textTransform: "uppercase", fontWeight: 700, marginBottom: 4 }}>Observed techniques</div>
+                                    <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+                                      {selectedGraphNode.techniques.map((technique) => (
+                                        <span key={technique} style={{ padding: "2px 6px", borderRadius: 3, background: `${th.textMuted}10`, border: `1px solid ${th.border}44`, color: th.textDim, fontSize: LM_TYPOGRAPHY.badge }}>{technique}</span>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )}
+                                <div style={{ marginTop: 10 }}><EvidenceActions item={selectedGraphNode} /></div>
+                              </div>
+                              <div style={{ minWidth: 0 }}>
+                                <div style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.badge, textTransform: "uppercase", fontWeight: 700, marginBottom: 5 }}>Machine paths ({identityEdges.length})</div>
+                                <div style={{ maxHeight: 170, overflowY: "auto", border: `1px solid ${th.border}33`, borderRadius: 6 }}>
+                                  {identityEdges.length === 0 ? (
+                                    <div style={{ padding: 10, color: th.textMuted, fontSize: LM_TYPOGRAPHY.control }}>No attributed machine path is available.</div>
+                                  ) : identityEdges
+                                    .slice()
+                                    .sort((a, b) => (b.riskScore || 0) - (a.riskScore || 0) || String(a.firstSeen || "").localeCompare(String(b.firstSeen || "")))
+                                    .map((edge, index) => (
+                                      <div key={`${edge.source}-${edge.target}-${index}`} onClick={(event) => _viewInGraph(edge, event)}
+                                        style={{ display: "grid", gridTemplateColumns: "minmax(190px, 1fr) 110px 70px", gap: 8, alignItems: "center", padding: "6px 8px", borderBottom: index < identityEdges.length - 1 ? `1px solid ${th.border}22` : "none", cursor: "pointer", fontSize: LM_TYPOGRAPHY.control, fontFamily: "-apple-system, sans-serif" }}
+                                        onMouseEnter={(event) => { event.currentTarget.style.background = `${th.accent}08`; }}
+                                        onMouseLeave={(event) => { event.currentTarget.style.background = "transparent"; }}>
+                                        <span style={{ color: th.text, fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{edge.source} {"\u2192"} {edge.target}</span>
+                                        <span style={{ color: th.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{edge.technique || "Network Logon"}</span>
+                                        <span style={{ color: (edge.riskScore || 0) >= 15 ? th.danger : th.textMuted, fontFamily: "monospace", textAlign: "right" }}>score {edge.riskScore || 0}</span>
+                                      </div>
+                                    ))}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      }
                       const node = data.nodes.find((n) => n.id === selectedNode);
                       const inbound = data.edges.filter((e) => e.target === selectedNode);
                       const outbound = data.edges.filter((e) => e.source === selectedNode);
@@ -3149,23 +3112,23 @@ export default function LateralMovementModal() {
                         const tc = _techColor(e.technique);
                         const flags = (e.flags || []).filter(f => !f.includes("dampened"));
                         return (
-                          <div key={`${dir}-${e.source}-${e.target}`} onClick={() => setModal((p) => ({ ...p, selectedNode: null, selectedEdge: e }))} style={{ display: "flex", alignItems: "center", gap: 5, padding: "3px 0", fontSize: 9, fontFamily: "monospace", color: th.textDim, borderBottom: `1px solid ${th.border}15`, cursor: "pointer" }}
+                          <div key={`${dir}-${e.source}-${e.target}`} onClick={() => setModal((p) => ({ ...p, selectedNode: null, selectedEdge: e }))} style={{ display: "flex", alignItems: "center", gap: 5, padding: "3px 0", fontSize: LM_TYPOGRAPHY.meta, fontFamily: "monospace", color: th.textDim, borderBottom: `1px solid ${th.border}15`, cursor: "pointer" }}
                             onMouseEnter={(ev) => ev.currentTarget.style.background = `${th.accent}08`} onMouseLeave={(ev) => ev.currentTarget.style.background = "transparent"}>
-                            <span style={{ padding: "1px 4px", background: dir === "in" ? th.sev.info + "22" : th.sev.clean + "22", color: dir === "in" ? th.sev.info : th.sev.clean, borderRadius: 2, fontSize: 7, fontWeight: 700, minWidth: 20, textAlign: "center" }}>{dir === "in" ? "IN" : "OUT"}</span>
-                            <span style={{ color: th.text, fontWeight: 600, minWidth: 80, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 120 }}>{peer}{isSusHost(peer) && <span style={{ color: th.sev.high, marginLeft: 2, fontSize: 7 }}>{"\u26a0"}</span>}</span>
-                            {sc > 0 && <span style={{ fontWeight: 700, color: sc >= 30 ? th.sev.critical : sc >= 15 ? th.sev.high : th.textMuted, fontFamily: "monospace", fontSize: 9, minWidth: 18, textAlign: "right" }}>{sc}</span>}
-                            {e.technique && e.technique !== "Unknown" && <span style={{ padding: "0 4px", background: tc + "18", color: tc, borderRadius: 2, fontSize: 7, fontWeight: 600 }}>{e.technique}</span>}
-                            <span style={{ color: th.textMuted, fontSize: 8 }}>{e.users.slice(0, 2).join(", ")}{e.users.length > 2 ? ` +${e.users.length - 2}` : ""}</span>
-                            {flags.length > 0 && <span style={{ color: th.textMuted, fontSize: 7 }}>({flags.length} flag{flags.length !== 1 ? "s" : ""})</span>}
+                            <span style={{ padding: "1px 4px", background: dir === "in" ? th.sev.info + "22" : th.sev.clean + "22", color: dir === "in" ? th.sev.info : th.sev.clean, borderRadius: 2, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700, minWidth: 20, textAlign: "center" }}>{dir === "in" ? "IN" : "OUT"}</span>
+                            <span style={{ color: th.text, fontWeight: 600, minWidth: 80, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 120 }}>{peer}{isSusHost(peer) && <span style={{ color: th.sev.high, marginLeft: 2, fontSize: LM_TYPOGRAPHY.badge }}>{"\u26a0"}</span>}</span>
+                            {sc > 0 && <span style={{ fontWeight: 700, color: sc >= 30 ? th.sev.critical : sc >= 15 ? th.sev.high : th.textMuted, fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.meta, minWidth: 18, textAlign: "right" }}>{sc}</span>}
+                            {e.technique && e.technique !== "Unknown" && <span style={{ padding: "0 4px", background: tc + "18", color: tc, borderRadius: 2, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 600 }}>{e.technique}</span>}
+                            <span style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.badge }}>{e.users.slice(0, 2).join(", ")}{e.users.length > 2 ? ` +${e.users.length - 2}` : ""}</span>
+                            {flags.length > 0 && <span style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.badge }}>({flags.length} flag{flags.length !== 1 ? "s" : ""})</span>}
                           </div>
                         );
                       };
                       return (
                         <div style={{ marginTop: 10, padding: 14, background: `linear-gradient(135deg, ${nc}08, ${th.panelBg}ee)`, borderRadius: 10, border: `1px solid ${nc}22`, backdropFilter: "blur(10px)", WebkitBackdropFilter: "blur(10px)" }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-                            <span style={{ padding: "3px 10px", background: `linear-gradient(135deg, ${nc}33, ${nc}15)`, color: nc, borderRadius: 6, fontSize: 10, fontWeight: 600, fontFamily: "-apple-system, sans-serif", letterSpacing: "0.03em" }}>{role}</span>
-                            <span style={{ fontWeight: 600, fontSize: 13, color: th.text, fontFamily: "-apple-system, sans-serif", letterSpacing: "-0.2px" }}>{selectedNode}</span>
-                            {node?.isOutlier && <span style={{ padding: "2px 6px", background: th.sev.critical + "18", color: th.sev.critical, borderRadius: 4, fontSize: 8, fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>OUTLIER: {node.outlierReason}</span>}
+                            <span style={{ padding: "3px 10px", background: `linear-gradient(135deg, ${nc}33, ${nc}15)`, color: nc, borderRadius: 6, fontSize: LM_TYPOGRAPHY.control, fontWeight: 600, fontFamily: "-apple-system, sans-serif", letterSpacing: "0.03em" }}>{role}</span>
+                            <span style={{ fontWeight: 600, fontSize: LM_TYPOGRAPHY.heading, color: th.text, fontFamily: "-apple-system, sans-serif", letterSpacing: "-0.2px" }}>{selectedNode}</span>
+                            {node?.isOutlier && <span style={{ padding: "2px 6px", background: th.sev.critical + "18", color: th.sev.critical, borderRadius: 4, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>OUTLIER: {node.outlierReason}</span>}
                             <button onClick={() => {
                               const modalCols = modal.columns || {};
                               const srcCol = modalCols.source || modalCols.workstation;
@@ -3177,15 +3140,15 @@ export default function LateralMovementModal() {
                                 up("columnFilters", cf);
                               }
                               setModal(null);
-                            }} style={{ marginLeft: "auto", padding: "4px 12px", fontSize: 10, background: `linear-gradient(135deg, ${th.accent}33, ${th.accent}18)`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 6, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 600, transition: "all var(--m-base)" }}
+                            }} style={{ marginLeft: "auto", padding: "4px 12px", fontSize: LM_TYPOGRAPHY.control, background: `linear-gradient(135deg, ${th.accent}33, ${th.accent}18)`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 6, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 600, transition: "all var(--m-base)" }}
                               onMouseEnter={(ev) => { ev.currentTarget.style.background = th.accent + "44"; ev.currentTarget.style.boxShadow = `0 2px 8px ${th.accent}22`; }}
                               onMouseLeave={(ev) => { ev.currentTarget.style.background = `linear-gradient(135deg, ${th.accent}33, ${th.accent}18)`; ev.currentTarget.style.boxShadow = "none"; }}>
                               Filter Grid
                             </button>
                           </div>
                           <div style={{ display: "flex", gap: 18 }}>
-                            <div style={{ width: 240, flexShrink: 0, fontSize: 9, fontFamily: "-apple-system, sans-serif", color: th.textDim }}>
-                              <div style={{ fontSize: 8, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, marginBottom: 5 }}>Host Summary</div>
+                            <div style={{ width: 240, flexShrink: 0, fontSize: LM_TYPOGRAPHY.meta, fontFamily: "-apple-system, sans-serif", color: th.textDim }}>
+                              <div style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, marginBottom: 5 }}>Host Summary</div>
                               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "3px 12px", marginBottom: 8 }}>
                                 <div style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 5, height: 5, borderRadius: 3, background: th.sev.clean, display: "inline-block" }} /><span>{outbound.length} outbound</span></div>
                                 <div style={{ display: "flex", alignItems: "center", gap: 4 }}><span style={{ width: 5, height: 5, borderRadius: 3, background: th.sev.info, display: "inline-block" }} /><span>{inbound.length} inbound</span></div>
@@ -3198,10 +3161,10 @@ export default function LateralMovementModal() {
                               </div>
                               {Object.keys(techCounts).length > 0 && (
                                 <div style={{ marginBottom: 8 }}>
-                                  <div style={{ fontSize: 8, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, marginBottom: 4 }}>Techniques Observed</div>
+                                  <div style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, marginBottom: 4 }}>Techniques Observed</div>
                                   <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
                                     {Object.entries(techCounts).sort((a, b) => b[1] - a[1]).map(([tech, cnt]) => (
-                                      <span key={tech} style={{ padding: "1px 5px", background: _techColor(tech) + "15", color: _techColor(tech), borderRadius: 3, fontSize: 8, fontWeight: 600 }}>{tech} {cnt}</span>
+                                      <span key={tech} style={{ padding: "1px 5px", background: _techColor(tech) + "15", color: _techColor(tech), borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 600 }}>{tech} {cnt}</span>
                                     ))}
                                   </div>
                                 </div>
@@ -3215,12 +3178,12 @@ export default function LateralMovementModal() {
                                 return (
                                   <div style={{ marginBottom: 8 }}>
                                     <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
-                                      <div style={{ fontSize: 8, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600 }}>Telemetry Coverage</div>
+                                      <div style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600 }}>Telemetry Coverage</div>
                                       <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
                                         <div style={{ width: 36, height: 4, borderRadius: 2, background: th.border + "44", overflow: "hidden" }}>
                                           <div style={{ width: `${tel.score}%`, height: "100%", background: lvlColor, borderRadius: 2 }} />
                                         </div>
-                                        <span style={{ fontSize: 8, color: lvlColor, fontWeight: 700 }}>{lvlLabel} {tel.score}%</span>
+                                        <span style={{ fontSize: LM_TYPOGRAPHY.badge, color: lvlColor, fontWeight: 700 }}>{lvlLabel} {tel.score}%</span>
                                       </div>
                                     </div>
                                     <div style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
@@ -3228,7 +3191,7 @@ export default function LateralMovementModal() {
                                         const color = c.present ? th.sev.clean : (c.critical ? th.sev.critical : th.textMuted);
                                         return (
                                           <span key={id} title={c.present ? `${c.label}: ${c.count.toLocaleString()} events` : `${c.label}: missing${c.critical ? " (critical)" : ""}`}
-                                            style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "1px 5px", background: color + (c.present ? "18" : "10"), color, borderRadius: 3, fontSize: 8, fontWeight: 600, opacity: c.present ? 1 : 0.6, border: `1px solid ${color}${c.present ? "33" : "22"}` }}>
+                                            style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "1px 5px", background: color + (c.present ? "18" : "10"), color, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 600, opacity: c.present ? 1 : 0.6, border: `1px solid ${color}${c.present ? "33" : "22"}` }}>
                                             <span style={{ width: 4, height: 4, borderRadius: 2, background: color }} />
                                             {c.label}{c.present ? ` ${c.count > 999 ? Math.round(c.count / 1000) + "k" : c.count}` : ""}
                                           </span>
@@ -3236,7 +3199,7 @@ export default function LateralMovementModal() {
                                       })}
                                     </div>
                                     {(tel.weakCategories || []).length > 0 && (
-                                      <div style={{ fontSize: 8, color: th.sev.critical, marginTop: 4, fontStyle: "italic" }}>
+                                      <div style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.sev.critical, marginTop: 4, fontStyle: "italic" }}>
                                         Missing critical telemetry: {tel.weakCategories.join(", ")}
                                       </div>
                                     )}
@@ -3245,49 +3208,49 @@ export default function LateralMovementModal() {
                               })()}
                               {narrative.length > 0 && (
                                 <div>
-                                  <div style={{ fontSize: 8, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, marginBottom: 4 }}>Why It Matters</div>
+                                  <div style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, marginBottom: 4 }}>Why It Matters</div>
                                   {narrative.map((n, ni) => (
-                                    <div key={ni} style={{ fontSize: 9, color: th.textDim, marginBottom: 2, lineHeight: 1.4, paddingLeft: 8, borderLeft: `2px solid ${th.accent}22` }}>{n}</div>
+                                    <div key={ni} style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textDim, marginBottom: 2, lineHeight: 1.4, paddingLeft: 8, borderLeft: `2px solid ${th.accent}22` }}>{n}</div>
                                   ))}
                                 </div>
                               )}
                             </div>
-                            <div style={{ flex: 1, minWidth: 0, fontSize: 9, fontFamily: "-apple-system, sans-serif" }}>
+                            <div style={{ flex: 1, minWidth: 0, fontSize: LM_TYPOGRAPHY.meta, fontFamily: "-apple-system, sans-serif" }}>
                               {outHigh.length > 0 && (
                                 <div style={{ marginBottom: 6 }}>
-                                  <div style={{ fontSize: 8, color: th.sev.clean, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, marginBottom: 3 }}>Most Suspicious Outbound ({outHigh.length})</div>
+                                  <div style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.sev.clean, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, marginBottom: 3 }}>Most Suspicious Outbound ({outHigh.length})</div>
                                   <div style={{ maxHeight: 80, overflowY: "auto" }}>
                                     {outHigh.slice(0, 5).map(e => edgeCard(e, "out"))}
-                                    {outHigh.length > 5 && <div style={{ fontSize: 8, color: th.textMuted, padding: "2px 0" }}>+{outHigh.length - 5} more</div>}
+                                    {outHigh.length > 5 && <div style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, padding: "2px 0" }}>+{outHigh.length - 5} more</div>}
                                   </div>
                                 </div>
                               )}
                               {inHigh.length > 0 && (
                                 <div style={{ marginBottom: 6 }}>
-                                  <div style={{ fontSize: 8, color: th.sev.info, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, marginBottom: 3 }}>Most Suspicious Inbound ({inHigh.length})</div>
+                                  <div style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.sev.info, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600, marginBottom: 3 }}>Most Suspicious Inbound ({inHigh.length})</div>
                                   <div style={{ maxHeight: 80, overflowY: "auto" }}>
                                     {inHigh.slice(0, 5).map(e => edgeCard(e, "in"))}
-                                    {inHigh.length > 5 && <div style={{ fontSize: 8, color: th.textMuted, padding: "2px 0" }}>+{inHigh.length - 5} more</div>}
+                                    {inHigh.length > 5 && <div style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, padding: "2px 0" }}>+{inHigh.length - 5} more</div>}
                                   </div>
                                 </div>
                               )}
                               {lowConf.length > 0 && (
                                 <details style={{ marginTop: 2 }}>
-                                  <summary style={{ fontSize: 8, color: th.textMuted, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 }}>Low-confidence / unresolved peers ({lowConf.length})</summary>
+                                  <summary style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 }}>Low-confidence / unresolved peers ({lowConf.length})</summary>
                                   <div style={{ maxHeight: 60, overflowY: "auto", marginTop: 3 }}>
                                     {lowConf.map((e, i) => (
-                                      <div key={i} style={{ fontSize: 9, padding: "2px 0", color: th.textMuted, fontFamily: "monospace", display: "flex", gap: 5, alignItems: "center" }}>
-                                        <span style={{ padding: "0 3px", background: e.dir === "in" ? th.sev.info + "15" : th.sev.clean + "15", color: e.dir === "in" ? th.sev.info : th.sev.clean, borderRadius: 2, fontSize: 7 }}>{e.dir === "in" ? "IN" : "OUT"}</span>
+                                      <div key={i} style={{ fontSize: LM_TYPOGRAPHY.meta, padding: "2px 0", color: th.textMuted, fontFamily: "monospace", display: "flex", gap: 5, alignItems: "center" }}>
+                                        <span style={{ padding: "0 3px", background: e.dir === "in" ? th.sev.info + "15" : th.sev.clean + "15", color: e.dir === "in" ? th.sev.info : th.sev.clean, borderRadius: 2, fontSize: LM_TYPOGRAPHY.badge }}>{e.dir === "in" ? "IN" : "OUT"}</span>
                                         <span>{e.dir === "in" ? e.source : e.target}</span>
                                         <span>{e.count}x</span>
-                                        {e.technique && e.technique !== "Unknown" && <span style={{ fontSize: 7, color: _techColor(e.technique) }}>{e.technique}</span>}
+                                        {e.technique && e.technique !== "Unknown" && <span style={{ fontSize: LM_TYPOGRAPHY.badge, color: _techColor(e.technique) }}>{e.technique}</span>}
                                       </div>
                                     ))}
                                   </div>
                                 </details>
                               )}
                               {outHigh.length === 0 && inHigh.length === 0 && lowConf.length === 0 && (
-                                <div style={{ color: th.textMuted, fontSize: 10 }}>No edges found for this node</div>
+                                <div style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.control }}>No edges found for this node</div>
                               )}
                             </div>
                           </div>
@@ -3297,7 +3260,54 @@ export default function LateralMovementModal() {
 
                     {/* Edge detail panel */}
                     {selectedEdge && (() => {
-                      const ec = selectedEdge.hasFailures ? (th.danger) : logonColor(selectedEdge.logonTypes);
+                      if (selectedEdge.graphKind === "identity-link") {
+                        const relatedPaths = selectedEdge.relatedHostEdges || [];
+                        return (
+                          <div style={{ marginTop: 10, padding: 14, background: `linear-gradient(135deg, ${th.accent}08, ${th.panelBg}ee)`, borderRadius: 10, border: `1px solid ${th.accent}22`, backdropFilter: "blur(10px)", WebkitBackdropFilter: "blur(10px)" }}>
+                            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                              <span style={{ padding: "3px 9px", background: `${th.accent}18`, color: th.accent, borderRadius: 5, fontSize: LM_TYPOGRAPHY.control, fontWeight: 700 }}>Identity-linked path</span>
+                              <span style={{ color: th.text, fontSize: LM_TYPOGRAPHY.title, fontWeight: 600, fontFamily: "monospace" }}>
+                                {selectedEdge.hostSource || relatedPaths[0]?.source || "(source)"} {"\u2192"} {selectedEdge.identity || "(identity unavailable)"} {"\u2192"} {selectedEdge.hostTarget || relatedPaths[0]?.target || "(target)"}
+                              </span>
+                              {(selectedEdge.riskScore || 0) >= 15 && <span style={{ padding: "2px 6px", background: `${th.danger}14`, color: th.danger, borderRadius: 4, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700 }}>SCORE {selectedEdge.riskScore}</span>}
+                            </div>
+                            <div style={{ display: "grid", gridTemplateColumns: "260px minmax(0, 1fr)", gap: 20 }}>
+                              <div style={{ fontSize: LM_TYPOGRAPHY.control, fontFamily: "-apple-system, sans-serif", color: th.textDim, lineHeight: 1.55 }}>
+                                {[
+                                  ["Account", selectedEdge.identity || "(not available)"],
+                                  ["Direction", selectedEdge.phase === "source-to-identity" ? "Machine used account" : "Account accessed machine"],
+                                  ["Associated activity", `${selectedEdge.attributionApproximate ? "~" : ""}${selectedEdge.count || 0}`],
+                                  ["Technique", selectedEdge.technique || "Network Logon"],
+                                  ["First observed", fmtTs(selectedEdge.firstSeen) || "\u2014"],
+                                  ["Last observed", fmtTs(selectedEdge.lastSeen) || "\u2014"],
+                                ].map(([label, value]) => (
+                                  <div key={label} style={{ display: "grid", gridTemplateColumns: "120px minmax(0, 1fr)", gap: 8, padding: "2px 0" }}>
+                                    <span style={{ color: th.textMuted }}>{label}</span>
+                                    <span style={{ color: th.text, overflowWrap: "anywhere" }}>{value}</span>
+                                  </div>
+                                ))}
+                                <div style={{ marginTop: 10 }}><EvidenceActions item={selectedEdge} /></div>
+                              </div>
+                              <div style={{ minWidth: 0 }}>
+                                <div style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.badge, textTransform: "uppercase", fontWeight: 700, marginBottom: 5 }}>Underlying machine paths ({relatedPaths.length})</div>
+                                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                                  {relatedPaths.slice(0, 8).map((edge, index) => (
+                                    <button key={`${edge.source}-${edge.target}-${index}`} onClick={(event) => _viewInGraph(edge, event)}
+                                      style={{ width: "100%", display: "grid", gridTemplateColumns: "minmax(190px, 1fr) 120px 65px", gap: 8, alignItems: "center", padding: "5px 8px", borderRadius: 5, border: `1px solid ${th.border}33`, background: `${th.textMuted}08`, color: th.textDim, cursor: "pointer", textAlign: "left", fontSize: LM_TYPOGRAPHY.control, fontFamily: "-apple-system, sans-serif" }}>
+                                      <span style={{ color: th.text, fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{edge.source} {"\u2192"} {edge.target}</span>
+                                      <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{edge.technique || "Network Logon"}</span>
+                                      <span style={{ color: (edge.riskScore || 0) >= 15 ? th.danger : th.textMuted, fontFamily: "monospace", textAlign: "right" }}>score {edge.riskScore || 0}</span>
+                                    </button>
+                                  ))}
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      }
+                      const failureOnly = edgeFailureOnly(selectedEdge);
+                      const mixedOutcome = edgeMixedOutcome(selectedEdge);
+                      const ec = failureOnly ? th.danger : _techColor(selectedEdge.technique) || logonColor(selectedEdge.logonTypes);
                       const _edgeFindings = (data.findings || []).filter(f => {
                         const ft = (f.target || "").split(", "), fs = (f.source || "").split(", ");
                         return ft.includes(selectedEdge.target) && (fs.includes(selectedEdge.source) || !f.source);
@@ -3306,30 +3316,31 @@ export default function LateralMovementModal() {
                         for (let ci = 0; ci < c.path.length - 1; ci++) { if (c.path[ci] === selectedEdge.source && c.path[ci + 1] === selectedEdge.target) return true; }
                         return false;
                       });
-                      const _lbl = { fontSize: 8, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600 };
+                      const _lbl = { fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontWeight: 600 };
                       return (
                         <div style={{ marginTop: 10, padding: 14, background: `linear-gradient(135deg, ${ec}06, ${th.panelBg}ee)`, borderRadius: 10, border: `1px solid ${ec}22`, backdropFilter: "blur(10px)", WebkitBackdropFilter: "blur(10px)" }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-                            <span style={{ fontWeight: 600, fontSize: 12, color: th.text, fontFamily: "-apple-system, sans-serif", display: "flex", alignItems: "center", gap: 6 }}>
-                              <span style={{ padding: "2px 8px", background: isSusHost(selectedEdge.source) ? th.sev.high + "18" : th.sev.clean + "18", color: isSusHost(selectedEdge.source) ? th.sev.high : th.sev.clean, borderRadius: 6, fontSize: 10 }}>{selectedEdge.source}{isSusHost(selectedEdge.source) && " \u26a0"}</span>
+                            <span style={{ fontWeight: 600, fontSize: LM_TYPOGRAPHY.title, color: th.text, fontFamily: "-apple-system, sans-serif", display: "flex", alignItems: "center", gap: 6 }}>
+                              <span style={{ padding: "2px 8px", background: isSusHost(selectedEdge.source) ? th.sev.high + "18" : th.sev.clean + "18", color: isSusHost(selectedEdge.source) ? th.sev.high : th.sev.clean, borderRadius: 6, fontSize: LM_TYPOGRAPHY.control }}>{selectedEdge.source}{isSusHost(selectedEdge.source) && " \u26a0"}</span>
                               <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke={ec} strokeWidth="2" strokeLinecap="round"><line x1="5" y1="12" x2="19" y2="12"/><polyline points="12 5 19 12 12 19"/></svg>
-                              <span style={{ padding: "2px 8px", background: isSusHost(selectedEdge.target) ? th.sev.high + "18" : th.sev.info + "18", color: isSusHost(selectedEdge.target) ? th.sev.high : th.sev.info, borderRadius: 6, fontSize: 10 }}>{selectedEdge.target}{isSusHost(selectedEdge.target) && " \u26a0"}</span>
+                              <span style={{ padding: "2px 8px", background: isSusHost(selectedEdge.target) ? th.sev.high + "18" : th.sev.info + "18", color: isSusHost(selectedEdge.target) ? th.sev.high : th.sev.info, borderRadius: 6, fontSize: LM_TYPOGRAPHY.control }}>{selectedEdge.target}{isSusHost(selectedEdge.target) && " \u26a0"}</span>
                             </span>
-                            {selectedEdge.hasFailures && <span style={{ padding: "2px 8px", background: (th.danger) + "18", color: th.danger, borderRadius: 6, fontSize: 9, fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>FAILED</span>}
-                            {selectedEdge.technique && <span style={{ padding: "2px 8px", background: _techColor(selectedEdge.technique) + "18", color: _techColor(selectedEdge.technique), borderRadius: 6, fontSize: 9, fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>{selectedEdge.technique}</span>}
-                            {(selectedEdge.otherTechniques || []).length > 0 && <span style={{ padding: "2px 6px", background: `${th.textMuted}12`, color: th.textMuted, borderRadius: 6, fontSize: 8, fontFamily: "-apple-system, sans-serif" }}>+{selectedEdge.otherTechniques.join(", ")}</span>}
-                            {(selectedEdge.riskScore || 0) > 0 && <span style={{ padding: "2px 8px", background: (selectedEdge.riskScore >= 30 ? th.sev.critical : selectedEdge.riskScore >= 15 ? th.sev.high : th.textMuted) + "18", color: selectedEdge.riskScore >= 30 ? th.sev.critical : selectedEdge.riskScore >= 15 ? th.sev.high : th.textMuted, borderRadius: 6, fontSize: 9, fontWeight: 700, fontFamily: "monospace" }}>Score {selectedEdge.riskScore}</span>}
-                            {selectedEdge.isFirstSeen && <span style={{ padding: "2px 6px", background: th.sev.custom + "18", color: th.sev.custom, borderRadius: 6, fontSize: 8, fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>FIRST SEEN</span>}
+                            {failureOnly && <span style={{ padding: "2px 8px", background: (th.danger) + "18", color: th.danger, borderRadius: 6, fontSize: LM_TYPOGRAPHY.meta, fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>FAILURE ONLY</span>}
+                            {mixedOutcome && <span style={{ padding: "2px 8px", background: th.sev.high + "18", color: th.sev.high, borderRadius: 6, fontSize: LM_TYPOGRAPHY.meta, fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>MIXED · {edgeFailureCount(selectedEdge)} FAILED</span>}
+                            {selectedEdge.technique && <span style={{ padding: "2px 8px", background: _techColor(selectedEdge.technique) + "18", color: _techColor(selectedEdge.technique), borderRadius: 6, fontSize: LM_TYPOGRAPHY.meta, fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>{selectedEdge.technique}</span>}
+                            {(selectedEdge.otherTechniques || []).length > 0 && <span style={{ padding: "2px 6px", background: `${th.textMuted}12`, color: th.textMuted, borderRadius: 6, fontSize: LM_TYPOGRAPHY.badge, fontFamily: "-apple-system, sans-serif" }}>+{selectedEdge.otherTechniques.join(", ")}</span>}
+                            {(selectedEdge.riskScore || 0) > 0 && <span style={{ padding: "2px 8px", background: (selectedEdge.riskScore >= 30 ? th.sev.critical : selectedEdge.riskScore >= 15 ? th.sev.high : th.textMuted) + "18", color: selectedEdge.riskScore >= 30 ? th.sev.critical : selectedEdge.riskScore >= 15 ? th.sev.high : th.textMuted, borderRadius: 6, fontSize: LM_TYPOGRAPHY.meta, fontWeight: 700, fontFamily: "monospace" }}>Score {selectedEdge.riskScore}</span>}
+                            {selectedEdge.isFirstSeen && <span style={{ padding: "2px 6px", background: th.sev.custom + "18", color: th.sev.custom, borderRadius: 6, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>FIRST SEEN</span>}
                           </div>
                           <div style={{ display: "flex", gap: 18 }}>
-                            <div style={{ width: 260, flexShrink: 0, fontSize: 9, fontFamily: "-apple-system, sans-serif", color: th.textDim, overflow: "hidden" }}>
+                            <div style={{ width: 260, flexShrink: 0, fontSize: LM_TYPOGRAPHY.meta, fontFamily: "-apple-system, sans-serif", color: th.textDim, overflow: "hidden" }}>
                               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 10px", marginBottom: 8 }}>
-                                <div><span style={_lbl}>Events</span><div style={{ fontWeight: 700, color: th.text, fontSize: 14, marginTop: 1 }}>{selectedEdge.count}{selectedEdge.shareAccessCount > 0 ? <span style={{ fontSize: 9, fontWeight: 400, color: th.textMuted }}> +{selectedEdge.shareAccessCount} share</span> : ""}</div></div>
+                                <div><span style={_lbl}>Events</span><div style={{ fontWeight: 700, color: th.text, fontSize: LM_TYPOGRAPHY.metric, marginTop: 1 }}>{selectedEdge.count}{selectedEdge.shareAccessCount > 0 ? <span style={{ fontSize: LM_TYPOGRAPHY.meta, fontWeight: 400, color: th.textMuted }}> +{selectedEdge.shareAccessCount} share</span> : ""}</div></div>
                                 <div><span style={_lbl}>Users ({selectedEdge.users.length})</span><div style={{ marginTop: 2, color: th.text, maxHeight: 54, overflow: "auto", wordBreak: "break-word", lineHeight: 1.5 }}>{selectedEdge.users.slice(0, 8).join(", ")}{selectedEdge.users.length > 8 ? `, +${selectedEdge.users.length - 8} more` : ""}</div></div>
-                                <div><span style={_lbl}>Logon Type</span><div style={{ color: logonColor(selectedEdge.logonTypes), marginTop: 2 }}>{logonLabel(selectedEdge.logonTypes)} ({selectedEdge.logonTypes.join(",")}){selectedEdge.logonTypes.includes("8") && <span style={{ marginLeft: 3, padding: "0 3px", background: th.sev.critical + "22", color: th.sev.critical, borderRadius: 2, fontSize: 7, fontWeight: 700 }}>CLEARTEXT</span>}</div></div>
+                                <div><span style={_lbl}>Logon Type</span><div style={{ color: logonColor(selectedEdge.logonTypes), marginTop: 2 }}>{logonLabel(selectedEdge.logonTypes)} ({selectedEdge.logonTypes.join(",")}){selectedEdge.logonTypes.includes("8") && <span style={{ marginLeft: 3, padding: "0 3px", background: th.sev.critical + "22", color: th.sev.critical, borderRadius: 2, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700 }}>CLEARTEXT</span>}</div></div>
                                 {selectedEdge.sourceLabel && <div><span style={_lbl}>Source Type</span><div style={{ marginTop: 2 }}>{selectedEdge.sourceLabel}</div></div>}
-                                <div><span style={_lbl}>First Seen</span><div style={{ marginTop: 2, fontFamily: "monospace", fontSize: 9 }}>{fmtTs(selectedEdge.firstSeen)}</div></div>
-                                <div><span style={_lbl}>Last Seen</span><div style={{ marginTop: 2, fontFamily: "monospace", fontSize: 9 }}>{fmtTs(selectedEdge.lastSeen)}</div></div>
+                                <div><span style={_lbl}>First Seen</span><div style={{ marginTop: 2, fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.meta }}>{fmtTs(selectedEdge.firstSeen)}</div></div>
+                                <div><span style={_lbl}>Last Seen</span><div style={{ marginTop: 2, fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.meta }}>{fmtTs(selectedEdge.lastSeen)}</div></div>
                                 {(selectedEdge.shareNames || []).length > 0 && <div style={{ gridColumn: "1 / -1" }}><span style={_lbl}>Shares</span><div style={{ marginTop: 2, color: th.sev.high }}>{selectedEdge.shareNames.join(", ")}</div></div>}
                                 {(selectedEdge.clientNames || []).length > 0 && <div style={{ gridColumn: "1 / -1" }}><span style={_lbl}>Client Names</span><div style={{ marginTop: 2, color: th.sev.custom }}>{selectedEdge.clientNames.join(", ")}</div></div>}
                               </div>
@@ -3338,7 +3349,7 @@ export default function LateralMovementModal() {
                                   <span style={_lbl}>Why Suspicious</span>
                                   <div style={{ display: "flex", gap: 3, marginTop: 4, flexWrap: "wrap" }}>
                                     {selectedEdge.flags.map((f, fi) => (
-                                      <span key={fi} style={{ padding: "1px 5px", background: f.startsWith("Finding") ? th.sev.critical + "18" : f.includes("dampened") ? `${th.textMuted}08` : th.panelBg, color: f.startsWith("Finding") ? th.sev.critical : f.includes("dampened") ? th.textMuted : th.textDim, border: `1px solid ${th.border}33`, borderRadius: 3, fontSize: 8 }}>{f}</span>
+                                      <span key={fi} style={{ padding: "1px 5px", background: f.startsWith("Finding") ? th.sev.critical + "18" : f.includes("dampened") ? `${th.textMuted}08` : th.panelBg, color: f.startsWith("Finding") ? th.sev.critical : f.includes("dampened") ? th.textMuted : th.textDim, border: `1px solid ${th.border}33`, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge }}>{f}</span>
                                     ))}
                                   </div>
                                 </div>
@@ -3354,12 +3365,12 @@ export default function LateralMovementModal() {
                                       const sevC = f.severity === "critical" ? th.sev.critical : f.severity === "high" ? th.sev.high : f.severity === "medium" ? th.sev.med : th.textMuted;
                                       return (
                                         <div key={fi} style={{ display: "flex", alignItems: "center", gap: 4, marginBottom: 2 }}>
-                                          <span style={{ padding: "0 4px", background: sevC + "18", color: sevC, borderRadius: 2, fontSize: 7, fontWeight: 700, minWidth: 36, textAlign: "center" }}>{f.severity.toUpperCase()}</span>
-                                          <span style={{ color: th.textDim, fontSize: 8, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.category}: {f.title.slice(0, 60)}</span>
+                                          <span style={{ padding: "0 4px", background: sevC + "18", color: sevC, borderRadius: 2, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700, minWidth: 36, textAlign: "center" }}>{f.severity.toUpperCase()}</span>
+                                          <span style={{ color: th.textDim, fontSize: LM_TYPOGRAPHY.badge, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.category}: {f.title.slice(0, 60)}</span>
                                         </div>
                                       );
                                     })}
-                                    {_edgeFindings.length > 4 && <div style={{ fontSize: 8, color: th.textMuted }}>+{_edgeFindings.length - 4} more</div>}
+                                    {_edgeFindings.length > 4 && <div style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted }}>+{_edgeFindings.length - 4} more</div>}
                                   </div>
                                 </div>
                               )}
@@ -3368,7 +3379,7 @@ export default function LateralMovementModal() {
                                   <span style={_lbl}>In {_edgeChains.length} chain{_edgeChains.length !== 1 ? "s" : ""}</span>
                                   <div style={{ marginTop: 3 }}>
                                     {_edgeChains.slice(0, 2).map((c, ci) => (
-                                      <div key={ci} style={{ fontSize: 8, color: th.textMuted, marginBottom: 1 }}>{c.path.join(" \u2192 ")}</div>
+                                      <div key={ci} style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, marginBottom: 1 }}>{c.path.join(" \u2192 ")}</div>
                                     ))}
                                   </div>
                                 </div>
@@ -3382,16 +3393,16 @@ export default function LateralMovementModal() {
                                     {selectedEdge.episodes.slice(0, 20).map((ep, epi) => {
                                       const _pc = ep.phase === "failed" ? th.sev.critical : ep.phase === "reconnect" ? th.sev.custom : th.sev.clean;
                                       return (
-                                        <div key={epi} style={{ fontSize: 9, padding: "3px 0", color: th.textDim, fontFamily: "monospace", display: "flex", alignItems: "center", gap: 5, borderBottom: `1px solid ${th.border}11` }}>
-                                          <span style={{ padding: "0 3px", background: _pc + "18", color: _pc, borderRadius: 2, fontSize: 7, fontWeight: 700, minWidth: 30, textAlign: "center" }}>{ep.phase === "failed" ? "FAIL" : ep.phase === "reconnect" ? "RECON" : "OK"}</span>
+                                        <div key={epi} style={{ fontSize: LM_TYPOGRAPHY.meta, padding: "3px 0", color: th.textDim, fontFamily: "monospace", display: "flex", alignItems: "center", gap: 5, borderBottom: `1px solid ${th.border}11` }}>
+                                          <span style={{ padding: "0 3px", background: _pc + "18", color: _pc, borderRadius: 2, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700, minWidth: 30, textAlign: "center" }}>{ep.phase === "failed" ? "FAIL" : ep.phase === "reconnect" ? "RECON" : "OK"}</span>
                                           <span style={{ color: th.text, fontWeight: 600, minWidth: 60 }}>{ep.user}</span>
-                                          {ep.techFamily && <span style={{ padding: "0 3px", background: _techColor(ep.techFamily === "ServiceExec" ? "Service Exec" : ep.techFamily === "AdminShare" ? "Admin Share" : ep.techFamily) + "12", color: _techColor(ep.techFamily === "ServiceExec" ? "Service Exec" : ep.techFamily === "AdminShare" ? "Admin Share" : ep.techFamily), borderRadius: 2, fontSize: 7 }}>{ep.techFamily}</span>}
+                                          {ep.techFamily && <span style={{ padding: "0 3px", background: _techColor(ep.techFamily === "ServiceExec" ? "Service Exec" : ep.techFamily === "AdminShare" ? "Admin Share" : ep.techFamily) + "12", color: _techColor(ep.techFamily === "ServiceExec" ? "Service Exec" : ep.techFamily === "AdminShare" ? "Admin Share" : ep.techFamily), borderRadius: 2, fontSize: LM_TYPOGRAPHY.badge }}>{ep.techFamily}</span>}
                                           <span style={{ color: th.textMuted }}>{ep.count} evt{ep.count !== 1 ? "s" : ""}</span>
-                                          <span style={{ color: th.textMuted, fontSize: 8 }}>{ep.firstTs?.slice(11, 19)}{ep.lastTs !== ep.firstTs ? `\u2013${ep.lastTs?.slice(11, 19)}` : ""}</span>
+                                          <span style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.badge }}>{ep.firstTs?.slice(11, 19)}{ep.lastTs !== ep.firstTs ? `\u2013${ep.lastTs?.slice(11, 19)}` : ""}</span>
                                         </div>
                                       );
                                     })}
-                                    {selectedEdge.episodes.length > 20 && <div style={{ fontSize: 8, color: th.textMuted, padding: "2px 0" }}>+{selectedEdge.episodes.length - 20} more</div>}
+                                    {selectedEdge.episodes.length > 20 && <div style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, padding: "2px 0" }}>+{selectedEdge.episodes.length - 20} more</div>}
                                   </div>
                                 </div>
                               )}
@@ -3400,7 +3411,7 @@ export default function LateralMovementModal() {
                                   <span style={_lbl}>Event Breakdown</span>
                                   <div style={{ display: "flex", gap: 4, marginTop: 4, flexWrap: "wrap" }}>
                                     {Object.entries(selectedEdge.eventBreakdown).sort((a, b) => b[1] - a[1]).map(([eid, count]) => (
-                                      <span key={eid} style={{ padding: "2px 6px", background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 3, fontSize: 9, fontFamily: "monospace" }}>
+                                      <span key={eid} style={{ padding: "2px 6px", background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 3, fontSize: LM_TYPOGRAPHY.meta, fontFamily: "monospace" }}>
                                         <span style={{ color: th.accent, fontWeight: 600 }}>{eid}</span>
                                         <span style={{ color: th.textMuted, marginLeft: 2 }}>{"\u00D7"}{count}</span>
                                       </span>
@@ -3425,7 +3436,7 @@ export default function LateralMovementModal() {
               {/* Chains tab */}
               {viewTab === "chains" && (() => {
                 const chs = data.chains || [];
-                if (chs.length === 0) return <div style={{ textAlign: "center", padding: 30, color: th.textMuted, fontSize: 12, fontFamily: "-apple-system, sans-serif" }}>No multi-hop lateral movement chains detected</div>;
+                if (chs.length === 0) return <div style={{ textAlign: "center", padding: 30, color: th.textMuted, fontSize: LM_TYPOGRAPHY.title, fontFamily: "-apple-system, sans-serif" }}>No multi-hop lateral movement chains detected</div>;
                 const pivotMap = new Map();
                 for (const ch of chs) {
                   for (let pi = 1; pi < ch.path.length - 1; pi++) {
@@ -3447,11 +3458,11 @@ export default function LateralMovementModal() {
                     {pivots.length > 0 && (
                       <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
                         {pivots.map(([host, info]) => (
-                          <div key={host} style={{ padding: "6px 10px", background: `${th.accent}08`, border: `1px solid ${th.border}`, borderRadius: 6, fontSize: 9, fontFamily: "-apple-system, sans-serif" }}>
-                            <div style={{ fontWeight: 700, color: th.text, fontSize: 10, marginBottom: 2 }}>{host}</div>
+                          <div key={host} style={{ padding: "6px 10px", background: `${th.accent}08`, border: `1px solid ${th.border}`, borderRadius: 6, fontSize: LM_TYPOGRAPHY.meta, fontFamily: "-apple-system, sans-serif" }}>
+                            <div style={{ fontWeight: 700, color: th.text, fontSize: LM_TYPOGRAPHY.control, marginBottom: 2 }}>{host}</div>
                             <div style={{ color: th.textDim }}>Pivot in {info.count} chains</div>
-                            <div style={{ color: th.textMuted, fontSize: 8 }}>Origins: {[...info.origins].slice(0, 3).join(", ")}{info.origins.size > 3 ? ` +${info.origins.size - 3}` : ""}</div>
-                            <div style={{ color: th.textMuted, fontSize: 8 }}>Targets: {[...info.terminals].slice(0, 3).join(", ")}{info.terminals.size > 3 ? ` +${info.terminals.size - 3}` : ""}</div>
+                            <div style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.badge }}>Origins: {[...info.origins].slice(0, 3).join(", ")}{info.origins.size > 3 ? ` +${info.origins.size - 3}` : ""}</div>
+                            <div style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.badge }}>Targets: {[...info.terminals].slice(0, 3).join(", ")}{info.terminals.size > 3 ? ` +${info.terminals.size - 3}` : ""}</div>
                           </div>
                         ))}
                       </div>
@@ -3464,20 +3475,20 @@ export default function LateralMovementModal() {
                         return (
                           <div key={ci} style={{ padding: "10px 12px", marginBottom: 8, background: th.panelBg, borderRadius: 6, border: `1px solid ${isExpanded ? cc + "44" : th.border}`, cursor: "pointer" }} onClick={() => setModal((p) => ({ ...p, expandedChain: isExpanded ? null : _chainKey }))}>
                             <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
-                              <span style={{ padding: "2px 6px", background: confBg(chain.confidence), color: cc, borderRadius: 3, fontSize: 9, fontWeight: 700, fontFamily: "monospace", minWidth: 24, textAlign: "center" }}>{chain.confidenceScore || 0}</span>
-                              <span style={{ padding: "2px 6px", background: confBg(chain.confidence), color: cc, borderRadius: 3, fontSize: 8, fontWeight: 600, fontFamily: "-apple-system, sans-serif", textTransform: "uppercase" }}>{chain.confidence || "low"}</span>
-                              <span style={{ padding: "2px 6px", background: (th.danger) + "18", color: th.danger, borderRadius: 3, fontSize: 9, fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>{chain.hops} hop{chain.hops !== 1 ? "s" : ""}</span>
-                              <span style={{ fontSize: 10, color: th.text, fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>{chain.users.join(", ") || "(unknown)"}</span>
+                              <span style={{ padding: "2px 6px", background: confBg(chain.confidence), color: cc, borderRadius: 3, fontSize: LM_TYPOGRAPHY.meta, fontWeight: 700, fontFamily: "monospace", minWidth: 24, textAlign: "center" }}>{chain.confidenceScore || 0}</span>
+                              <span style={{ padding: "2px 6px", background: confBg(chain.confidence), color: cc, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 600, fontFamily: "-apple-system, sans-serif", textTransform: "uppercase" }}>{chain.confidence || "low"}</span>
+                              <span style={{ padding: "2px 6px", background: (th.danger) + "18", color: th.danger, borderRadius: 3, fontSize: LM_TYPOGRAPHY.meta, fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>{chain.hops} hop{chain.hops !== 1 ? "s" : ""}</span>
+                              <span style={{ fontSize: LM_TYPOGRAPHY.control, color: th.text, fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>{chain.users.join(", ") || "(unknown)"}</span>
                               {(chain.techniques || []).map((t, ti) => (
-                                <span key={ti} style={{ padding: "1px 5px", background: t.includes("RDP") ? th.sev.info + "15" : t.includes("Service") || t.includes("PsExec") || t.includes("Impacket") ? th.sev.critical + "15" : t.includes("Admin Share") || t.includes("Scheduled Task") || t.includes("WMI") || t.includes("WinRM") ? th.sev.high + "18" : `${th.textMuted}12`, color: t.includes("RDP") ? th.sev.info : t.includes("Service") || t.includes("PsExec") || t.includes("Impacket") ? th.sev.critical : t.includes("Admin Share") || t.includes("Scheduled Task") || t.includes("WMI") || t.includes("WinRM") ? th.sev.high : th.textDim, borderRadius: 3, fontSize: 7, fontFamily: "-apple-system, sans-serif" }}>{t}</span>
+                                <span key={ti} style={{ padding: "1px 5px", background: t.includes("RDP") ? th.sev.info + "15" : t.includes("Service") || t.includes("PsExec") || t.includes("Impacket") ? th.sev.critical + "15" : t.includes("Admin Share") || t.includes("Scheduled Task") || t.includes("WMI") || t.includes("WinRM") ? th.sev.high + "18" : `${th.textMuted}12`, color: t.includes("RDP") ? th.sev.info : t.includes("Service") || t.includes("PsExec") || t.includes("Impacket") ? th.sev.critical : t.includes("Admin Share") || t.includes("Scheduled Task") || t.includes("WMI") || t.includes("WinRM") ? th.sev.high : th.textDim, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontFamily: "-apple-system, sans-serif" }}>{t}</span>
                               ))}
-                              {(chain.occurrences || 1) > 1 && <span style={{ fontSize: 8, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>{"\u00D7"}{chain.occurrences}</span>}
+                              {(chain.occurrences || 1) > 1 && <span style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>{"\u00D7"}{chain.occurrences}</span>}
                             </div>
                             <div style={{ display: "flex", alignItems: "center", gap: 4, flexWrap: "wrap" }}>
                               {chain.path.map((host, hi) => (
                                 <span key={hi} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
-                                  <span style={{ padding: "3px 8px", background: hi === 0 ? th.sev.clean + "22" : hi === chain.path.length - 1 ? (th.danger) + "22" : th.btnBg, color: hi === 0 ? th.sev.clean : hi === chain.path.length - 1 ? (th.danger) : th.text, borderRadius: 4, fontSize: 10, fontFamily: "monospace", border: `1px solid ${th.border}` }}>{host}</span>
-                                  {hi < chain.path.length - 1 && <span style={{ color: th.textMuted, fontSize: 10 }}>{"\u2192"}</span>}
+                                  <span style={{ padding: "3px 8px", background: hi === 0 ? th.sev.clean + "22" : hi === chain.path.length - 1 ? (th.danger) + "22" : th.btnBg, color: hi === 0 ? th.sev.clean : hi === chain.path.length - 1 ? (th.danger) : th.text, borderRadius: 4, fontSize: LM_TYPOGRAPHY.control, fontFamily: "monospace", border: `1px solid ${th.border}` }}>{host}</span>
+                                  {hi < chain.path.length - 1 && <span style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.control }}>{"\u2192"}</span>}
                                 </span>
                               ))}
                             </div>
@@ -3485,36 +3496,36 @@ export default function LateralMovementModal() {
                               <div style={{ marginTop: 10, paddingTop: 8, borderTop: `1px solid ${th.border}22` }}>
                                 <div style={{ display: "flex", gap: 20 }}>
                                   <div style={{ flex: 1, minWidth: 0 }}>
-                                    <div style={{ fontWeight: 600, fontSize: 9, color: th.text, fontFamily: "-apple-system, sans-serif", marginBottom: 6 }}>Hop Detail</div>
+                                    <div style={{ fontWeight: 600, fontSize: LM_TYPOGRAPHY.meta, color: th.text, fontFamily: "-apple-system, sans-serif", marginBottom: 6 }}>Hop Detail</div>
                                     {(chain.hopDetails || []).map((hop, hi) => (
-                                      <div key={hi} style={{ padding: "5px 0", fontSize: 9, fontFamily: "monospace", color: th.textDim, borderBottom: hi < chain.hopDetails.length - 1 ? `1px solid ${th.border}15` : "none" }}>
+                                      <div key={hi} style={{ padding: "5px 0", fontSize: LM_TYPOGRAPHY.meta, fontFamily: "monospace", color: th.textDim, borderBottom: hi < chain.hopDetails.length - 1 ? `1px solid ${th.border}15` : "none" }}>
                                         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                                          <span style={{ color: th.textMuted, fontSize: 8, minWidth: 12 }}>#{hi + 1}</span>
+                                          <span style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.badge, minWidth: 12 }}>#{hi + 1}</span>
                                           <span style={{ color: th.sev.clean, fontWeight: 600 }}>{hop.source}</span>
                                           <span style={{ color: th.textMuted }}>{"\u2192"}</span>
                                           <span style={{ color: hi === chain.hopDetails.length - 1 ? th.sev.critical : th.text, fontWeight: 600 }}>{hop.target}</span>
                                         </div>
                                         <div style={{ display: "flex", alignItems: "center", gap: 6, marginTop: 2, paddingLeft: 20 }}>
                                           <span style={{ color: th.text }}>{hop.user}</span>
-                                          <span style={{ padding: "0 4px", background: hop.technique?.includes("RDP") ? th.sev.info + "15" : hop.technique?.includes("Service") || hop.technique?.includes("PsExec") || hop.technique?.includes("Impacket") ? th.sev.critical + "15" : hop.technique?.includes("Admin Share") || hop.technique?.includes("Scheduled Task") || hop.technique?.includes("WMI") || hop.technique?.includes("WinRM") ? th.sev.high + "18" : `${th.textMuted}12`, color: hop.technique?.includes("RDP") ? th.sev.info : hop.technique?.includes("Service") || hop.technique?.includes("PsExec") || hop.technique?.includes("Impacket") ? th.sev.critical : hop.technique?.includes("Admin Share") || hop.technique?.includes("Scheduled Task") || hop.technique?.includes("WMI") || hop.technique?.includes("WinRM") ? th.sev.high : th.textDim, borderRadius: 2, fontSize: 7 }}>{hop.technique}</span>
-                                          <span style={{ color: th.textMuted, fontSize: 8 }}>EID {hop.eventId} / Type {hop.logonType}</span>
-                                          <span style={{ color: th.textMuted, fontSize: 8 }}>{fmtTs(hop.ts)}</span>
+                                          <span style={{ padding: "0 4px", background: hop.technique?.includes("RDP") ? th.sev.info + "15" : hop.technique?.includes("Service") || hop.technique?.includes("PsExec") || hop.technique?.includes("Impacket") ? th.sev.critical + "15" : hop.technique?.includes("Admin Share") || hop.technique?.includes("Scheduled Task") || hop.technique?.includes("WMI") || hop.technique?.includes("WinRM") ? th.sev.high + "18" : `${th.textMuted}12`, color: hop.technique?.includes("RDP") ? th.sev.info : hop.technique?.includes("Service") || hop.technique?.includes("PsExec") || hop.technique?.includes("Impacket") ? th.sev.critical : hop.technique?.includes("Admin Share") || hop.technique?.includes("Scheduled Task") || hop.technique?.includes("WMI") || hop.technique?.includes("WinRM") ? th.sev.high : th.textDim, borderRadius: 2, fontSize: LM_TYPOGRAPHY.badge }}>{hop.technique}</span>
+                                          <span style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.badge }}>EID {hop.eventId} / Type {hop.logonType}</span>
+                                          <span style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.badge }}>{fmtTs(hop.ts)}</span>
                                         </div>
                                       </div>
                                     ))}
                                   </div>
-                                  <div style={{ width: 200, flexShrink: 0, fontSize: 9, fontFamily: "-apple-system, sans-serif", color: th.textDim }}>
-                                    <div style={{ fontWeight: 600, fontSize: 9, color: th.text, marginBottom: 6 }}>Why This Chain</div>
+                                  <div style={{ width: 200, flexShrink: 0, fontSize: LM_TYPOGRAPHY.meta, fontFamily: "-apple-system, sans-serif", color: th.textDim }}>
+                                    <div style={{ fontWeight: 600, fontSize: LM_TYPOGRAPHY.meta, color: th.text, marginBottom: 6 }}>Why This Chain</div>
                                     {(chain.confidenceFlags || []).map((f, fi) => (
                                       <div key={fi} style={{ padding: "2px 0", display: "flex", alignItems: "center", gap: 4 }}>
-                                        <span style={{ color: f.includes("penalty") ? th.sev.high : th.sev.clean, fontSize: 8 }}>{f.includes("penalty") ? "\u2212" : "+"}</span>
+                                        <span style={{ color: f.includes("penalty") ? th.sev.high : th.sev.clean, fontSize: LM_TYPOGRAPHY.badge }}>{f.includes("penalty") ? "\u2212" : "+"}</span>
                                         <span>{f}</span>
                                       </div>
                                     ))}
                                     {(chain.occurrences || 1) > 1 && (
                                       <div style={{ marginTop: 8, paddingTop: 6, borderTop: `1px solid ${th.border}22` }}>
                                         <span style={{ color: th.textMuted }}>Seen {chain.occurrences} time{chain.occurrences > 1 ? "s" : ""}</span>
-                                        <div style={{ color: th.textMuted, fontSize: 8, marginTop: 2 }}>{fmtTs(chain.firstTs)} — {fmtTs(chain.lastTs)}</div>
+                                        <div style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.badge, marginTop: 2 }}>{fmtTs(chain.firstTs)} — {fmtTs(chain.lastTs)}</div>
                                       </div>
                                     )}
                                     {(chain.findingIds || []).length > 0 && (
@@ -3541,10 +3552,10 @@ export default function LateralMovementModal() {
               {viewTab === "rdp" && (() => {
                 const sessions = data.rdpSessions || [];
                 if (sessions.length === 0) {
-                  return <div style={{ textAlign: "center", padding: 30, color: th.textMuted, fontSize: 12, fontFamily: "-apple-system, sans-serif" }}>No RDP sessions detected. Ensure TerminalServices event logs (LocalSessionManager, RemoteConnectionManager) are included in your data.</div>;
+                  return <div style={{ textAlign: "center", padding: 30, color: th.textMuted, fontSize: LM_TYPOGRAPHY.title, fontFamily: "-apple-system, sans-serif" }}>No evidence-backed RDP activity detected. Include TerminalServices logs or Security 4624/4625 Logon Types 10/12 to improve coverage.</div>;
                 }
-                const rdpHeaders = ["Score", "Status", "Technique", "Source", "Target", "User", "Confidence", "Attempts", "Start Time", "End Time", "Duration", "Why Flagged"];
-                const rdpDefWidths = { Score: 48, Status: 90, Technique: 115, Source: 130, Target: 130, User: 120, Confidence: 72, Attempts: 55, "Start Time": 140, "End Time": 140, Duration: 70, "Why Flagged": 200 };
+                const rdpHeaders = ["Score", "Status", "Technique", "Source", "Target", "User", "Confidence", "Evidence", "Attempts", "Start Time", "End Time", "Duration", "Why Flagged"];
+                const rdpDefWidths = { Score: 48, Status: 90, Technique: 115, Source: 130, Target: 130, User: 120, Confidence: 72, Evidence: 82, Attempts: 55, "Start Time": 140, "End Time": 140, Duration: 70, "Why Flagged": 200 };
                 const rdpColWidths = modal.rdpColWidths || rdpDefWidths;
                 const rdpSortCol = modal.rdpSortCol || "Score";
                 const rdpSortDir = modal.rdpSortDir || "desc";
@@ -3563,8 +3574,10 @@ export default function LateralMovementModal() {
                 };
                 const fmtDur = (s, e) => {
                   if (!s || !e) return "\u2014";
-                  const ms = new Date(e) - new Date(s);
-                  if (ms <= 0) return "\u2014";
+                  const startMs = tsMs(s);
+                  const endMs = tsMs(e);
+                  const ms = endMs - startMs;
+                  if (!Number.isFinite(ms) || ms <= 0) return "\u2014";
                   const sec = Math.floor(ms / 1000), min = Math.floor(sec / 60), hr = Math.floor(min / 60), dy = Math.floor(hr / 24);
                   const rh = hr % 24, rm = min % 60;
                   if (dy > 0 && rh > 0) return `${dy}d ${rh}h`;
@@ -3578,8 +3591,8 @@ export default function LateralMovementModal() {
                 const rdpDurMs = (s) => {
                   const end = _rdpEnd(s);
                   if (!s.startTime || !end) return 0;
-                  const d = new Date(end) - new Date(s.startTime);
-                  return isNaN(d) ? 0 : Math.max(0, d);
+                  const d = tsMs(end) - tsMs(s.startTime);
+                  return Number.isFinite(d) ? Math.max(0, d) : 0;
                 };
                 const techStyle = (tech) => {
                   const m = {
@@ -3592,6 +3605,9 @@ export default function LateralMovementModal() {
                   return m[tech] || m["RDP"];
                 };
                 const confStyle = (c) => ({ high: th.sev.clean, medium: th.sev.med, low: th.textMuted }[c] || th.textMuted);
+                const evidenceStyle = (level) => level === "correlated"
+                  ? { bg: th.sev.med + "18", color: th.sev.med, label: "CORRELATED" }
+                  : { bg: th.sev.info + "18", color: th.sev.info, label: "DIRECT" };
 
                 const rdpCellVal = (s, h) => {
                   if (h === "Score") return String(s.suspicionScore || 0);
@@ -3601,6 +3617,7 @@ export default function LateralMovementModal() {
                   if (h === "Target") return s.target || "\u2014";
                   if (h === "User") return s.user || "(unknown)";
                   if (h === "Confidence") return (s.confidence || "low").toUpperCase();
+                  if (h === "Evidence") return evidenceStyle(s.evidenceLevel).label;
                   if (h === "Attempts") return String(s.attemptCount || 1);
                   if (h === "Start Time") return fmtTs(s.startTime) || "";
                   if (h === "End Time") {
@@ -3620,6 +3637,7 @@ export default function LateralMovementModal() {
                   if (col === "Target") return s.target || "";
                   if (col === "User") return s.user || "";
                   if (col === "Confidence") return ({ high: 3, medium: 2, low: 1 })[s.confidence] || 0;
+                  if (col === "Evidence") return s.evidenceLevel === "correlated" ? 1 : 2;
                   if (col === "Attempts") return s.attemptCount || 1;
                   if (col === "Start Time") return s.startTime || "";
                   if (col === "End Time") return _rdpEnd(s) || "";
@@ -3730,15 +3748,28 @@ export default function LateralMovementModal() {
                   return bMax - aMax || (b.count || 0) - (a.count || 0);
                 });
                 const expandedGroup = modal.expandedGroup;
+                const rdpSessionTotal = sessions.filter((s) => s.status !== "failed").length;
+                const rdpFailureEpisodes = sessions.filter((s) => s.status === "failed").length;
+                const rdpFailedAttempts = sessions
+                  .filter((s) => s.status === "failed")
+                  .reduce((sum, s) => sum + (s.attemptCount || 1), 0);
+                const rdpCorrelatedTotal = sessions.filter((s) => s.evidenceLevel === "correlated").length;
 
                 return (
                   <div>
+                    <div style={{ display: "flex", alignItems: "flex-start", gap: 10, padding: "7px 10px", marginBottom: 8, border: `1px solid ${th.border}55`, borderRadius: 7, background: `${th.sev.info}08`, color: th.textDim, fontFamily: "-apple-system, sans-serif", fontSize: LM_TYPOGRAPHY.control, lineHeight: 1.4 }}>
+                      <span style={{ color: th.sev.info, fontWeight: 700, whiteSpace: "nowrap" }}>RDP evidence model</span>
+                      <span>
+                        {rdpSessionTotal} session{rdpSessionTotal !== 1 ? "s" : ""} · {rdpFailedAttempts} failed attempt{rdpFailedAttempts !== 1 ? "s" : ""} in {rdpFailureEpisodes} episode{rdpFailureEpisodes !== 1 ? "s" : ""} · {rdpCorrelatedTotal} correlated record{rdpCorrelatedTotal !== 1 ? "s" : ""}.
+                        {" "}Direct evidence is TerminalServices activity or Security Logon Type 10/12; Type 3 failures require nearby RDP evidence. Missing expected telemetry lowers confidence but does not raise the suspicion score.
+                      </span>
+                    </div>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6, marginBottom: 6 }}>
                       {rdpActiveFilterCount > 0 && (
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 8px", background: `${th.accent}11`, borderRadius: 6, fontSize: 10, color: th.accent, fontFamily: "-apple-system, sans-serif" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 8px", background: `${th.accent}11`, borderRadius: 6, fontSize: LM_TYPOGRAPHY.control, color: th.accent, fontFamily: "-apple-system, sans-serif" }}>
                           <span style={{ fontWeight: 600 }}>Filter active ({rdpActiveFilterCount} column{rdpActiveFilterCount > 1 ? "s" : ""})</span>
-                          <span style={{ fontSize: 10, color: th.textMuted }}>{"\u2014"} {filteredSessions.length} of {sessions.length} sessions</span>
-                          <button onClick={() => setModal((p) => ({ ...p, rdpColFilters: {} }))} style={{ padding: "1px 8px", fontSize: 9, background: th.accent, color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontWeight: 600 }}>Clear All</button>
+                          <span style={{ fontSize: LM_TYPOGRAPHY.control, color: th.textMuted }}>{"\u2014"} {filteredSessions.length} of {sessions.length} sessions</span>
+                          <button onClick={() => setModal((p) => ({ ...p, rdpColFilters: {} }))} style={{ padding: "1px 8px", fontSize: LM_TYPOGRAPHY.meta, background: th.accent, color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontWeight: 600 }}>Clear All</button>
                         </div>
                       )}
                       <div style={{ display: "flex", gap: 6, marginLeft: "auto", alignItems: "center" }}>
@@ -3746,15 +3777,15 @@ export default function LateralMovementModal() {
                         {gSessions.length > 0 && (
                           <div style={{ display: "inline-flex", background: th.panelBg, borderRadius: 6, padding: 2, border: `1px solid ${th.border}44`, gap: 1 }}>
                             {[{ id: "grouped", label: "Grouped" }, { id: "individual", label: "Individual" }, { id: "timeline", label: "Timeline" }].map((m) => (
-                              <button key={m.id} onClick={() => setModal((p) => ({ ...p, rdpViewMode: m.id }))} style={{ padding: "2px 10px", background: rdpViewMode === m.id ? `${th.accent}` : "transparent", color: rdpViewMode === m.id ? "#fff" : th.textDim, border: "none", borderRadius: 4, fontSize: 9, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: rdpViewMode === m.id ? 600 : 400, transition: "all var(--m-base)" }}>{m.label}</button>
+                              <button key={m.id} onClick={() => setModal((p) => ({ ...p, rdpViewMode: m.id }))} style={{ padding: "2px 10px", background: rdpViewMode === m.id ? `${th.accent}` : "transparent", color: rdpViewMode === m.id ? "#fff" : th.textDim, border: "none", borderRadius: 4, fontSize: LM_TYPOGRAPHY.meta, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: rdpViewMode === m.id ? 600 : 400, transition: "all var(--m-base)" }}>{m.label}</button>
                             ))}
                           </div>
                         )}
-                        <button onClick={copyRdp} style={{ padding: "3px 10px", fontSize: 10, background: th.btnBg, color: th.text, border: `1px solid ${th.border}`, borderRadius: 4, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}
+                        <button onClick={copyRdp} style={{ padding: "3px 10px", fontSize: LM_TYPOGRAPHY.control, background: th.btnBg, color: th.text, border: `1px solid ${th.border}`, borderRadius: 4, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}
                           onMouseEnter={(ev) => { ev.currentTarget.style.background = th.accent + "22"; }} onMouseLeave={(ev) => { ev.currentTarget.style.background = th.btnBg; }}>
                           {rdpCheckedCount > 0 ? `Copy Selected (${rdpCheckedCount})` : `Copy All (${sortedSessions.length})`}
                         </button>
-                        <button onClick={exportRdpCsv} style={{ padding: "3px 10px", fontSize: 10, background: th.btnBg, color: th.text, border: `1px solid ${th.border}`, borderRadius: 4, cursor: "pointer", fontFamily: "-apple-system, sans-serif", display: "flex", alignItems: "center", gap: 4 }}
+                        <button onClick={exportRdpCsv} style={{ padding: "3px 10px", fontSize: LM_TYPOGRAPHY.control, background: th.btnBg, color: th.text, border: `1px solid ${th.border}`, borderRadius: 4, cursor: "pointer", fontFamily: "-apple-system, sans-serif", display: "flex", alignItems: "center", gap: 4 }}
                           onMouseEnter={(ev) => { ev.currentTarget.style.background = th.accent + "22"; }} onMouseLeave={(ev) => { ev.currentTarget.style.background = th.btnBg; }}>
                           <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
                           Export CSV
@@ -3767,12 +3798,12 @@ export default function LateralMovementModal() {
                       // Compute time range across all sessions
                       let tMin = Infinity, tMax = -Infinity;
                       for (const s of sessions) {
-                        const st = new Date(s.startTime).getTime();
+                        const st = tsMs(s.startTime);
                         const endStr = _rdpEnd(s);
-                        const et = endStr ? new Date(endStr).getTime() : st + 300000; // default 5min if no end
-                        if (!isNaN(st) && st < tMin) tMin = st;
-                        if (!isNaN(et) && et > tMax) tMax = et;
-                        if (!isNaN(st) && st > tMax) tMax = st;
+                        const et = endStr ? tsMs(endStr) : st + 300000; // default 5min if no end
+                        if (Number.isFinite(st) && st < tMin) tMin = st;
+                        if (Number.isFinite(et) && et > tMax) tMax = et;
+                        if (Number.isFinite(st) && st > tMax) tMax = st;
                       }
                       if (!isFinite(tMin) || !isFinite(tMax) || tMax <= tMin) tMax = tMin + 3600000;
                       const tRange = tMax - tMin;
@@ -3818,13 +3849,13 @@ export default function LateralMovementModal() {
                         <div style={{ border: `1px solid ${th.border}`, borderRadius: 6, overflow: "auto", maxHeight: 420 }}>
                           {/* Time axis */}
                           <div style={{ display: "flex", position: "sticky", top: 0, zIndex: 2, background: th.headerBg || th.panelBg, borderBottom: `1px solid ${th.border}` }}>
-                            <div style={{ width: LABEL_W, flexShrink: 0, padding: "4px 8px", fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif", fontWeight: 600, borderRight: `1px solid ${th.border}33` }}>
+                            <div style={{ width: LABEL_W, flexShrink: 0, padding: "4px 8px", fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, fontFamily: "-apple-system, sans-serif", fontWeight: 600, borderRight: `1px solid ${th.border}33` }}>
                               SESSION
                             </div>
                             <div style={{ position: "relative", width: W, height: 22 }}>
                               {ticks.map((t, i) => (
                                 <div key={i} style={{ position: "absolute", left: t.x, top: 0, height: "100%", borderLeft: `1px solid ${th.border}22`, display: "flex", alignItems: "center" }}>
-                                  <span style={{ fontSize: 8, color: th.textMuted, fontFamily: "'SF Mono',Menlo,monospace", paddingLeft: 3, whiteSpace: "nowrap" }}>{t.label}</span>
+                                  <span style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, fontFamily: "'SF Mono',Menlo,monospace", paddingLeft: 3, whiteSpace: "nowrap" }}>{t.label}</span>
                                 </div>
                               ))}
                             </div>
@@ -3836,7 +3867,7 @@ export default function LateralMovementModal() {
                             return (
                               <div key={li} style={{ display: "flex", borderBottom: `1px solid ${th.border}15` }}>
                                 {/* Label */}
-                                <div style={{ width: LABEL_W, flexShrink: 0, padding: "2px 8px", fontSize: 9, fontFamily: "'SF Mono',Menlo,monospace", color: th.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", borderRight: `1px solid ${th.border}22`, display: "flex", alignItems: "center", minHeight: ROW_H }}
+                                <div style={{ width: LABEL_W, flexShrink: 0, padding: "2px 8px", fontSize: LM_TYPOGRAPHY.meta, fontFamily: "'SF Mono',Menlo,monospace", color: th.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", borderRight: `1px solid ${th.border}22`, display: "flex", alignItems: "center", minHeight: ROW_H }}
                                   title={lk}>
                                   {lk}
                                 </div>
@@ -3847,12 +3878,12 @@ export default function LateralMovementModal() {
                                     <div key={ti} style={{ position: "absolute", left: t.x, top: 0, bottom: 0, width: 1, background: th.border + "11" }} />
                                   ))}
                                   {laneSessions.map((s, si) => {
-                                    const st = new Date(s.startTime).getTime();
+                                    const st = tsMs(s.startTime);
                                     const endStr = _rdpEnd(s);
-                                    const et = endStr ? new Date(endStr).getTime() : st + Math.max(300000, tRange * 0.005);
-                                    if (isNaN(st)) return null;
+                                    const et = endStr ? tsMs(endStr) : st + Math.max(300000, tRange * 0.005);
+                                    if (!Number.isFinite(st)) return null;
                                     const x1 = toPx(st);
-                                    const x2 = toPx(isNaN(et) ? st + 300000 : et);
+                                    const x2 = toPx(Number.isFinite(et) ? et : st + 300000);
                                     const barW = Math.max(3, x2 - x1);
                                     const color = phaseColor[s.status] || th.textMuted;
                                     const isFailed = s.status === "failed";
@@ -3872,17 +3903,17 @@ export default function LateralMovementModal() {
                                         onMouseEnter={(e) => { e.currentTarget.style.boxShadow = `0 0 6px ${color}66`; e.currentTarget.style.zIndex = "1"; }}
                                         onMouseLeave={(e) => { e.currentTarget.style.boxShadow = isSuspicious ? `0 0 4px ${color}44` : "none"; e.currentTarget.style.zIndex = ""; }}>
                                         {barW > 40 && (
-                                          <span style={{ position: "absolute", left: 4, top: 0, bottom: 0, display: "flex", alignItems: "center", fontSize: 7, color, fontWeight: 600, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap", overflow: "hidden" }}>
+                                          <span style={{ position: "absolute", left: 4, top: 0, bottom: 0, display: "flex", alignItems: "center", fontSize: LM_TYPOGRAPHY.badge, color, fontWeight: 600, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap", overflow: "hidden" }}>
                                             {s.status === "failed" ? `${s.attemptCount || 1}x` : s.technique || "RDP"}
                                           </span>
                                         )}
                                         {/* Events within session as tick marks */}
                                         {barW > 20 && (s.events || []).map((ev, ei) => {
-                                          const evT = new Date(ev.ts).getTime();
-                                          if (isNaN(evT)) return null;
+                                          const evT = tsMs(ev.ts);
+                                          if (!Number.isFinite(evT)) return null;
                                           const evX = ((evT - st) / (et - st)) * barW;
                                           if (evX < 0 || evX > barW) return null;
-                                          const evColor = ev.eventId === "4625" ? th.sev.critical : ev.eventId === "4672" ? th.sev.custom : ev.eventId === "4648" ? th.sev.high : "#fff";
+                                          const evColor = ev.eventId === "4625" ? th.sev.critical : ev.eventId === "4672" ? th.sev.custom : ev.eventId === "4648" ? th.sev.high : th.text;
                                           return <div key={ei} style={{ position: "absolute", left: evX, top: 0, bottom: 0, width: 1, background: evColor + "55" }} title={`${ev.description} (${fmtTs(ev.ts)})`} />;
                                         })}
                                       </div>
@@ -3903,7 +3934,7 @@ export default function LateralMovementModal() {
                               { status: "ended", label: "Ended" },
                               { status: "failed", label: "Failed" },
                             ].map((item) => (
-                              <div key={item.status} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 8, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>
+                              <div key={item.status} style={{ display: "flex", alignItems: "center", gap: 4, fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>
                                 <div style={{ width: 14, height: 8, borderRadius: 2, background: (phaseColor[item.status] || th.textMuted) + "55", border: `1px solid ${phaseColor[item.status] || th.textMuted}44` }} />
                                 {item.label}
                               </div>
@@ -3930,16 +3961,16 @@ export default function LateralMovementModal() {
                               <div onClick={() => setModal((p) => ({ ...p, expandedGroup: isExpanded ? null : _groupKey }))} style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 12px", background: isExpanded ? `${th.accent}08` : "transparent", borderBottom: `1px solid ${th.border}33`, cursor: "pointer", transition: "background var(--m-fast)" }}
                                 onMouseEnter={(e) => { if (!isExpanded) e.currentTarget.style.background = th.textMuted + "08"; }}
                                 onMouseLeave={(e) => { if (!isExpanded) e.currentTarget.style.background = "transparent"; }}>
-                                <span style={{ fontSize: 8, color: th.textMuted, width: 12, flexShrink: 0 }}>{isExpanded ? "\u25BC" : "\u25B6"}</span>
-                                {gMaxScore > 0 && <span style={{ fontSize: 10, fontWeight: 700, color: gMaxScore >= 30 ? th.sev.critical : gMaxScore >= 15 ? th.sev.high : th.textMuted, minWidth: 20, textAlign: "center", flexShrink: 0 }}>{gMaxScore}</span>}
-                                <span style={{ padding: "1px 6px", background: ss.bg, color: ss.color, borderRadius: 3, fontSize: 8, fontWeight: 700, fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>{ss.label}</span>
-                                <span style={{ padding: "1px 5px", background: gts.bg, color: gts.color, borderRadius: 3, fontSize: 8, fontWeight: 600, fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>{gTech}</span>
-                                <span style={{ fontSize: 10, fontFamily: "monospace", color: th.text }}>{g.source || "\u2014"}</span>
-                                <span style={{ fontSize: 10, color: th.textMuted }}>{"\u2192"}</span>
-                                <span style={{ fontSize: 10, fontFamily: "monospace", color: th.text }}>{g.target || "\u2014"}</span>
-                                <span style={{ fontSize: 10, color: th.textDim, fontFamily: "-apple-system, sans-serif" }}>{g.user || "(unknown)"}</span>
-                                <span style={{ padding: "1px 6px", background: g.count > 5 ? th.sev.high + "22" : th.textMuted + "18", color: g.count > 5 ? th.sev.high : th.textDim, borderRadius: 4, fontSize: 9, fontWeight: 600, fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>{isFailed ? `${gTotalAttempts} attempt${gTotalAttempts !== 1 ? "s" : ""}` : `${g.count} session${g.count !== 1 ? "s" : ""}`}</span>
-                                <span style={{ fontSize: 9, color: th.textMuted, fontFamily: "monospace", marginLeft: "auto" }}>{fmtTs(g.timeRange.from)}{g.timeRange.to && g.timeRange.to !== g.timeRange.from ? ` \u2014 ${fmtTs(g.timeRange.to)}` : ""}</span>
+                                <span style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, width: 12, flexShrink: 0 }}>{isExpanded ? "\u25BC" : "\u25B6"}</span>
+                                {gMaxScore > 0 && <span style={{ fontSize: LM_TYPOGRAPHY.control, fontWeight: 700, color: gMaxScore >= 30 ? th.sev.critical : gMaxScore >= 15 ? th.sev.high : th.textMuted, minWidth: 20, textAlign: "center", flexShrink: 0 }}>{gMaxScore}</span>}
+                                <span style={{ padding: "1px 6px", background: ss.bg, color: ss.color, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700, fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>{ss.label}</span>
+                                <span style={{ padding: "1px 5px", background: gts.bg, color: gts.color, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 600, fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>{gTech}</span>
+                                <span style={{ fontSize: LM_TYPOGRAPHY.control, fontFamily: "monospace", color: th.text }}>{g.source || "\u2014"}</span>
+                                <span style={{ fontSize: LM_TYPOGRAPHY.control, color: th.textMuted }}>{"\u2192"}</span>
+                                <span style={{ fontSize: LM_TYPOGRAPHY.control, fontFamily: "monospace", color: th.text }}>{g.target || "\u2014"}</span>
+                                <span style={{ fontSize: LM_TYPOGRAPHY.control, color: th.textDim, fontFamily: "-apple-system, sans-serif" }}>{g.user || "(unknown)"}</span>
+                                <span style={{ padding: "1px 6px", background: g.count > 5 ? th.sev.high + "22" : th.textMuted + "18", color: g.count > 5 ? th.sev.high : th.textDim, borderRadius: 4, fontSize: LM_TYPOGRAPHY.meta, fontWeight: 600, fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>{isFailed ? `${gTotalAttempts} attempt${gTotalAttempts !== 1 ? "s" : ""}` : `${g.count} session${g.count !== 1 ? "s" : ""}`}</span>
+                                <span style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, fontFamily: "monospace", marginLeft: "auto" }}>{fmtTs(g.timeRange.from)}{g.timeRange.to && g.timeRange.to !== g.timeRange.from ? ` \u2014 ${fmtTs(g.timeRange.to)}` : ""}</span>
                               </div>
                               {isExpanded && (
                                 <div style={{ padding: "4px 12px 8px 32px", background: `${th.accent}04`, borderBottom: `1px solid ${th.border}33` }}>
@@ -3947,18 +3978,22 @@ export default function LateralMovementModal() {
                                     const sts = statusStyle(s.status);
                                     const sSc = s.suspicionScore || 0;
                                     return (
-                                      <div key={si} style={{ display: "flex", alignItems: "center", gap: 6, padding: "3px 0", fontSize: 9, fontFamily: "monospace", color: th.textDim, borderBottom: si < g.sessions.length - 1 ? `1px solid ${th.border}15` : "none" }}>
-                                        {sSc > 0 && <span style={{ fontWeight: 700, fontSize: 9, color: sSc >= 30 ? th.sev.critical : sSc >= 15 ? th.sev.high : th.textMuted, minWidth: 16, textAlign: "center" }}>{sSc}</span>}
-                                        <span style={{ padding: "0 4px", background: sts.bg, color: sts.color, borderRadius: 2, fontSize: 8, fontWeight: 600 }}>{sts.label}</span>
+                                      <div key={si} style={{ display: "flex", alignItems: "center", gap: 6, padding: "3px 0", fontSize: LM_TYPOGRAPHY.meta, fontFamily: "monospace", color: th.textDim, borderBottom: si < g.sessions.length - 1 ? `1px solid ${th.border}15` : "none" }}>
+                                        {sSc > 0 && <span style={{ fontWeight: 700, fontSize: LM_TYPOGRAPHY.meta, color: sSc >= 30 ? th.sev.critical : sSc >= 15 ? th.sev.high : th.textMuted, minWidth: 16, textAlign: "center" }}>{sSc}</span>}
+                                        <span style={{ padding: "0 4px", background: sts.bg, color: sts.color, borderRadius: 2, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 600 }}>{sts.label}</span>
                                         <span>{s.source}</span><span style={{ color: th.textMuted }}>{"\u2192"}</span><span>{s.target}</span>
                                         <span style={{ color: th.textMuted }}>{s.user || "(unknown)"}</span>
                                         {(s.attemptCount || 1) > 1 && <span style={{ color: th.sev.high, fontWeight: 600 }}>{s.attemptCount} attempts</span>}
                                         <span style={{ color: th.textMuted }}>{fmtTs(s.startTime)}</span>
                                         {_rdpEnd(s) && <span style={{ color: th.textMuted }}>{"\u2014"} {fmtTs(_rdpEnd(s))}{s.endIsLastSeen ? "*" : ""}</span>}
                                         <span style={{ color: th.textMuted }}>{fmtDur(s.startTime, _rdpEnd(s))}</span>
-                                        {s.hasAdmin && <span style={{ padding: "0 3px", background: th.sev.critical + "22", color: th.sev.critical, borderRadius: 2, fontSize: 7, fontWeight: 700 }}>ADMIN</span>}
-                                        {s.isConcurrent && <span style={{ padding: "0 3px", background: th.sev.high + "22", color: th.sev.high, borderRadius: 2, fontSize: 7, fontWeight: 700 }} title={`Concurrent with ${(s._concurrentTargets || []).join(", ")}`}>CONCURRENT</span>}
-                                        <span style={{ padding: "0 3px", background: confStyle(s.confidence) + "18", color: confStyle(s.confidence), borderRadius: 2, fontSize: 7, fontWeight: 600 }}>{(s.confidence || "low").toUpperCase()}</span>
+                                        {s.hasAdmin && <span style={{ padding: "0 3px", background: th.sev.critical + "22", color: th.sev.critical, borderRadius: 2, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700 }}>ADMIN</span>}
+                                        {s.isConcurrent && <span style={{ padding: "0 3px", background: th.sev.high + "22", color: th.sev.high, borderRadius: 2, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700 }} title={`Concurrent with ${(s._concurrentTargets || []).join(", ")}`}>CONCURRENT</span>}
+                                        <span style={{ padding: "0 3px", background: confStyle(s.confidence) + "18", color: confStyle(s.confidence), borderRadius: 2, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 600 }}>{(s.confidence || "low").toUpperCase()}</span>
+                                        {(() => {
+                                          const evidence = evidenceStyle(s.evidenceLevel);
+                                          return <span title={(s.evidenceBasis || []).join("; ")} style={{ padding: "0 3px", background: evidence.bg, color: evidence.color, borderRadius: 2, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 600 }}>{evidence.label}</span>;
+                                        })()}
                                         <EvidenceActions item={s} compact />
                                       </div>
                                     );
@@ -3978,18 +4013,18 @@ export default function LateralMovementModal() {
                     // ternary, so "timeline" fell through here and rendered the entire
                     // session table underneath the Gantt chart.
                     <div style={{ maxHeight: 400, overflow: "auto", border: `1px solid ${th.border}`, borderRadius: 6 }}>
-                      <table style={{ borderCollapse: "collapse", fontSize: 10, fontFamily: "monospace", tableLayout: "fixed", width: rdpTotalTableW }}>
+                      <table style={{ borderCollapse: "collapse", fontSize: LM_TYPOGRAPHY.body, fontFamily: "monospace", tableLayout: "fixed", width: rdpTotalTableW }}>
                         <thead>
                           <tr>
                             <th style={{ position: "sticky", top: 0, width: 30, background: th.headerBg || th.panelBg, borderBottom: `1px solid ${th.border}`, zIndex: 2, textAlign: "center", padding: "6px 4px" }}>
                               <input type="checkbox" checked={rdpAllChecked} onChange={toggleAllRdp} style={{ width: 13, height: 13, cursor: "pointer", accentColor: th.accent }} />
                             </th>
                             {rdpHeaders.map((h) => (
-                              <th key={h} style={{ position: "sticky", top: 0, width: rdpColWidths[h] || rdpDefWidths[h], minWidth: 40, background: th.headerBg || th.panelBg, color: rdpSortCol === h ? th.text : th.accent, padding: "6px 8px", textAlign: "left", fontSize: 9, borderBottom: `1px solid ${th.border}`, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap", overflow: "hidden", boxSizing: "border-box", userSelect: "none", zIndex: 2 }}>
+                              <th key={h} style={{ position: "sticky", top: 0, width: rdpColWidths[h] || rdpDefWidths[h], minWidth: 40, background: th.headerBg || th.panelBg, color: rdpSortCol === h ? th.text : th.accent, padding: "6px 8px", textAlign: "left", fontSize: LM_TYPOGRAPHY.meta, borderBottom: `1px solid ${th.border}`, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap", overflow: "hidden", boxSizing: "border-box", userSelect: "none", zIndex: 2 }}>
                                 <div style={{ display: "flex", alignItems: "center", gap: 3, position: "relative" }}>
                                   <span onClick={() => toggleRdpSort(h)} style={{ cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis" }}>{h}</span>
-                                  {rdpSortCol === h && <span style={{ fontSize: 7, color: th.accent }}>{rdpSortDir === "asc" ? "\u25B2" : "\u25BC"}</span>}
-                                  <span onClick={(e) => openRdpFilter(h, e)} style={{ cursor: "pointer", fontSize: 7, color: rdpColFilters[h] ? th.accent : th.textMuted + "66", flexShrink: 0, marginLeft: "auto", paddingRight: 8 }}>{"\u25BC"}</span>
+                                  {rdpSortCol === h && <span style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.accent }}>{rdpSortDir === "asc" ? "\u25B2" : "\u25BC"}</span>}
+                                  <span onClick={(e) => openRdpFilter(h, e)} style={{ cursor: "pointer", fontSize: LM_TYPOGRAPHY.badge, color: rdpColFilters[h] ? th.accent : th.textMuted + "66", flexShrink: 0, marginLeft: "auto", paddingRight: 8 }}>{"\u25BC"}</span>
                                   <div onMouseDown={(e) => onRdpResizeStart(h, e)} style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: 6, cursor: "col-resize" }}>
                                     <div style={{ position: "absolute", right: 2, top: 2, bottom: 2, width: 1, background: th.border }} />
                                   </div>
@@ -4015,22 +4050,29 @@ export default function LateralMovementModal() {
                                     <input type="checkbox" checked={isRdpChecked(s)} onChange={(ev) => toggleRdpCheck(s, ev)} style={{ width: 13, height: 13, cursor: "pointer", accentColor: th.accent }} />
                                   </td>
                                   {/* Score */}
-                                  <td style={{ padding: "4px 8px", textAlign: "center", fontWeight: 700, fontSize: 11, color: sc >= 30 ? th.sev.critical : sc >= 15 ? th.sev.high : th.textMuted }}>{sc}</td>
+                                  <td style={{ padding: "4px 8px", textAlign: "center", fontWeight: 700, fontSize: LM_TYPOGRAPHY.body, color: sc >= 30 ? th.sev.critical : sc >= 15 ? th.sev.high : th.textMuted }}>{sc}</td>
                                   {/* Status */}
                                   <td style={{ padding: "4px 8px" }}>
-                                    <span style={{ padding: "2px 7px", background: st.bg, color: st.color, borderRadius: 4, fontSize: 8, fontWeight: 700, fontFamily: "-apple-system, sans-serif" }}>{st.label}</span>
+                                    <span style={{ padding: "2px 7px", background: st.bg, color: st.color, borderRadius: 4, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700, fontFamily: "-apple-system, sans-serif" }}>{st.label}</span>
                                   </td>
                                   {/* Technique */}
                                   <td style={{ padding: "4px 8px" }}>
-                                    <span style={{ padding: "2px 6px", background: ts0.bg, color: ts0.color, borderRadius: 4, fontSize: 8, fontWeight: 600, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap" }}>{s.technique || "RDP"}</span>
-                                    {s.isConcurrent && <span style={{ padding: "1px 4px", background: th.sev.high + "22", color: th.sev.high, borderRadius: 3, fontSize: 7, fontWeight: 700, fontFamily: "-apple-system, sans-serif", marginLeft: 3 }} title={`Concurrent with session on ${(s._concurrentTargets || []).join(", ")}`}>CONCURRENT</span>}
+                                    <span style={{ padding: "2px 6px", background: ts0.bg, color: ts0.color, borderRadius: 4, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 600, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap" }}>{s.technique || "RDP"}</span>
+                                    {s.isConcurrent && <span style={{ padding: "1px 4px", background: th.sev.high + "22", color: th.sev.high, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700, fontFamily: "-apple-system, sans-serif", marginLeft: 3 }} title={`Concurrent with session on ${(s._concurrentTargets || []).join(", ")}`}>CONCURRENT</span>}
                                   </td>
                                   <td style={{ padding: "4px 8px", color: th.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.source || "\u2014"}</td>
                                   <td style={{ padding: "4px 8px", color: th.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.target || "\u2014"}</td>
                                   <td style={{ padding: "4px 8px", color: th.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.user || "(unknown)"}</td>
                                   {/* Confidence */}
                                   <td style={{ padding: "4px 8px", textAlign: "center" }}>
-                                    <span style={{ fontSize: 8, fontWeight: 600, fontFamily: "-apple-system, sans-serif", color: confStyle(s.confidence) }}>{(s.confidence || "low").toUpperCase()}</span>
+                                    <span style={{ fontSize: LM_TYPOGRAPHY.badge, fontWeight: 600, fontFamily: "-apple-system, sans-serif", color: confStyle(s.confidence) }}>{(s.confidence || "low").toUpperCase()}</span>
+                                  </td>
+                                  {/* Evidence classification */}
+                                  <td style={{ padding: "4px 8px", textAlign: "center" }}>
+                                    {(() => {
+                                      const evidence = evidenceStyle(s.evidenceLevel);
+                                      return <span title={(s.evidenceBasis || []).join("; ")} style={{ padding: "1px 5px", background: evidence.bg, color: evidence.color, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700, fontFamily: "-apple-system, sans-serif" }}>{evidence.label}</span>;
+                                    })()}
                                   </td>
                                   {/* Attempts */}
                                   <td style={{ padding: "4px 8px", textAlign: "center", fontWeight: att > 1 ? 600 : 400, color: att > 5 ? th.sev.critical : att > 1 ? th.sev.high : th.textDim }}>{att}</td>
@@ -4041,9 +4083,9 @@ export default function LateralMovementModal() {
                                   <td style={{ padding: "4px 6px" }}>
                                     <div style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
                                       {(s.flags || []).slice(0, 4).map((f, fi) => (
-                                        <span key={fi} style={{ padding: "1px 5px", background: f.startsWith("Finding:") ? th.sev.critical + "12" : th.textMuted + "18", color: f.startsWith("Finding:") ? th.sev.critical : th.textDim, borderRadius: 3, fontSize: 7, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap" }}>{f}</span>
+                                        <span key={fi} style={{ padding: "1px 5px", background: f.startsWith("Finding:") ? th.sev.critical + "12" : th.textMuted + "18", color: f.startsWith("Finding:") ? th.sev.critical : th.textDim, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap" }}>{f}</span>
                                       ))}
-                                      {(s.flags || []).length > 4 && <span style={{ fontSize: 7, color: th.textMuted }}>+{s.flags.length - 4}</span>}
+                                      {(s.flags || []).length > 4 && <span style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted }}>+{s.flags.length - 4}</span>}
                                     </div>
                                   </td>
                                 </tr>
@@ -4057,22 +4099,29 @@ export default function LateralMovementModal() {
                                           {(s.events || []).map((evt, ei) => {
                                             const dotColor = evt.eventId === "4625" ? th.sev.critical : evt.eventId === "4672" ? th.sev.high : evt.eventId === "4624" ? th.sev.info : ["21","22","25","1149"].includes(evt.eventId) ? th.sev.clean : ["23","4634","4647"].includes(evt.eventId) ? th.textMuted : ["24","39","40","4779"].includes(evt.eventId) ? th.sev.med : st.color;
                                             return (
-                                              <div key={ei} style={{ position: "relative", paddingLeft: 18, paddingBottom: 6, fontSize: 10, display: "flex", alignItems: "center", gap: 8 }}>
+                                              <div key={ei} style={{ position: "relative", paddingLeft: 18, paddingBottom: 6, fontSize: LM_TYPOGRAPHY.control, display: "flex", alignItems: "center", gap: 8 }}>
                                                 <div style={{ position: "absolute", left: 0, top: 4, width: 9, height: 9, borderRadius: "50%", background: dotColor, border: `2px solid ${th.panelBg}`, boxShadow: `0 0 0 1px ${dotColor}44` }} />
-                                                <span style={{ padding: "1px 5px", background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 3, fontSize: 9, fontFamily: "monospace", color: th.accent, minWidth: 32, textAlign: "center", fontWeight: 600 }}>{evt.eventId}</span>
+                                                <span style={{ padding: "1px 5px", background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 3, fontSize: LM_TYPOGRAPHY.meta, fontFamily: "monospace", color: th.accent, minWidth: 32, textAlign: "center", fontWeight: 600 }}>{evt.eventId}</span>
                                                 <span style={{ color: th.textDim, fontFamily: "-apple-system, sans-serif" }}>{evt.description}</span>
-                                                <span style={{ marginLeft: "auto", color: th.textMuted, fontFamily: "monospace", fontSize: 9 }}>{evt.ts?.slice(11, 23) || ""}</span>
+                                                <span style={{ marginLeft: "auto", color: th.textMuted, fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.meta }}>{evt.ts?.slice(11, 23) || ""}</span>
                                               </div>
                                             );
                                           })}
                                         </div>
                                         {/* Right: Session details */}
-                                        <div style={{ width: 220, flexShrink: 0, fontSize: 9, fontFamily: "-apple-system, sans-serif", color: th.textDim }}>
+                                        <div style={{ width: 220, flexShrink: 0, fontSize: LM_TYPOGRAPHY.meta, fontFamily: "-apple-system, sans-serif", color: th.textDim }}>
                                           <div style={{ marginBottom: 8 }}>
-                                            <div style={{ fontWeight: 600, color: th.text, marginBottom: 4, fontSize: 10 }}>Session Details</div>
+                                            <div style={{ fontWeight: 600, color: th.text, marginBottom: 4, fontSize: LM_TYPOGRAPHY.control }}>Session Details</div>
                                             <div style={{ display: "flex", gap: 4, marginBottom: 2 }}><span style={{ color: th.textMuted, width: 80 }}>Session ID</span><span>{s.sessionId || "\u2014"}</span></div>
                                             <div style={{ display: "flex", gap: 4, marginBottom: 2 }}><span style={{ color: th.textMuted, width: 80 }}>Events</span><span style={{ fontWeight: 600 }}>{(s.events || []).length}</span></div>
                                             <div style={{ display: "flex", gap: 4, marginBottom: 2 }}><span style={{ color: th.textMuted, width: 80 }}>Confidence</span><span style={{ color: confStyle(s.confidence), fontWeight: 600 }}>{(s.confidence || "low").toUpperCase()}</span></div>
+                                            <div style={{ display: "flex", gap: 4, marginBottom: 2 }}>
+                                              <span style={{ color: th.textMuted, width: 80 }}>Evidence</span>
+                                              <span style={{ color: evidenceStyle(s.evidenceLevel).color, fontWeight: 600 }}>{evidenceStyle(s.evidenceLevel).label}</span>
+                                            </div>
+                                            {(s.evidenceBasis || []).map((basis, bi) => (
+                                              <div key={bi} style={{ margin: "2px 0 2px 84px", color: th.textMuted, lineHeight: 1.3, overflowWrap: "anywhere" }}>{basis}</div>
+                                            ))}
                                             {(s.mergedReconnects || 0) > 0 && <div style={{ display: "flex", gap: 4, marginBottom: 2 }}><span style={{ color: th.textMuted, width: 80 }}>Reconnects</span><span>{s.mergedReconnects} merged</span></div>}
                                             {(s.attemptCount || 1) > 1 && <div style={{ display: "flex", gap: 4, marginBottom: 2 }}><span style={{ color: th.textMuted, width: 80 }}>Attempts</span><span style={{ color: th.sev.high, fontWeight: 600 }}>{s.attemptCount}</span></div>}
                                           </div>
@@ -4087,12 +4136,12 @@ export default function LateralMovementModal() {
                                             ];
                                             return (
                                               <div style={{ marginBottom: 8 }}>
-                                                <div style={{ fontWeight: 600, color: th.text, marginBottom: 4, fontSize: 10 }}>Expected Events</div>
+                                                <div style={{ fontWeight: 600, color: th.text, marginBottom: 4, fontSize: LM_TYPOGRAPHY.control }}>Telemetry Completeness</div>
                                                 <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                                                   {checks.map((c, ci) => (
-                                                    <span key={ci} style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "1px 5px", borderRadius: 3, background: c.present ? th.sev.clean + "12" : th.sev.critical + "12", fontSize: 8 }}>
-                                                      <span style={{ color: c.present ? th.sev.clean : th.sev.critical }}>{c.present ? "\u2713" : "\u2717"}</span>
-                                                      <span style={{ color: c.present ? th.textDim : th.sev.critical }}>{c.label}</span>
+                                                    <span key={ci} style={{ display: "inline-flex", alignItems: "center", gap: 3, padding: "1px 5px", borderRadius: 3, background: c.present ? th.sev.clean + "12" : th.textMuted + "12", fontSize: LM_TYPOGRAPHY.badge }}>
+                                                      <span style={{ color: c.present ? th.sev.clean : th.textMuted }}>{c.present ? "\u2713" : "\u2014"}</span>
+                                                      <span style={{ color: c.present ? th.textDim : th.textMuted }}>{c.label}</span>
                                                     </span>
                                                   ))}
                                                 </div>
@@ -4102,10 +4151,10 @@ export default function LateralMovementModal() {
                                           {/* Flags */}
                                           {(s.flags || []).length > 0 && (
                                             <div>
-                                              <div style={{ fontWeight: 600, color: th.text, marginBottom: 4, fontSize: 10 }}>Why Flagged</div>
+                                              <div style={{ fontWeight: 600, color: th.text, marginBottom: 4, fontSize: LM_TYPOGRAPHY.control }}>Why Flagged</div>
                                               <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
                                                 {s.flags.map((f, fi) => (
-                                                  <span key={fi} style={{ padding: "1px 5px", background: f.startsWith("Finding:") ? th.sev.critical + "12" : th.textMuted + "12", color: f.startsWith("Finding:") ? th.sev.critical : th.textDim, borderRadius: 3, fontSize: 8, whiteSpace: "nowrap" }}>{f}</span>
+                                                  <span key={fi} style={{ padding: "1px 5px", background: f.startsWith("Finding:") ? th.sev.critical + "12" : th.textMuted + "12", color: f.startsWith("Finding:") ? th.sev.critical : th.textDim, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, whiteSpace: "nowrap" }}>{f}</span>
                                                 ))}
                                               </div>
                                             </div>
@@ -4120,11 +4169,11 @@ export default function LateralMovementModal() {
                                               // Carry the refs so the pivot can land on the exact rows
                                               // (and the right tab in a multi-source run).
                                               evidenceRefs: s.evidenceRefs, itemRowids: s.itemRowids,
-                                            }, ev)} style={{ padding: "2px 8px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 4, fontSize: 9, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
+                                            }, ev)} style={{ padding: "2px 8px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 4, fontSize: LM_TYPOGRAPHY.meta, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 600, display: "flex", alignItems: "center", gap: 4 }}>
                                               <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke={th.accent} strokeWidth="2.5" strokeLinecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                                               Show in Timeline
                                             </button>
-                                            <button onClick={(ev) => _viewInGraph({ source: s.source, target: s.target }, ev)} style={{ padding: "2px 8px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 4, fontSize: 9, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 }}>
+                                            <button onClick={(ev) => _viewInGraph({ source: s.source, target: s.target }, ev)} style={{ padding: "2px 8px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 4, fontSize: LM_TYPOGRAPHY.meta, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 }}>
                                               View in Graph
                                             </button>
                                             <EvidenceActions item={s} />
@@ -4157,18 +4206,18 @@ export default function LateralMovementModal() {
                               const onUp = () => { document.body.style.cursor = ""; document.body.style.userSelect = ""; window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
                               window.addEventListener("mousemove", onMove); window.addEventListener("mouseup", onUp);
                             }}>
-                            <span style={{ fontSize: 11, fontWeight: 600, color: th.text, fontFamily: "SF Mono, Menlo, monospace" }}>FILTER {"\u2014"} {rdpFilterOpen.toUpperCase()}</span>
-                            <span style={{ cursor: "pointer", color: th.textMuted, fontSize: 14, lineHeight: 1 }} onClick={() => setModal((p) => ({ ...p, rdpFilterOpen: null }))}>{"\u00D7"}</span>
+                            <span style={{ fontSize: LM_TYPOGRAPHY.body, fontWeight: 600, color: th.text, fontFamily: "SF Mono, Menlo, monospace" }}>FILTER {"\u2014"} {rdpFilterOpen.toUpperCase()}</span>
+                            <span style={{ cursor: "pointer", color: th.textMuted, fontSize: LM_TYPOGRAPHY.heading, lineHeight: 1 }} onClick={() => setModal((p) => ({ ...p, rdpFilterOpen: null }))}>{"\u00D7"}</span>
                           </div>
                           <div style={{ padding: "6px 10px", flexShrink: 0 }}>
                             <input type="text" placeholder="Search values..." value={rdpFilterSearch} onChange={(e) => setModal((p) => ({ ...p, rdpFilterSearch: e.target.value }))}
-                              style={{ width: "100%", boxSizing: "border-box", padding: "5px 8px", fontSize: 11, background: th.panelBg, border: `1px solid ${th.border}55`, borderRadius: 4, color: th.text, outline: "none", fontFamily: "SF Mono, Menlo, monospace" }}
+                              style={{ width: "100%", boxSizing: "border-box", padding: "5px 8px", fontSize: LM_TYPOGRAPHY.body, background: th.panelBg, border: `1px solid ${th.border}55`, borderRadius: 4, color: th.text, outline: "none", fontFamily: "SF Mono, Menlo, monospace" }}
                               autoFocus />
                           </div>
                           <div style={{ padding: "2px 10px 6px", display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
-                            <button onClick={() => setModal((p) => ({ ...p, rdpFilterSel: new Set(rdpFilterVals) }))} style={{ padding: "2px 8px", fontSize: 10, background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 4, color: th.text, cursor: "pointer" }}>Select All</button>
-                            <button onClick={() => setModal((p) => ({ ...p, rdpFilterSel: new Set() }))} style={{ padding: "2px 8px", fontSize: 10, background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 4, color: th.text, cursor: "pointer" }}>Clear</button>
-                            <span style={{ marginLeft: "auto", fontSize: 10, color: th.textMuted }}>{rdpFilterVals.length} values</span>
+                            <button onClick={() => setModal((p) => ({ ...p, rdpFilterSel: new Set(rdpFilterVals) }))} style={{ padding: "2px 8px", fontSize: LM_TYPOGRAPHY.control, background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 4, color: th.text, cursor: "pointer" }}>Select All</button>
+                            <button onClick={() => setModal((p) => ({ ...p, rdpFilterSel: new Set() }))} style={{ padding: "2px 8px", fontSize: LM_TYPOGRAPHY.control, background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 4, color: th.text, cursor: "pointer" }}>Clear</button>
+                            <span style={{ marginLeft: "auto", fontSize: LM_TYPOGRAPHY.control, color: th.textMuted }}>{rdpFilterVals.length} values</span>
                           </div>
                           <div style={{ flex: 1, overflow: "auto", padding: "0 6px", minHeight: 0 }}>
                             {rdpDisplayVals.slice(0, 1000).map((v) => (
@@ -4177,18 +4226,18 @@ export default function LateralMovementModal() {
                                 onMouseEnter={(e) => e.currentTarget.style.background = `${th.accent}0a`}
                                 onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>
                                 <input type="checkbox" checked={rdpFilterSel.has(v)} readOnly style={{ width: 13, height: 13, accentColor: th.accent, cursor: "pointer", flexShrink: 0 }} />
-                                <span style={{ fontSize: 11, color: th.text, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "SF Mono, Menlo, monospace" }}>{v || "(empty)"}</span>
-                                <span style={{ fontSize: 10, color: th.textMuted, flexShrink: 0 }}>{rdpFilterCounts[v]}</span>
+                                <span style={{ fontSize: LM_TYPOGRAPHY.body, color: th.text, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "SF Mono, Menlo, monospace" }}>{v || "(empty)"}</span>
+                                <span style={{ fontSize: LM_TYPOGRAPHY.control, color: th.textMuted, flexShrink: 0 }}>{rdpFilterCounts[v]}</span>
                               </div>
                             ))}
                           </div>
                           <div style={{ padding: "8px 10px", borderTop: `1px solid ${th.border}33`, display: "flex", gap: 6, justifyContent: "flex-end", flexShrink: 0 }}>
                             <button onClick={() => setModal((p) => { const cf = { ...(p.rdpColFilters || {}) }; delete cf[rdpFilterOpen]; return { ...p, rdpColFilters: cf, rdpFilterOpen: null }; })}
-                              style={{ padding: "4px 12px", fontSize: 10, background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 4, color: th.text, cursor: "pointer" }}>Reset</button>
+                              style={{ padding: "4px 12px", fontSize: LM_TYPOGRAPHY.control, background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 4, color: th.text, cursor: "pointer" }}>Reset</button>
                             <button onClick={() => setModal((p) => ({ ...p, rdpFilterOpen: null }))}
-                              style={{ padding: "4px 12px", fontSize: 10, background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 4, color: th.text, cursor: "pointer" }}>Cancel</button>
+                              style={{ padding: "4px 12px", fontSize: LM_TYPOGRAPHY.control, background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 4, color: th.text, cursor: "pointer" }}>Cancel</button>
                             <button onClick={() => setModal((p) => ({ ...p, rdpColFilters: { ...(p.rdpColFilters || {}), [rdpFilterOpen]: [...(p.rdpFilterSel || [])] }, rdpFilterOpen: null }))}
-                              style={{ padding: "4px 12px", fontSize: 10, background: th.accent, border: "none", borderRadius: 4, color: "#fff", cursor: "pointer", fontWeight: 600 }}>Apply</button>
+                              style={{ padding: "4px 12px", fontSize: LM_TYPOGRAPHY.control, background: th.accent, border: "none", borderRadius: 4, color: "#fff", cursor: "pointer", fontWeight: 600 }}>Apply</button>
                           </div>
                           <div onMouseDown={(e) => {
                             e.preventDefault(); e.stopPropagation();
@@ -4315,7 +4364,7 @@ export default function LateralMovementModal() {
 
                 if (accounts.length === 0) {
                   return (
-                    <div style={{ padding: "40px 20px", textAlign: "center", color: th.textMuted, fontFamily: "-apple-system, sans-serif", fontSize: 12 }}>
+                    <div style={{ padding: "40px 20px", textAlign: "center", color: th.textMuted, fontFamily: "-apple-system, sans-serif", fontSize: LM_TYPOGRAPHY.title }}>
                       No accounts extracted from this dataset. Check the Telemetry Coverage panel above for which event categories are present.
                     </div>
                   );
@@ -4324,25 +4373,25 @@ export default function LateralMovementModal() {
                 return (
                   <div>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                      <span style={{ fontSize: 11, color: th.textDim, fontFamily: "-apple-system, sans-serif" }}>
+                      <span style={{ fontSize: LM_TYPOGRAPHY.body, color: th.textDim, fontFamily: "-apple-system, sans-serif" }}>
                         {sortedAccts.length} account{sortedAccts.length !== 1 ? "s" : ""}
                       </span>
-                      <button onClick={copyAccts} style={{ padding: "4px 10px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 4, fontSize: 10, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 }}>
+                      <button onClick={copyAccts} style={{ padding: "4px 10px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 4, fontSize: LM_TYPOGRAPHY.control, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 }}>
                         Copy All ({sortedAccts.length})
                       </button>
                     </div>
                     <div style={{ border: `1px solid ${th.border}44`, borderRadius: 6, overflow: "hidden", background: th.panelBg }}>
                       {/* Header row */}
-                      <div style={{ display: "flex", background: `${th.headerBg}88`, borderBottom: `1px solid ${th.border}44`, fontSize: 10, fontWeight: 600, color: th.accent, fontFamily: "-apple-system, sans-serif" }}>
+                      <div style={{ display: "flex", background: `${th.headerBg}88`, borderBottom: `1px solid ${th.border}44`, fontSize: LM_TYPOGRAPHY.control, fontWeight: 600, color: th.accent, fontFamily: "-apple-system, sans-serif" }}>
                         {acctHeaders.map((h) => (
                           <div key={h} onClick={() => toggleAcctSort(h)}
                             style={{ width: acctColWidths[h] || 80, padding: "8px 10px", cursor: "pointer", display: "flex", alignItems: "center", gap: 4, userSelect: "none", flexShrink: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}
                             title={acctHeaderTips[h] || h}>
                             {h}
-                            {acctSortCol === h && <span style={{ fontSize: 9, opacity: 0.7 }}>{acctSortDir === "asc" ? "▲" : "▼"}</span>}
+                            {acctSortCol === h && <span style={{ fontSize: LM_TYPOGRAPHY.meta, opacity: 0.7 }}>{acctSortDir === "asc" ? "▲" : "▼"}</span>}
                           </div>
                         ))}
-                        <div style={{ padding: "8px 10px", flexShrink: 0, fontSize: 10, color: th.textMuted }}>Actions</div>
+                        <div style={{ padding: "8px 10px", flexShrink: 0, fontSize: LM_TYPOGRAPHY.control, color: th.textMuted }}>Actions</div>
                       </div>
                       {/* Body rows */}
                       <div style={{ maxHeight: 480, overflowY: "auto" }}>
@@ -4350,29 +4399,29 @@ export default function LateralMovementModal() {
                           const cls = _classify(a);
                           return (
                             <div key={a.user + "_" + idx}
-                              style={{ display: "flex", borderBottom: idx < sortedAccts.length - 1 ? `1px solid ${th.border}22` : "none", fontSize: 11, color: th.text, fontFamily: "-apple-system, sans-serif", alignItems: "center", minHeight: 32 }}>
+                              style={{ display: "flex", borderBottom: idx < sortedAccts.length - 1 ? `1px solid ${th.border}22` : "none", fontSize: LM_TYPOGRAPHY.body, color: th.text, fontFamily: "-apple-system, sans-serif", alignItems: "center", minHeight: 32 }}>
                               {acctHeaders.map((h) => {
                                 const val = acctCellVal(a, h);
                                 let cell;
                                 if (h === "Score") {
                                   const sc = a.suspicionScore || 0;
-                                  cell = <span style={{ fontFamily: "monospace", fontSize: 10, color: scoreColor(sc), background: scoreColor(sc) + "18", padding: "1px 6px", borderRadius: 3, fontWeight: 700 }}>{sc}</span>;
+                                  cell = <span style={{ fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.control, color: scoreColor(sc), background: scoreColor(sc) + "18", padding: "1px 6px", borderRadius: 3, fontWeight: 700 }}>{sc}</span>;
                                 } else if (h === "Class") {
-                                  cell = <span style={{ fontFamily: "monospace", fontSize: 8, color: cls.color, background: cls.color + "18", border: `1px solid ${cls.color}33`, padding: "1px 5px", borderRadius: 3, fontWeight: 600 }}>{cls.label}</span>;
+                                  cell = <span style={{ fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.badge, color: cls.color, background: cls.color + "18", border: `1px solid ${cls.color}33`, padding: "1px 5px", borderRadius: 3, fontWeight: 600 }}>{cls.label}</span>;
                                 } else if (h === "User") {
-                                  cell = <span style={{ fontFamily: "monospace", fontSize: 11, color: th.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{val || "(unknown)"}</span>;
+                                  cell = <span style={{ fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.body, color: th.text, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{val || "(unknown)"}</span>;
                                 } else if (h === "Why Suspicious") {
                                   const flags = a.flags || [];
                                   cell = (
                                     <div style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
                                       {flags.slice(0, 4).map((f, i) => (
-                                        <span key={i} style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: `${th.textMuted}15`, color: th.textDim, fontFamily: "-apple-system, sans-serif" }}>{f}</span>
+                                        <span key={i} style={{ fontSize: LM_TYPOGRAPHY.badge, padding: "1px 5px", borderRadius: 3, background: `${th.textMuted}15`, color: th.textDim, fontFamily: "-apple-system, sans-serif" }}>{f}</span>
                                       ))}
-                                      {flags.length > 4 && <span style={{ fontSize: 8, color: th.textMuted }}>+{flags.length - 4}</span>}
+                                      {flags.length > 4 && <span style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted }}>+{flags.length - 4}</span>}
                                     </div>
                                   );
                                 } else if (h === "First Seen" || h === "Last Seen") {
-                                  cell = <span style={{ fontFamily: "monospace", fontSize: 10, color: th.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{val}</span>;
+                                  cell = <span style={{ fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.control, color: th.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{val}</span>;
                                 } else {
                                   const isZero = val === "0" || val === "";
                                   const n = Number(val) || 0;
@@ -4395,7 +4444,7 @@ export default function LateralMovementModal() {
                                   } else if (raw != null && raw > n) {
                                     tip = `${n} lateral-movement-scoped • ${raw} host-wide (all logon types, incl. local/service)`;
                                   }
-                                  cell = <span title={tip} style={{ fontFamily: "monospace", fontSize: 10, color: isZero ? th.textMuted : th.text, opacity: isZero ? 0.4 : 1, cursor: tip ? "help" : undefined, textDecoration: tip ? "underline dotted" : undefined, textDecorationColor: tip ? th.textMuted : undefined }}>{val || "0"}</span>;
+                                  cell = <span title={tip} style={{ fontFamily: "monospace", fontSize: LM_TYPOGRAPHY.control, color: isZero ? th.textMuted : th.text, opacity: isZero ? 0.4 : 1, cursor: tip ? "help" : undefined, textDecoration: tip ? "underline dotted" : undefined, textDecorationColor: tip ? th.textMuted : undefined }}>{val || "0"}</span>;
                                 }
                                 return (
                                   <div key={h} style={{ width: acctColWidths[h] || 80, padding: "6px 10px", flexShrink: 0, overflow: "hidden" }}>
@@ -4407,7 +4456,7 @@ export default function LateralMovementModal() {
                               <div style={{ display: "flex", gap: 3, padding: "4px 8px", flexShrink: 0, alignItems: "center" }}>
                                 {(a.findingIds || []).length > 0 && (
                                   <button onClick={(ev) => { ev.stopPropagation(); setModal((p) => ({ ...p, viewTab: "findings", findingsView: "alerts" })); }}
-                                    style={{ padding: "2px 6px", background: th.sev.critical + "15", color: th.sev.critical, border: `1px solid ${th.sev.critical}33`, borderRadius: 3, fontSize: 8, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 600, whiteSpace: "nowrap" }}
+                                    style={{ padding: "2px 6px", background: th.sev.critical + "15", color: th.sev.critical, border: `1px solid ${th.sev.critical}33`, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 600, whiteSpace: "nowrap" }}
                                     title={`${a.findingIds.length} finding(s) involving ${a.user}`}>
                                     Findings ({a.findingIds.length})
                                   </button>
@@ -4423,7 +4472,7 @@ export default function LateralMovementModal() {
                                   }
                                   up("searchTerm", ""); up("columnFilters", {});
                                   setModal(null);
-                                }} style={{ padding: "2px 6px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 3, fontSize: 8, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 600, whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 3 }}
+                                }} style={{ padding: "2px 6px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 600, whiteSpace: "nowrap", display: "flex", alignItems: "center", gap: 3 }}
                                   title="Close modal and filter main timeline to logon events for this user">
                                   <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke={th.accent} strokeWidth="2.5" strokeLinecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><polyline points="15 3 21 3 21 9"/><line x1="10" y1="14" x2="21" y2="3"/></svg>
                                   Timeline
@@ -4434,7 +4483,7 @@ export default function LateralMovementModal() {
                                   const userEdge = data?.edges?.find(e => (e.users || []).some(u => u.toUpperCase() === (a.user || "").toUpperCase()));
                                   if (userEdge) _viewInGraph({ source: userEdge.source, target: userEdge.target }, ev);
                                   else setModal((p) => ({ ...p, viewTab: "graph" }));
-                                }} style={{ padding: "2px 6px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 3, fontSize: 8, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500, whiteSpace: "nowrap" }}
+                                }} style={{ padding: "2px 6px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500, whiteSpace: "nowrap" }}
                                   title="Switch to Graph view and highlight edges involving this user">
                                   Graph
                                 </button>
@@ -4608,32 +4657,32 @@ export default function LateralMovementModal() {
                   <div>
                     <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 6, marginBottom: 6 }}>
                       {activeFilterCount > 0 && (
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 8px", background: `${th.accent}11`, borderRadius: 6, fontSize: 10, color: th.accent, fontFamily: "-apple-system, sans-serif" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 8px", background: `${th.accent}11`, borderRadius: 6, fontSize: LM_TYPOGRAPHY.control, color: th.accent, fontFamily: "-apple-system, sans-serif" }}>
                           <span style={{ fontWeight: 600 }}>Filter active ({activeFilterCount} column{activeFilterCount > 1 ? "s" : ""})</span>
-                          <span style={{ fontSize: 10, color: th.textMuted }}>{"\u2014"} {filteredEdges.length} of {data.edges.length} connections</span>
-                          <button onClick={() => setModal((p) => ({ ...p, lmColFilters: {} }))} style={{ padding: "1px 8px", fontSize: 9, background: th.accent, color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontWeight: 600 }}>Clear All</button>
+                          <span style={{ fontSize: LM_TYPOGRAPHY.control, color: th.textMuted }}>{"\u2014"} {filteredEdges.length} of {data.edges.length} connections</span>
+                          <button onClick={() => setModal((p) => ({ ...p, lmColFilters: {} }))} style={{ padding: "1px 8px", fontSize: LM_TYPOGRAPHY.meta, background: th.accent, color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontWeight: 600 }}>Clear All</button>
                         </div>
                       )}
                       <div style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
-                        <button onClick={copyAll} style={{ padding: "3px 10px", fontSize: 10, background: th.btnBg, color: th.text, border: `1px solid ${th.border}`, borderRadius: 4, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}
+                        <button onClick={copyAll} style={{ padding: "3px 10px", fontSize: LM_TYPOGRAPHY.control, background: th.btnBg, color: th.text, border: `1px solid ${th.border}`, borderRadius: 4, cursor: "pointer", fontFamily: "-apple-system, sans-serif" }}
                           onMouseEnter={(ev) => { ev.currentTarget.style.background = th.accent + "22"; }} onMouseLeave={(ev) => { ev.currentTarget.style.background = th.btnBg; }}>
                           {checkedCount > 0 ? `Copy Selected (${checkedCount})` : `Copy All (${sortedEdges.length})`}
                         </button>
                       </div>
                     </div>
                     <div style={{ maxHeight: 360, overflow: "auto", border: `1px solid ${th.border}`, borderRadius: 6 }}>
-                      <table style={{ borderCollapse: "collapse", fontSize: 10, fontFamily: "monospace", tableLayout: "fixed", width: totalTableW }}>
+                      <table style={{ borderCollapse: "collapse", fontSize: LM_TYPOGRAPHY.body, fontFamily: "monospace", tableLayout: "fixed", width: totalTableW }}>
                         <thead>
                           <tr>
                             <th style={{ position: "sticky", top: 0, width: 30, background: th.headerBg || th.panelBg, borderBottom: `1px solid ${th.border}`, zIndex: 2, textAlign: "center", padding: "6px 4px" }}>
                               <input type="checkbox" checked={allChecked} onChange={toggleAllLm} style={{ width: 13, height: 13, cursor: "pointer", accentColor: th.accent }} />
                             </th>
                             {lmHeaders.map((h) => (
-                              <th key={h} style={{ position: "sticky", top: 0, width: lmColWidths[h] || lmDefWidths[h], minWidth: 40, background: th.headerBg || th.panelBg, color: lmSortCol === h ? th.text : th.accent, padding: "6px 8px", textAlign: "left", fontSize: 9, borderBottom: `1px solid ${th.border}`, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap", overflow: "hidden", boxSizing: "border-box", userSelect: "none", zIndex: 2 }}>
+                              <th key={h} style={{ position: "sticky", top: 0, width: lmColWidths[h] || lmDefWidths[h], minWidth: 40, background: th.headerBg || th.panelBg, color: lmSortCol === h ? th.text : th.accent, padding: "6px 8px", textAlign: "left", fontSize: LM_TYPOGRAPHY.meta, borderBottom: `1px solid ${th.border}`, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap", overflow: "hidden", boxSizing: "border-box", userSelect: "none", zIndex: 2 }}>
                                 <div style={{ display: "flex", alignItems: "center", gap: 3, position: "relative" }}>
                                   <span onClick={() => toggleSort(h)} style={{ cursor: "pointer", overflow: "hidden", textOverflow: "ellipsis" }}>{h}</span>
-                                  {lmSortCol === h && <span style={{ fontSize: 7, color: th.accent }}>{lmSortDir === "asc" ? "\u25B2" : "\u25BC"}</span>}
-                                  <span onClick={(e) => openLmFilter(h, e)} style={{ cursor: "pointer", fontSize: 7, color: lmColFilters[h] ? th.accent : th.textMuted + "66", flexShrink: 0, marginLeft: "auto", paddingRight: 8 }}>{"\u25BC"}</span>
+                                  {lmSortCol === h && <span style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.accent }}>{lmSortDir === "asc" ? "\u25B2" : "\u25BC"}</span>}
+                                  <span onClick={(e) => openLmFilter(h, e)} style={{ cursor: "pointer", fontSize: LM_TYPOGRAPHY.badge, color: lmColFilters[h] ? th.accent : th.textMuted + "66", flexShrink: 0, marginLeft: "auto", paddingRight: 8 }}>{"\u25BC"}</span>
                                   <div onMouseDown={(e) => onResizeStart(h, e)} style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: 6, cursor: "col-resize" }}>
                                     <div style={{ position: "absolute", right: 2, top: 2, bottom: 2, width: 1, background: th.border }} />
                                   </div>
@@ -4659,15 +4708,15 @@ export default function LateralMovementModal() {
                                     <input type="checkbox" checked={isLmChecked(e)} onChange={(ev) => toggleLmCheck(e, ev)} style={{ width: 13, height: 13, cursor: "pointer", accentColor: th.accent }} />
                                   </td>
                                   {/* Score */}
-                                  <td style={{ padding: "4px 8px", textAlign: "center", fontWeight: 700, fontSize: 11, color: eSc >= 30 ? th.sev.critical : eSc >= 15 ? th.sev.high : th.textMuted }}>{eSc}</td>
+                                  <td style={{ padding: "4px 8px", textAlign: "center", fontWeight: 700, fontSize: LM_TYPOGRAPHY.body, color: eSc >= 30 ? th.sev.critical : eSc >= 15 ? th.sev.high : th.textMuted }}>{eSc}</td>
                                   {/* Source */}
-                                  <td style={{ padding: "4px 8px", color: isSusHost(e.source) ? th.sev.high : th.text, fontWeight: isSusHost(e.source) ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.source}{isSusHost(e.source) && <span title="Suspicious hostname" style={{ marginLeft: 4, fontSize: 9 }}>&#9888;</span>}{e.sourceLabel && e.sourceLabel !== "host" && <span style={{ marginLeft: 4, fontSize: 7, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>{e.sourceLabel}</span>}</td>
+                                  <td style={{ padding: "4px 8px", color: isSusHost(e.source) ? th.sev.high : th.text, fontWeight: isSusHost(e.source) ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.source}{isSusHost(e.source) && <span title="Suspicious hostname" style={{ marginLeft: 4, fontSize: LM_TYPOGRAPHY.meta }}>&#9888;</span>}{e.sourceLabel && e.sourceLabel !== "host" && <span style={{ marginLeft: 4, fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>{e.sourceLabel}</span>}</td>
                                   {/* Target */}
-                                  <td style={{ padding: "4px 8px", color: isSusHost(e.target) ? th.sev.high : th.text, fontWeight: isSusHost(e.target) ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.target}{isSusHost(e.target) && <span title="Suspicious hostname" style={{ marginLeft: 4, fontSize: 9 }}>&#9888;</span>}</td>
+                                  <td style={{ padding: "4px 8px", color: isSusHost(e.target) ? th.sev.high : th.text, fontWeight: isSusHost(e.target) ? 600 : 400, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{e.target}{isSusHost(e.target) && <span title="Suspicious hostname" style={{ marginLeft: 4, fontSize: LM_TYPOGRAPHY.meta }}>&#9888;</span>}</td>
                                   {/* Technique */}
                                   <td style={{ padding: "4px 8px" }}>
-                                    <span style={{ padding: "2px 6px", background: eTc.bg, color: eTc.color, borderRadius: 4, fontSize: 8, fontWeight: 600, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap" }}>{e.technique || "Unknown"}</span>
-                                    {(e.otherTechniques || []).length > 0 && <span title={(e.otherTechniques || []).join(", ")} style={{ marginLeft: 3, fontSize: 7, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>+{e.otherTechniques.length}</span>}
+                                    <span style={{ padding: "2px 6px", background: eTc.bg, color: eTc.color, borderRadius: 4, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 600, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap" }}>{e.technique || "Unknown"}</span>
+                                    {(e.otherTechniques || []).length > 0 && <span title={(e.otherTechniques || []).join(", ")} style={{ marginLeft: 3, fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>+{e.otherTechniques.length}</span>}
                                   </td>
                                   {/* Users */}
                                   <td style={{ padding: "4px 8px", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: th.textDim }}>{e.users.join(", ")}</td>
@@ -4681,9 +4730,9 @@ export default function LateralMovementModal() {
                                   <td style={{ padding: "4px 6px" }}>
                                     <div style={{ display: "flex", gap: 3, flexWrap: "wrap" }}>
                                       {(e.flags || []).slice(0, 4).map((f, fi) => (
-                                        <span key={fi} style={{ padding: "1px 5px", background: f.startsWith("Finding:") ? th.sev.critical + "12" : th.textMuted + "18", color: f.startsWith("Finding:") ? th.sev.critical : th.textDim, borderRadius: 3, fontSize: 7, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap" }}>{f}</span>
+                                        <span key={fi} style={{ padding: "1px 5px", background: f.startsWith("Finding:") ? th.sev.critical + "12" : th.textMuted + "18", color: f.startsWith("Finding:") ? th.sev.critical : th.textDim, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap" }}>{f}</span>
                                       ))}
-                                      {(e.flags || []).length > 4 && <span style={{ fontSize: 7, color: th.textMuted }}>+{e.flags.length - 4}</span>}
+                                      {(e.flags || []).length > 4 && <span style={{ fontSize: LM_TYPOGRAPHY.badge, color: th.textMuted }}>+{e.flags.length - 4}</span>}
                                     </div>
                                   </td>
                                 </tr>
@@ -4693,9 +4742,9 @@ export default function LateralMovementModal() {
                                       <div style={{ display: "flex", gap: 24, marginTop: 8 }}>
                                         {/* Left: Episodes */}
                                         <div style={{ flex: 1, minWidth: 0 }}>
-                                          <div style={{ fontWeight: 600, color: th.text, fontSize: 10, fontFamily: "-apple-system, sans-serif", marginBottom: 6 }}>Episodes ({(e.episodes || []).length})</div>
+                                          <div style={{ fontWeight: 600, color: th.text, fontSize: LM_TYPOGRAPHY.control, fontFamily: "-apple-system, sans-serif", marginBottom: 6 }}>Episodes ({(e.episodes || []).length})</div>
                                           {(e.episodes || []).length === 0 ? (
-                                            <div style={{ fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>No episode data</div>
+                                            <div style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>No episode data</div>
                                           ) : (
                                             <div style={{ maxHeight: 180, overflowY: "auto" }}>
                                               {(e.episodes || []).map((ep, epi) => {
@@ -4705,11 +4754,11 @@ export default function LateralMovementModal() {
                                                 const techFam = ep.techFamily || "Other";
                                                 const tfColor = techFam === "Cleartext" || techFam === "ServiceExec" ? th.sev.critical : techFam === "AdminShare" ? th.sev.high : techFam === "RDP" ? th.sev.info : techFam === "Interactive" ? th.sev.clean : th.textMuted;
                                                 return (
-                                                  <div key={epi} style={{ display: "flex", alignItems: "center", gap: 6, padding: "3px 0", fontSize: 9, fontFamily: "monospace", color: th.textDim, borderBottom: epi < e.episodes.length - 1 ? `1px solid ${th.border}15` : "none" }}>
-                                                    <span style={{ color: th.textMuted, fontSize: 8, minWidth: 16 }}>#{epi + 1}</span>
-                                                    <span style={{ padding: "0 4px", background: phaseBg, color: phaseColor, borderRadius: 2, fontSize: 7, fontWeight: 700, fontFamily: "-apple-system, sans-serif", minWidth: 32, textAlign: "center" }}>{phaseLabel}</span>
+                                                  <div key={epi} style={{ display: "flex", alignItems: "center", gap: 6, padding: "3px 0", fontSize: LM_TYPOGRAPHY.meta, fontFamily: "monospace", color: th.textDim, borderBottom: epi < e.episodes.length - 1 ? `1px solid ${th.border}15` : "none" }}>
+                                                    <span style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.badge, minWidth: 16 }}>#{epi + 1}</span>
+                                                    <span style={{ padding: "0 4px", background: phaseBg, color: phaseColor, borderRadius: 2, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 700, fontFamily: "-apple-system, sans-serif", minWidth: 32, textAlign: "center" }}>{phaseLabel}</span>
                                                     <span style={{ fontWeight: 600, color: th.text }}>{ep.user}</span>
-                                                    <span style={{ padding: "0 4px", background: tfColor + "15", color: tfColor, borderRadius: 2, fontSize: 7, fontFamily: "-apple-system, sans-serif" }}>{techFam}</span>
+                                                    <span style={{ padding: "0 4px", background: tfColor + "15", color: tfColor, borderRadius: 2, fontSize: LM_TYPOGRAPHY.badge, fontFamily: "-apple-system, sans-serif" }}>{techFam}</span>
                                                     <span>{ep.count} evt{ep.count !== 1 ? "s" : ""}</span>
                                                     <span style={{ color: th.textMuted }}>{(ep.firstTs || "").slice(11, 19)}{ep.lastTs && ep.lastTs !== ep.firstTs ? `\u2013${(ep.lastTs || "").slice(11, 19)}` : ""}</span>
                                                   </div>
@@ -4719,8 +4768,8 @@ export default function LateralMovementModal() {
                                           )}
                                         </div>
                                         {/* Right: Edge Summary */}
-                                        <div style={{ width: 240, flexShrink: 0, fontSize: 9, fontFamily: "-apple-system, sans-serif", color: th.textDim }}>
-                                          <div style={{ fontWeight: 600, color: th.text, fontSize: 10, marginBottom: 6 }}>Edge Details</div>
+                                        <div style={{ width: 240, flexShrink: 0, fontSize: LM_TYPOGRAPHY.meta, fontFamily: "-apple-system, sans-serif", color: th.textDim }}>
+                                          <div style={{ fontWeight: 600, color: th.text, fontSize: LM_TYPOGRAPHY.control, marginBottom: 6 }}>Edge Details</div>
                                           <div style={{ display: "flex", gap: 4, marginBottom: 2 }}><span style={{ color: th.textMuted, width: 90 }}>Source type</span><span>{e.sourceLabel || "host"}</span></div>
                                           {(e.otherTechniques || []).length > 0 && <div style={{ display: "flex", gap: 4, marginBottom: 2 }}><span style={{ color: th.textMuted, width: 90 }}>Also seen</span><span>{e.otherTechniques.join(", ")}</span></div>}
                                           <div style={{ display: "flex", gap: 4, marginBottom: 2 }}><span style={{ color: th.textMuted, width: 90 }}>Logon Types</span><span>{e.logonTypes.join(", ") || "\u2014"}</span></div>
@@ -4730,10 +4779,10 @@ export default function LateralMovementModal() {
                                           {/* Event breakdown */}
                                           {e.eventBreakdown && Object.keys(e.eventBreakdown).length > 0 && (
                                             <div style={{ marginTop: 6 }}>
-                                              <span style={{ color: th.textMuted, fontSize: 8, fontWeight: 600 }}>Event Breakdown</span>
+                                              <span style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 600 }}>Event Breakdown</span>
                                               <div style={{ display: "flex", gap: 4, marginTop: 3, flexWrap: "wrap" }}>
                                                 {Object.entries(e.eventBreakdown).sort((a, b) => b[1] - a[1]).map(([eid, cnt]) => (
-                                                  <span key={eid} style={{ padding: "1px 5px", background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 3, fontSize: 9, fontFamily: "monospace" }}>
+                                                  <span key={eid} style={{ padding: "1px 5px", background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 3, fontSize: LM_TYPOGRAPHY.meta, fontFamily: "monospace" }}>
                                                     <span style={{ color: th.accent, fontWeight: 600 }}>{eid}</span><span style={{ color: th.textMuted, marginLeft: 2 }}>{"\u00D7"}{cnt}</span>
                                                   </span>
                                                 ))}
@@ -4743,10 +4792,10 @@ export default function LateralMovementModal() {
                                           {/* Flags */}
                                           {(e.flags || []).length > 0 && (
                                             <div style={{ marginTop: 6 }}>
-                                              <span style={{ color: th.textMuted, fontSize: 8, fontWeight: 600 }}>Why Suspicious</span>
+                                              <span style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.badge, fontWeight: 600 }}>Why Suspicious</span>
                                               <div style={{ display: "flex", flexDirection: "column", gap: 2, marginTop: 3 }}>
                                                 {e.flags.map((f, fi) => (
-                                                  <span key={fi} style={{ padding: "1px 5px", background: f.startsWith("Finding:") ? th.sev.critical + "12" : th.textMuted + "12", color: f.startsWith("Finding:") ? th.sev.critical : th.textDim, borderRadius: 3, fontSize: 8, whiteSpace: "nowrap" }}>{f}</span>
+                                                  <span key={fi} style={{ padding: "1px 5px", background: f.startsWith("Finding:") ? th.sev.critical + "12" : th.textMuted + "12", color: f.startsWith("Finding:") ? th.sev.critical : th.textDim, borderRadius: 3, fontSize: LM_TYPOGRAPHY.badge, whiteSpace: "nowrap" }}>{f}</span>
                                                 ))}
                                               </div>
                                             </div>
@@ -4766,12 +4815,12 @@ export default function LateralMovementModal() {
                       </table>
                     </div>
                     {sortedEdges.length > (modal.lmEdgeLimit || 400) && (
-                      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "8px 0 2px", fontSize: 10, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "center", gap: 10, padding: "8px 0 2px", fontSize: LM_TYPOGRAPHY.control, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>
                         <span>Showing {modal.lmEdgeLimit || 400} of {sortedEdges.length} connections</span>
                         <button onClick={() => setModal((p) => ({ ...p, lmEdgeLimit: (p.lmEdgeLimit || 400) + 400 }))}
-                          style={{ ...ms.bs, borderRadius: 6, fontSize: 10, padding: "3px 10px" }}>Show 400 more</button>
+                          style={{ ...ms.bs, borderRadius: 6, fontSize: LM_TYPOGRAPHY.control, padding: "3px 10px" }}>Show 400 more</button>
                         <button onClick={() => setModal((p) => ({ ...p, lmEdgeLimit: sortedEdges.length }))}
-                          style={{ ...ms.bs, borderRadius: 6, fontSize: 10, padding: "3px 10px" }}>Show all {sortedEdges.length}</button>
+                          style={{ ...ms.bs, borderRadius: 6, fontSize: LM_TYPOGRAPHY.control, padding: "3px 10px" }}>Show all {sortedEdges.length}</button>
                       </div>
                     )}
                     {/* Column filter dropdown popup */}
@@ -4790,18 +4839,18 @@ export default function LateralMovementModal() {
                               const onUp = () => { document.body.style.cursor = ""; document.body.style.userSelect = ""; window.removeEventListener("mousemove", onMove); window.removeEventListener("mouseup", onUp); };
                               window.addEventListener("mousemove", onMove); window.addEventListener("mouseup", onUp);
                             }}>
-                            <span style={{ fontSize: 11, fontWeight: 600, color: th.text, fontFamily: "SF Mono, Menlo, monospace" }}>FILTER {"\u2014"} {filterOpen.toUpperCase()}</span>
-                            <span style={{ cursor: "pointer", color: th.textMuted, fontSize: 14, lineHeight: 1 }} onClick={() => setModal((p) => ({ ...p, lmFilterOpen: null }))}>{"\u00D7"}</span>
+                            <span style={{ fontSize: LM_TYPOGRAPHY.body, fontWeight: 600, color: th.text, fontFamily: "SF Mono, Menlo, monospace" }}>FILTER {"\u2014"} {filterOpen.toUpperCase()}</span>
+                            <span style={{ cursor: "pointer", color: th.textMuted, fontSize: LM_TYPOGRAPHY.heading, lineHeight: 1 }} onClick={() => setModal((p) => ({ ...p, lmFilterOpen: null }))}>{"\u00D7"}</span>
                           </div>
                           <div style={{ padding: "6px 10px", flexShrink: 0 }}>
                             <input type="text" placeholder="Search values..." value={filterSearch} onChange={(e) => setModal((p) => ({ ...p, lmFilterSearch: e.target.value }))}
-                              style={{ width: "100%", boxSizing: "border-box", padding: "5px 8px", fontSize: 11, background: th.panelBg, border: `1px solid ${th.border}55`, borderRadius: 4, color: th.text, outline: "none", fontFamily: "SF Mono, Menlo, monospace" }}
+                              style={{ width: "100%", boxSizing: "border-box", padding: "5px 8px", fontSize: LM_TYPOGRAPHY.body, background: th.panelBg, border: `1px solid ${th.border}55`, borderRadius: 4, color: th.text, outline: "none", fontFamily: "SF Mono, Menlo, monospace" }}
                               autoFocus />
                           </div>
                           <div style={{ padding: "2px 10px 6px", display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
-                            <button onClick={() => setModal((p) => ({ ...p, lmFilterSel: new Set(filterVals) }))} style={{ padding: "2px 8px", fontSize: 10, background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 4, color: th.text, cursor: "pointer" }}>Select All</button>
-                            <button onClick={() => setModal((p) => ({ ...p, lmFilterSel: new Set() }))} style={{ padding: "2px 8px", fontSize: 10, background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 4, color: th.text, cursor: "pointer" }}>Clear</button>
-                            <span style={{ marginLeft: "auto", fontSize: 10, color: th.textMuted }}>{filterVals.length} values</span>
+                            <button onClick={() => setModal((p) => ({ ...p, lmFilterSel: new Set(filterVals) }))} style={{ padding: "2px 8px", fontSize: LM_TYPOGRAPHY.control, background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 4, color: th.text, cursor: "pointer" }}>Select All</button>
+                            <button onClick={() => setModal((p) => ({ ...p, lmFilterSel: new Set() }))} style={{ padding: "2px 8px", fontSize: LM_TYPOGRAPHY.control, background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 4, color: th.text, cursor: "pointer" }}>Clear</button>
+                            <span style={{ marginLeft: "auto", fontSize: LM_TYPOGRAPHY.control, color: th.textMuted }}>{filterVals.length} values</span>
                           </div>
                           <div style={{ flex: 1, overflow: "auto", padding: "0 6px", minHeight: 0 }}>
                             {displayVals.slice(0, 1000).map((v) => (
@@ -4810,18 +4859,18 @@ export default function LateralMovementModal() {
                                 onMouseEnter={(e) => e.currentTarget.style.background = `${th.accent}0a`}
                                 onMouseLeave={(e) => e.currentTarget.style.background = "transparent"}>
                                 <input type="checkbox" checked={filterSel.has(v)} readOnly style={{ width: 13, height: 13, accentColor: th.accent, cursor: "pointer", flexShrink: 0 }} />
-                                <span style={{ fontSize: 11, color: th.text, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "SF Mono, Menlo, monospace" }}>{v || "(empty)"}</span>
-                                <span style={{ fontSize: 10, color: th.textMuted, flexShrink: 0 }}>{filterCounts[v]}</span>
+                                <span style={{ fontSize: LM_TYPOGRAPHY.body, color: th.text, flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "SF Mono, Menlo, monospace" }}>{v || "(empty)"}</span>
+                                <span style={{ fontSize: LM_TYPOGRAPHY.control, color: th.textMuted, flexShrink: 0 }}>{filterCounts[v]}</span>
                               </div>
                             ))}
                           </div>
                           <div style={{ padding: "8px 10px", borderTop: `1px solid ${th.border}33`, display: "flex", gap: 6, justifyContent: "flex-end", flexShrink: 0 }}>
                             <button onClick={() => setModal((p) => { const cf = { ...(p.lmColFilters || {}) }; delete cf[filterOpen]; return { ...p, lmColFilters: cf, lmFilterOpen: null }; })}
-                              style={{ padding: "4px 12px", fontSize: 10, background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 4, color: th.text, cursor: "pointer" }}>Reset</button>
+                              style={{ padding: "4px 12px", fontSize: LM_TYPOGRAPHY.control, background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 4, color: th.text, cursor: "pointer" }}>Reset</button>
                             <button onClick={() => setModal((p) => ({ ...p, lmFilterOpen: null }))}
-                              style={{ padding: "4px 12px", fontSize: 10, background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 4, color: th.text, cursor: "pointer" }}>Cancel</button>
+                              style={{ padding: "4px 12px", fontSize: LM_TYPOGRAPHY.control, background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 4, color: th.text, cursor: "pointer" }}>Cancel</button>
                             <button onClick={() => setModal((p) => ({ ...p, lmColFilters: { ...(p.lmColFilters || {}), [filterOpen]: [...(p.lmFilterSel || [])] }, lmFilterOpen: null }))}
-                              style={{ padding: "4px 12px", fontSize: 10, background: th.accent, border: "none", borderRadius: 4, color: "#fff", cursor: "pointer", fontWeight: 600 }}>Apply</button>
+                              style={{ padding: "4px 12px", fontSize: LM_TYPOGRAPHY.control, background: th.accent, border: "none", borderRadius: 4, color: "#fff", cursor: "pointer", fontWeight: 600 }}>Apply</button>
                           </div>
                           <div onMouseDown={(e) => {
                             e.preventDefault(); e.stopPropagation();
@@ -4857,16 +4906,34 @@ export default function LateralMovementModal() {
                   <button onClick={() => setModal((p) => ({ ...p, phase: "results" }))}
                     style={{ ...ms.bs, borderRadius: 8 }}>Return to results</button>
                 ) : ct?.lmLastRun?.data ? (
-                  <button onClick={() => setModal((p) => ({
-                    ...p, phase: "results",
-                    data: ct.lmLastRun.data,
-                    positions: ct.lmLastRun.positions || {},
-                    selectedNode: null, selectedEdge: null,
-                    lmAlertLimit: 300, lmEdgeLimit: 400,
-                  }))}
+                  <button onClick={() => setModal((p) => {
+                    const resumed = ct.lmLastRun.data;
+                    const layoutNodes = selectLateralGraphNodes(resumed.nodes || []);
+                    const ids = new Set(layoutNodes.map((node) => node.id));
+                    const layoutEdges = selectLateralGraphEdges(
+                      (resumed.edges || []).filter((edge) => ids.has(edge.source) && ids.has(edge.target)),
+                    );
+                    return {
+                      ...p,
+                      phase: "results",
+                      data: resumed,
+                      positions: computeForceLayout(layoutNodes, layoutEdges),
+                      lmGraphMode: "machines",
+                      viewBox: {
+                        x: 0,
+                        y: 0,
+                        w: LATERAL_GRAPH_DEFAULTS.width,
+                        h: LATERAL_GRAPH_DEFAULTS.height,
+                      },
+                      selectedNode: null,
+                      selectedEdge: null,
+                      lmAlertLimit: 300,
+                      lmEdgeLimit: 400,
+                    };
+                  })}
                     title={`Reopen the analysis finished ${_agoLabel(ct.lmLastRun.completedAt)}`}
                     style={{ ...ms.bs, borderRadius: 8 }}>
-                    Resume last results <span style={{ color: th.textMuted, fontSize: 10 }}>({_agoLabel(ct.lmLastRun.completedAt)})</span>
+                    Resume last results <span style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.control }}>({_agoLabel(ct.lmLastRun.completedAt)})</span>
                   </button>
                 ) : null}
               </div>
@@ -4889,7 +4956,7 @@ export default function LateralMovementModal() {
           )}
           {phase === "loading" && (
             <div style={{ display: "flex", justifyContent: "space-between", width: "100%", alignItems: "center" }}>
-              <span style={{ color: th.textMuted, fontSize: 11, fontFamily: "-apple-system, sans-serif" }}>{Math.round(modal.lmProgress || 0)}% complete</span>
+              <span style={{ color: th.textMuted, fontSize: LM_TYPOGRAPHY.body, fontFamily: "-apple-system, sans-serif" }}>{Math.round(modal.lmProgress || 0)}% complete</span>
               <button onClick={cancelAnalysis} style={{ ...ms.bs, borderRadius: 8 }}>Cancel</button>
             </div>
           )}

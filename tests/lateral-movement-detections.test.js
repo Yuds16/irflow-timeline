@@ -23,6 +23,7 @@ const HEADERS = [
   "TimeCreated", "EventId", "Computer", "IpAddress", "TargetUserName", "LogonType",
   "Channel", "Provider", "ShareName", "RelativeTargetName", "SubStatus",
   "Image", "ParentImage", "ParentCommandLine", "CommandLine", "ServiceName",
+  "SubjectUserName", "SubjectDomainName",
 ];
 
 function makeStub(headers, rows) {
@@ -117,6 +118,8 @@ function row(eid, opts = {}) {
     ParentCommandLine: opts.parentCommandLine || "",
     CommandLine: opts.commandLine || "",
     ServiceName: opts.serviceName || "",
+    SubjectUserName: opts.subjectUserName || "",
+    SubjectDomainName: opts.subjectDomainName || "",
   };
 }
 
@@ -170,13 +173,25 @@ test("B: ordered auth -> ADMIN$ share -> service exec on one host emits a Remote
     // share: ADMIN$ access on HOST01 by attacker, 30s later
     row("5145", { ts: "2026-03-10T08:00:30Z", user: "CORP\\attacker", computer: "HOST01", ip: "10.10.10.5", shareName: "\\\\*\\ADMIN$" }),
     // exec: suspicious service install on HOST01, 60s after auth (binary in Temp + cmd /c)
-    row("7045", { ts: "2026-03-10T08:01:00Z", computer: "HOST01", image: "C:\\Windows\\Temp\\evil.exe", commandLine: "cmd /c whoami", serviceName: "evilsvc" }),
+    row("7045", { ts: "2026-03-10T08:01:00Z", computer: "HOST01", image: "C:\\Windows\\Temp\\evil.exe", commandLine: "cmd /c whoami", serviceName: "evilsvc", subjectUserName: "svc-operator", subjectDomainName: "CORP" }),
   ];
   const { meta, ctx } = makeStub(HEADERS, rows);
   const result = getLateralMovement(meta, OPTS, ctx);
   // sanity: the exec finding the sequence depends on must exist
   const execF = (result.findings || []).find(x => x.category === "Remote Service Execution" || x.category === "PsExec Native");
   assert.ok(execF, `precondition: an execution finding must fire, got ${JSON.stringify((result.findings || []).map(x => x.category))}`);
+  assert.deepEqual(execF.serviceNames, ["evilsvc"]);
+  assert.deepEqual(execF.imagePaths, ["C:\\Windows\\Temp\\evil.exe"]);
+  assert.deepEqual(execF.commandLines, ["cmd /c whoami"]);
+  assert.ok(execF.executors.includes("ATTACKER"), `correlated executor should be ATTACKER, got ${JSON.stringify(execF.executors)}`);
+  assert.ok(execF.executors.includes("CORP\\svc-operator"), `direct event account should be preserved, got ${JSON.stringify(execF.executors)}`);
+  assert.deepEqual(execF.eventActors, ["CORP\\svc-operator"]);
+  assert.equal(execF.executionDetails?.[0]?.sourceHost, "10.10.10.5");
+  assert.equal(execF.executionDetails?.[0]?.attributedUser, "ATTACKER");
+  const execSession = (result.executionSessions || []).find(s => (s.findingIds || []).includes(execF.id));
+  assert.ok(execSession, "service execution finding should be represented in an execution session");
+  assert.deepEqual(execSession.serviceNames, ["evilsvc"]);
+  assert.deepEqual(execSession.imagePaths, ["C:\\Windows\\Temp\\evil.exe"]);
   const seq = (result.findings || []).find(x => x.category === "Remote Execution Sequence");
   assert.ok(seq, `expected Remote Execution Sequence, got ${JSON.stringify((result.findings || []).map(x => x.category))}`);
   assert.equal(seq.severity, "critical");
@@ -210,6 +225,41 @@ test("B: a different user on the share breaks user continuity (no false sequence
   const result = getLateralMovement(meta, OPTS, ctx);
   const seq = (result.findings || []).find(x => x.category === "Remote Execution Sequence");
   assert.ok(!seq, `user-continuity mismatch must prevent a sequence, got ${JSON.stringify(seq)}`);
+});
+
+test("B: EvtxECmd service fields are preserved from PayloadData and ExecutableInfo", () => {
+  const headers = [
+    "TimeCreated", "EventId", "Computer", "Channel", "Provider", "MapDescription", "UserName", "RemoteHost",
+    "PayloadData1", "PayloadData2", "PayloadData3", "PayloadData4", "PayloadData5", "PayloadData6",
+    "ExecutableInfo",
+  ];
+  const rows = [{
+    TimeCreated: "2026-03-10T08:01:00Z",
+    EventId: "7045",
+    Computer: "HOST01",
+    Channel: "System",
+    Provider: "Service Control Manager",
+    MapDescription: "A new service was installed in the system",
+    UserName: "CORP\\installer",
+    RemoteHost: "",
+    PayloadData1: "Name: evilsvc",
+    PayloadData2: "StartType: auto start",
+    PayloadData3: "Account: LocalSystem",
+    PayloadData4: "",
+    PayloadData5: "",
+    PayloadData6: "",
+    ExecutableInfo: "C:\\Windows\\Temp\\evil.exe",
+  }];
+  const { meta, ctx } = makeStub(headers, rows);
+  const result = getLateralMovement(meta, OPTS, ctx);
+  const execF = (result.findings || []).find(x => x.category === "Remote Service Execution");
+  assert.ok(execF, `expected Remote Service Execution, got ${JSON.stringify({ findings: (result.findings || []).map(x => x.category), warnings: result.warnings, coverage: result.coverage })}`);
+  assert.deepEqual(execF.serviceNames, ["evilsvc"]);
+  assert.deepEqual(execF.imagePaths, ["C:\\Windows\\Temp\\evil.exe"]);
+  assert.deepEqual(execF.commandLines, ["C:\\Windows\\Temp\\evil.exe"]);
+  assert.deepEqual(execF.eventActors, ["CORP\\installer"]);
+  assert.deepEqual(execF.serviceAccounts, ["LocalSystem"]);
+  assert.deepEqual(execF.executors, ["CORP\\installer"]);
 });
 
 // ── C. Service-Exec edge technique correlation ─────────────────────────────

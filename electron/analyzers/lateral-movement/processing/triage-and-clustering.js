@@ -192,6 +192,24 @@ function correlateTriageAndCluster(state) {
             const allFilterHosts = [...new Set(cl.flatMap(f => f.filterHosts || []))];
             const allEvidenceRefs = _dedupeEvidenceRefs(cl.flatMap(f => f.evidenceRefs || []));
             const categories = [...new Set(cl.map(f => f.category))];
+            const _uniqueText = (values) => [...new Set(values.map(v => String(v || "").trim()).filter(Boolean))];
+            const serviceNames = _uniqueText(cl.flatMap(f => f.serviceNames || []));
+            const imagePaths = _uniqueText(cl.flatMap(f => f.imagePaths || []));
+            const commandLines = _uniqueText(cl.flatMap(f => f.commandLines || []));
+            const eventActors = _uniqueText(cl.flatMap(f => f.eventActors || []));
+            const serviceAccounts = _uniqueText(cl.flatMap(f => f.serviceAccounts || []));
+            const executors = _uniqueText(cl.flatMap(f => f.executors || []));
+            const executionDetails = [];
+            const _detailSeen = new Set();
+            for (const detail of cl.flatMap(f => f.executionDetails || [])) {
+              const key = [
+                detail?.eventId, detail?.timestamp, detail?.target, detail?.serviceName,
+                detail?.imagePath, detail?.commandLine, detail?.rowId,
+              ].join("\0");
+              if (_detailSeen.has(key)) continue;
+              _detailSeen.add(key);
+              executionDetails.push(detail);
+            }
             const bestStatus = cl.some(f => _statusFromCat(f.category) === "executed") ? "executed"
               : cl.some(f => _statusFromCat(f.category) === "observed") ? "observed" : "executed";
             const src = cl[0]._src;
@@ -217,6 +235,13 @@ function correlateTriageAndCluster(state) {
               filterEids: allFilterEids,
               filterHosts: allFilterHosts,
               evidenceRefs: allEvidenceRefs,
+              serviceNames,
+              imagePaths,
+              commandLines,
+              eventActors,
+              serviceAccounts,
+              executors,
+              executionDetails,
               itemRowids: _rowidsFromRefs(allEvidenceRefs),
             });
           }

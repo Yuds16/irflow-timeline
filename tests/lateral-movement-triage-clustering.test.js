@@ -91,6 +91,40 @@ test("execution sessions: execution-category findings cluster into sessions", ()
   }
 });
 
+test("execution sessions preserve service-install evidence context", () => {
+  const details = [{
+    eventId: "7045",
+    timestamp: "2026-03-10T08:00:00",
+    target: "HOST01",
+    serviceName: "evilsvc",
+    imagePath: "C:\\Windows\\Temp\\evil.exe",
+    commandLine: "cmd /c whoami",
+    eventActor: "NT AUTHORITY\\SYSTEM",
+    serviceAccount: "LocalSystem",
+    attributedUser: "CORP\\attacker",
+    sourceHost: "10.0.0.5",
+    reason: "Service binary from user-writable path",
+    rowId: 1,
+  }];
+  const { executionSessions } = run([finding(1, {
+    category: "Remote Service Execution",
+    serviceNames: ["evilsvc"],
+    imagePaths: ["C:\\Windows\\Temp\\evil.exe"],
+    commandLines: ["cmd /c whoami"],
+    eventActors: ["NT AUTHORITY\\SYSTEM"],
+    serviceAccounts: ["LocalSystem"],
+    executors: ["NT AUTHORITY\\SYSTEM", "CORP\\attacker"],
+    executionDetails: details,
+  })]);
+  assert.equal(executionSessions.length, 1);
+  assert.deepEqual(executionSessions[0].serviceNames, ["evilsvc"]);
+  assert.deepEqual(executionSessions[0].imagePaths, ["C:\\Windows\\Temp\\evil.exe"]);
+  assert.deepEqual(executionSessions[0].commandLines, ["cmd /c whoami"]);
+  assert.deepEqual(executionSessions[0].eventActors, ["NT AUTHORITY\\SYSTEM"]);
+  assert.deepEqual(executionSessions[0].serviceAccounts, ["LocalSystem"]);
+  assert.deepEqual(executionSessions[0].executionDetails, details);
+});
+
 test("single finding on a pair does NOT form an incident", () => {
   const { incidents } = run([finding(1)]);
   assert.equal(incidents.length, 0);
