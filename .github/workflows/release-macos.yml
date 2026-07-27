@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      from_tag:
+        description: "Previous release tag whose ZIP blockmap must remain available"
+        required: true
+        default: "v1.0.7"
+      to_tag:
+        description: "Current release tag whose ZIP blockmap must be published"
+        required: true
+        default: "v1.0.8"
 
 permissions:
   contents: write
@@ -14,6 +24,7 @@ concurrency:
 
 jobs:
   release:
+    if: github.event_name == 'push'
     # macos-14 (ARM64). The "Build universal better-sqlite3" step below explicitly
     # rebuilds better-sqlite3 for both x64 and arm64 and lipo-merges them, so
     # electron-builder receives a ready-made fat binary and npmRebuild is disabled.
@@ -187,6 +198,8 @@ jobs:
           # Match the exact version to guard against any stale files surviving the clean.
           dmg_path="$(find release -maxdepth 1 -type f -name "*${pkg_version}*.dmg" | sort | head -n 1)"
           zip_path="$(find release -maxdepth 1 -type f -name "*${pkg_version}*.zip" | sort | head -n 1)"
+          dmg_blockmap="${dmg_path}.blockmap"
+          zip_blockmap="${zip_path}.blockmap"
 
           if [ "${channel}" = "latest" ]; then
             yml_name="latest-mac.yml"
@@ -199,7 +212,7 @@ jobs:
             yml_path="$(find release -maxdepth 1 -type f -name '*-mac.yml' | sort | head -n 1)"
           fi
 
-          for path_name in dmg_path zip_path yml_path; do
+          for path_name in dmg_path zip_path dmg_blockmap zip_blockmap yml_path; do
             if [ -z "${!path_name:-}" ] || [ ! -f "${!path_name}" ]; then
               echo "::error::Missing expected release artifact: ${path_name}"
               exit 1
@@ -208,6 +221,8 @@ jobs:
 
           echo "dmg=${dmg_path}" >> "${GITHUB_OUTPUT}"
           echo "zip=${zip_path}" >> "${GITHUB_OUTPUT}"
+          echo "dmg_blockmap=${dmg_blockmap}" >> "${GITHUB_OUTPUT}"
+          echo "zip_blockmap=${zip_blockmap}" >> "${GITHUB_OUTPUT}"
           echo "yml=${yml_path}" >> "${GITHUB_OUTPUT}"
 
       - name: Upload workflow artifacts
@@ -217,6 +232,8 @@ jobs:
           path: |
             ${{ steps.artifacts.outputs.dmg }}
             ${{ steps.artifacts.outputs.zip }}
+            ${{ steps.artifacts.outputs.dmg_blockmap }}
+            ${{ steps.artifacts.outputs.zip_blockmap }}
             ${{ steps.artifacts.outputs.yml }}
           if-no-files-found: error
 
@@ -265,6 +282,8 @@ jobs:
           gh release upload "${tag}" \
             "${{ steps.artifacts.outputs.dmg }}" \
             "${{ steps.artifacts.outputs.zip }}" \
+            "${{ steps.artifacts.outputs.dmg_blockmap }}" \
+            "${{ steps.artifacts.outputs.zip_blockmap }}" \
             "${{ steps.artifacts.outputs.yml }}" \
             --clobber
 
@@ -283,6 +302,8 @@ jobs:
 
           dmg_name="$(basename "${{ steps.artifacts.outputs.dmg }}")"
           zip_name="$(basename "${{ steps.artifacts.outputs.zip }}")"
+          dmg_blockmap_name="$(basename "${{ steps.artifacts.outputs.dmg_blockmap }}")"
+          zip_blockmap_name="$(basename "${{ steps.artifacts.outputs.zip_blockmap }}")"
           yml_name="$(basename "${{ steps.artifacts.outputs.yml }}")"
 
           aws_s3_cp() {
@@ -303,6 +324,185 @@ jobs:
           aws_s3_cp "${{ steps.artifacts.outputs.zip }}" "${destination}/${zip_name}" \
             --cache-control "public, max-age=3600, immutable"
 
+          aws_s3_cp "${{ steps.artifacts.outputs.dmg_blockmap }}" "${destination}/${dmg_blockmap_name}" \
+            --cache-control "public, max-age=3600, immutable" \
+            --content-type "application/octet-stream"
+
+          aws_s3_cp "${{ steps.artifacts.outputs.zip_blockmap }}" "${destination}/${zip_blockmap_name}" \
+            --cache-control "public, max-age=3600, immutable" \
+            --content-type "application/octet-stream"
+
           aws_s3_cp "${{ steps.artifacts.outputs.yml }}" "${destination}/${yml_name}" \
             --cache-control "no-cache, no-store, must-revalidate" \
             --content-type "text/yaml"
+
+  repair-blockmaps:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-14
+    env:
+      IRFLOW_UPDATE_BUCKET: ${{ vars.IRFLOW_UPDATE_BUCKET }}
+      IRFLOW_UPDATE_PREFIX: ${{ vars.IRFLOW_UPDATE_PREFIX }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_DEFAULT_REGION: ${{ vars.AWS_REGION }}
+      AWS_ENDPOINT_URL_S3: ${{ vars.AWS_ENDPOINT_URL_S3 }}
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Ensure repair tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v gh >/dev/null 2>&1; then
+            brew install gh
+          fi
+          if ! command -v aws >/dev/null 2>&1; then
+            brew install awscli
+          fi
+          npm ci --ignore-scripts
+
+      - name: Generate exact release blockmaps
+        shell: bash
+        env:
+          FROM_TAG: ${{ inputs.from_tag }}
+          TO_TAG: ${{ inputs.to_tag }}
+        run: |
+          set -euo pipefail
+          for tag in "${FROM_TAG}" "${TO_TAG}"; do
+            if [[ ! "${tag}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
+              echo "::error::Invalid release tag: ${tag}"
+              exit 1
+            fi
+          done
+          mkdir -p repair
+
+          generate_release_blockmap() {
+            local tag="$1"
+            local version="${tag#v}"
+            local download_dir="repair/${tag}"
+
+            mkdir -p "${download_dir}"
+            gh release download "${tag}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --pattern "*.zip" \
+              --pattern "latest-mac.yml" \
+              --dir "${download_dir}" \
+              --clobber
+
+            local zip_path
+            zip_path="$(find "${download_dir}" -maxdepth 1 -type f -name "*.zip" | sort | head -n 1)"
+            local yml_path="${download_dir}/latest-mac.yml"
+            if [ -z "${zip_path}" ] || [ ! -f "${zip_path}" ] || [ ! -f "${yml_path}" ]; then
+              echo "::error::Missing ZIP or latest-mac.yml for ${tag}"
+              exit 1
+            fi
+
+            local expected_sha512
+            local expected_size
+            local actual_sha512
+            local actual_size
+            expected_sha512="$(awk '/^[[:space:]]+sha512:/{print $2; exit}' "${yml_path}")"
+            expected_size="$(awk '/^[[:space:]]+size:/{print $2; exit}' "${yml_path}")"
+            actual_sha512="$(openssl dgst -sha512 -binary "${zip_path}" | openssl base64 -A)"
+            actual_size="$(stat -f '%z' "${zip_path}")"
+
+            if [ "${actual_sha512}" != "${expected_sha512}" ] || [ "${actual_size}" != "${expected_size}" ]; then
+              echo "::error::Downloaded ${tag} ZIP does not match its updater metadata"
+              exit 1
+            fi
+
+            local blockmap_path="repair/IRFlow-Timeline-${version}-universal.zip.blockmap"
+            node scripts/generate-blockmap.js "${zip_path}" "${blockmap_path}"
+            test -s "${blockmap_path}"
+          }
+
+          generate_release_blockmap "${FROM_TAG}"
+          generate_release_blockmap "${TO_TAG}"
+
+      - name: Publish compatibility blockmaps
+        shell: bash
+        env:
+          FROM_TAG: ${{ inputs.from_tag }}
+          TO_TAG: ${{ inputs.to_tag }}
+        run: |
+          set -euo pipefail
+
+          missing=()
+          for var_name in IRFLOW_UPDATE_BUCKET AWS_REGION AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY; do
+            if [ -z "${!var_name:-}" ]; then
+              missing+=("$var_name")
+            fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error::Missing required GitHub variables/secrets: ${missing[*]}"
+            exit 1
+          fi
+
+          prefix="${IRFLOW_UPDATE_PREFIX#/}"
+          prefix="${prefix%/}"
+          if [ -n "${prefix}" ]; then
+            destination="s3://${IRFLOW_UPDATE_BUCKET}/${prefix}"
+          else
+            destination="s3://${IRFLOW_UPDATE_BUCKET}"
+          fi
+
+          aws_s3_cp() {
+            local source_path="$1"
+            local destination_path="$2"
+            shift 2
+
+            if [ -n "${AWS_ENDPOINT_URL_S3:-}" ]; then
+              aws s3 cp "${source_path}" "${destination_path}" --endpoint-url "${AWS_ENDPOINT_URL_S3}" "$@"
+            else
+              aws s3 cp "${source_path}" "${destination_path}" "$@"
+            fi
+          }
+
+          publish_release_blockmap() {
+            local tag="$1"
+            local version="${tag#v}"
+            local blockmap_path="repair/IRFlow-Timeline-${version}-universal.zip.blockmap"
+            local blockmap_name
+            blockmap_name="$(basename "${blockmap_path}")"
+
+            gh release upload "${tag}" "${blockmap_path}" \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+
+            aws_s3_cp "${blockmap_path}" "${destination}/${blockmap_name}" \
+              --cache-control "public, max-age=3600, immutable" \
+              --content-type "application/octet-stream"
+          }
+
+          publish_release_blockmap "${FROM_TAG}"
+          publish_release_blockmap "${TO_TAG}"
+
+      - name: Verify public blockmaps
+        shell: bash
+        env:
+          FROM_TAG: ${{ inputs.from_tag }}
+          TO_TAG: ${{ inputs.to_tag }}
+          IRFLOW_UPDATE_BASE_URL: ${{ vars.IRFLOW_UPDATE_BASE_URL }}
+        run: |
+          set -euo pipefail
+          base_url="${IRFLOW_UPDATE_BASE_URL%/}"
+          if [ -z "${base_url}" ]; then
+            echo "::error::IRFLOW_UPDATE_BASE_URL is not configured"
+            exit 1
+          fi
+
+          for tag in "${FROM_TAG}" "${TO_TAG}"; do
+            version="${tag#v}"
+            name="IRFlow-Timeline-${version}-universal.zip.blockmap"
+            curl --fail --silent --show-error --head "${base_url}/${name}"
+          done
