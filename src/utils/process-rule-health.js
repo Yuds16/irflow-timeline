@@ -5,6 +5,11 @@ import { PI_ALL_RULES, PI_RULE_GROUPS } from "./process-inspector.js";
 import { SEQ_DEFS } from "./process-inspector-pipeline.js";
 
 const SEV_RANK = { critical: 3, high: 2, medium: 1, med: 1, low: 0 };
+const severityRank = (rule) => SEV_RANK[String(rule?.sev || "").toLowerCase()] ?? -1;
+const compareRulePriority = (a, b) =>
+  severityRank(b) - severityRank(a)
+  || (b.hits || 0) - (a.hits || 0)
+  || String(a.id || "").localeCompare(String(b.id || ""));
 
 /**
  * Aggregate which built-in and custom rules fired on a scored process tree.
@@ -96,7 +101,9 @@ export function buildRuleHealthReport(detMap, opts = {}) {
   for (const [id, hits] of hitCounts) {
     if (knownIds.has(id)) continue;
     if (String(id).startsWith("custom-")) continue;
-    orphans.push({ id, hits, status: "fired", name: id, group: "other", sev: "medium" });
+    const level = hitLevels.get(id) ?? 1;
+    const sev = level >= 3 ? "critical" : level >= 2 ? "high" : level >= 1 ? "medium" : "low";
+    orphans.push({ id, hits, status: "fired", name: id, group: "other", sev });
   }
 
   const byGroup = {};
@@ -146,7 +153,7 @@ export function buildRuleHealthReport(detMap, opts = {}) {
 
   const topFired = [...builtIn, ...custom, ...orphans]
     .filter((r) => r.hits > 0)
-    .sort((a, b) => b.hits - a.hits || a.id.localeCompare(b.id))
+    .sort(compareRulePriority)
     .slice(0, 15);
 
   const techniques = [...techniqueHits.entries()]
@@ -183,6 +190,7 @@ export function buildRuleHealthReport(detMap, opts = {}) {
     behaviors,
     silentHighValue: builtInSilent
       .filter((r) => r.sev === "critical" || r.sev === "high")
+      .sort(compareRulePriority)
       .slice(0, 20),
   };
 }
@@ -200,7 +208,7 @@ export function formatRuleHealthReportText(report) {
     `Custom: ${s.customFired}/${s.customTotal} fired`,
     `Sequences: ${s.sequencesFired}/${s.sequencesTotal} fired`,
     "",
-    "Top fired rules:",
+    "Fired rules (severity first):",
     ...report.topFired.map((r) => `  ${r.hits}×  [${r.sev}] ${r.id} — ${r.name}`),
     "",
     "Silent high-value rules (enabled, no hits):",

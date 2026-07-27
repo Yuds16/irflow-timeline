@@ -587,6 +587,80 @@ test("Process Inspector trust scoring flags same process name from rare writable
   assert.ok(det.evidence.some((e) => e.ruleId === "pi-57"));
 });
 
+test("Process Inspector baselines Cortex XDR protected payloads under the trusted Cyvera root", () => {
+  const cortexPath = "C:\\ProgramData\\Cyvera\\LocalSystem\\Download\\protected_payload_execution\\cortex-xdr-payload.exe";
+  const direct = getSusInfo(mkNode({
+    processName: "cortex-xdr-payload.exe",
+    image: cortexPath,
+    cmdLine: "cortex-xdr-payload.exe --config network",
+  }), null);
+  assert.equal(direct.level, 0);
+  assert.equal(direct.sanctioned?.cat, "edr");
+  assert.equal(direct.sanctioned?.match, "path");
+
+  // The Cyvera instance is deliberately rare among same-named processes. The
+  // cross-row trust pass may record that context, but must not promote pi-57.
+  const processes = [
+    mkProc("cortex-pf-1", {
+      processName: "cortex-xdr-payload.exe",
+      image: "C:\\Program Files\\Palo Alto Networks\\Traps\\cortex-xdr-payload.exe",
+    }),
+    mkProc("cortex-pf-2", {
+      processName: "cortex-xdr-payload.exe",
+      image: "C:\\Program Files\\Palo Alto Networks\\Traps\\cortex-xdr-payload.exe",
+    }),
+    mkProc("cortex-pf-3", {
+      processName: "cortex-xdr-payload.exe",
+      image: "C:\\Program Files\\Palo Alto Networks\\Traps\\cortex-xdr-payload.exe",
+    }),
+    mkProc("cortex-cyvera", {
+      processName: "cortex-xdr-payload.exe",
+      image: cortexPath,
+      cmdLine: "cortex-xdr-payload.exe --config network",
+    }),
+  ];
+  const det = buildDetectionMap({ processes }).get("cortex-cyvera");
+  assert.equal(det.level, 0);
+  assert.equal(hasRule(det, "pi-57"), false);
+  assert.equal(det.trust?.type, "same-name-unusual-path");
+  assert.equal(det.trust?.suppressed, true);
+  assert.equal(det.prevalence?.rarity, "baseline");
+  assert.equal(det.prevalence?.suppressed, true);
+  assert.equal(det.prevalence?.signals?.length, 0);
+
+  const prevalenceSummary = buildPrevalenceSummary({ processes }, buildDetectionMap({ processes }));
+  assert.equal(
+    prevalenceSummary.items.some((item) => item.keys.includes("cortex-cyvera")),
+    false,
+    "clean sanctioned EDR rows must not surface in the rare-process strip",
+  );
+});
+
+test("Process Inspector still flags a same-named Cortex binary outside sanctioned vendor paths", () => {
+  const processes = [
+    mkProc("cortex-normal-1", {
+      processName: "cortex-xdr-payload.exe",
+      image: "C:\\Program Files\\Palo Alto Networks\\Traps\\cortex-xdr-payload.exe",
+    }),
+    mkProc("cortex-normal-2", {
+      processName: "cortex-xdr-payload.exe",
+      image: "C:\\Program Files\\Palo Alto Networks\\Traps\\cortex-xdr-payload.exe",
+    }),
+    mkProc("cortex-normal-3", {
+      processName: "cortex-xdr-payload.exe",
+      image: "C:\\Program Files\\Palo Alto Networks\\Traps\\cortex-xdr-payload.exe",
+    }),
+    mkProc("cortex-copy", {
+      processName: "cortex-xdr-payload.exe",
+      image: "C:\\Users\\Public\\cortex-xdr-payload.exe",
+    }),
+  ];
+  const det = buildDetectionMap({ processes }).get("cortex-copy");
+  assert.ok(det.level >= 2);
+  assert.equal(det.sanctioned, null);
+  assert.ok(hasRule(det, "pi-57"));
+});
+
 test("Process Inspector trust rules flag unsigned binaries in trusted paths", () => {
   const node = mkNode({
     processName: "vendor.exe",
