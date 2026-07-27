@@ -88,6 +88,10 @@ if (updateBaseUrl) {
       provider: "generic",
       url: updateBaseUrl,
       channel: updateChannel,
+      // AWS S3 supports a single byte range per GET request. The regional
+      // virtual-hosted URL does not match electron-updater's built-in
+      // s3.amazonaws.com heuristic, so disable multipart ranges explicitly.
+      useMultipleRangeRequest: false,
     },
   ];
 }
