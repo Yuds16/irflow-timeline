@@ -10,14 +10,6 @@ This page outlines the planned direction for IRFlow Timeline. Priorities may shi
 
 ## In Progress
 
-### Process Inspector depth (next release)
-- Verdict hero, Story / Graph / Raw modes, **Rules** health coverage report, Filter Grid pivots, and Lateral/Persistence/Sigma handoffs — see [Process Inspector](/features/process-tree) and the [changelog Unreleased](/about/changelog) section
-- Further rule-catalog expansion and analyst-facing coverage tooling
-
-### Open Triage Collection & multi-source analyzers
-- Folder-level KAPE/triage inventory with LM and Sigma lanes
-- Persistence multi-source + **Analyze KAPE Collection**; Lateral Movement multi-source budget and detector registry hardening
-
 ### Enhanced Detection Rules
 - Expand the detection rules library beyond the current ones
 - Community-contributed rule packs with shared rule repositories
@@ -40,7 +32,7 @@ This page outlines the planned direction for IRFlow Timeline. Priorities may shi
 - Real-time collaborative analysis for team-based investigations
 
 ### AI-Assisted Analysis (LLM — planned)
-- **Not the same as v1.0.7 AI Artifacts** — local AI history collection and **AI Secret Hunt** already ship today; see [AI Artifacts](/features/ai-artifacts) and [AI Query History](/dfir-tips/ai-query-history)
+- **Not the same as v1.0.8 AI Artifacts** — local AI history collection, Grok Build parsing, and **AI Secret Hunt** already ship today; see [AI Artifacts](/features/ai-artifacts) and [AI Query History](/dfir-tips/ai-query-history)
 - LLM-powered summarization of tagged findings for report drafting
 - Natural language queries against timeline data ("show me all lateral movement after 3 AM")
 - Anomaly detection suggestions based on statistical patterns
@@ -63,8 +55,9 @@ This page outlines the planned direction for IRFlow Timeline. Priorities may shi
 
 See the [Changelog](/about/changelog) for detailed release notes on everything shipped so far. Highlights from recent releases:
 
-- **Process Inspector investigation UX (unreleased / in tree)** — multi-pass enrichment, async scoring, Story/Graph views, rule health report, Filter Grid, cross-analyzer handoffs
-- **AI Artifacts (v1.0.7)** — **Collect AI Artifacts** merges local assistant stores (Claude, Codex, ChatGPT Desktop, Gemini CLI, Cursor, Copilot, Windsurf, Continue) into one **AI Query History** tab from this Mac or KAPE/triage folders; **AI Secret Hunt** finds exposed keys, tokens, and credentials with redacted-by-default triage and exportable exposure briefs
+- **AI Application Forensics (v1.0.8)** — adds Grok Build; recursive Claude Desktop/Cowork transcripts and audits; Codex SQLite/WAL/SHM recovery; and exact, bounded tool-command evidence across supported assistants
+- **Collection-scale investigation (v1.0.8)** — ships Open Triage Collection, the Process Inspector Story/Graph/Raw overhaul, multi-source Persistence analysis, and stronger Lateral Movement detection and evidence triage
+- **AI Artifacts and AI Secret Hunt (v1.0.7)** — introduced the unified **AI Query History** tab and redacted-by-default secret-exposure triage
 - **Sigma Detection** — Dual JS Sigma + Hayabusa engine scanning raw EVTX, EvtxECmd output, and imported timelines, with custom rule collections, MITRE ATT&CK mapping, a triage dashboard, noisy-rule suppression, and persistent scan history
 - **RDP Bitmap Cache** — ANSSI-FR `bmc-tools` integration to recover bitmap tiles from `bcache*.bmc` / `cache????.bin` artifacts with an exportable, hashed evidence package
 - **Lateral Movement expansion** — Accounts and Exec Sessions tabs, pair-based Incidents, multi-hop Campaign clustering, and a Telemetry Coverage panel

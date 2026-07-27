@@ -6,7 +6,7 @@ description: IRFlow Timeline architecture — React renderer, Electron main proc
 
 Technical overview of IRFlow Timeline's architecture for developers and contributors.
 
-> **v1.0.6+ modular layout (current: v1.0.7).** What was once a ~20K-line `App.jsx` and monolithic `electron/parser.js` / `electron/db.js` is now decomposed into ~200 focused modules across the renderer and main process (`parsers/`, `ipc/`, `jobs/`, `analyzers/`, and related trees). v1.0.7 adds **`parsers/ai-history/`** and AI artifact IPC for **Collect AI Artifacts** and **AI Secret Hunt**. The file references below reflect that layout.
+> **v1.0.6+ modular layout (current: v1.0.8).** What was once a ~20K-line `App.jsx` and monolithic `electron/parser.js` / `electron/db.js` is now decomposed into focused modules across the renderer and main process (`parsers/`, `ipc/`, `jobs/`, `analyzers/`, and related trees). v1.0.8 extends the AI parser subsystem, triage collection orchestration, worker lifecycle controls, and multi-source analyzers. The file references below reflect that layout.
 
 ## System Architecture
 
@@ -44,7 +44,7 @@ Responsibilities: grid rendering with virtual scrolling, user-interaction handli
 
 The preload script creates a secure bridge between renderer and main using Electron's `contextBridge`. It exposes a **whitelisted `window.tle` API** with `contextIsolation` enabled and `nodeIntegration` disabled. All renderer↔main calls go through here as invoke-only channels; listener registrations return unsubscribe functions. Channels cover file ops, queries, tag/bookmark ops, IOC/VirusTotal enrichment, analysis (NTFS, lateral movement, Sigma, RDP bitmap cache), jobs, session persistence, filter presets, and auto-update.
 
-**v1.0.7 AI Artifacts / Secret Hunt surface** (same invoke-only pattern):
+**v1.0.8 AI Artifacts / Secret Hunt surface** (same invoke-only pattern):
 
 | `window.tle` method | IPC channel | Purpose |
 |---------------------|-------------|---------|
@@ -145,7 +145,7 @@ Streaming parsers convert source files into batched SQLite inserts:
 - **`plaso.js`** — Plaso SQLite databases via ATTACH + zlib
 - **`mft.js`** — two-pass raw `$MFT` parser (pass 1 builds directory + FN attribute maps, pass 2 reconstructs full paths); outputs **34 columns** matching MFTECmd, with SI-vs-FN timestamp comparison and resident-data detection
 - **`usn.js`** — raw `$UsnJrnl:$J` parser with reason-flag decoding and file-reference extraction
-- **`ai-history/`** — per-app parsers (Claude, Codex, ChatGPT, Gemini CLI, Cursor, Copilot, Windsurf, Continue) merged by profile scan or folder import into **AI Query History** tabs
+- **`ai-history/`** — per-app parsers (Claude Code/Desktop/Cowork, Codex, Grok Build, ChatGPT, Gemini CLI, Cursor, Copilot, Windsurf, Continue) merged by profile scan or folder import into **AI Query History** tabs. JSONL is streamed with bounded line and evidence sizes; SQLite sources are snapshotted with available WAL/SHM companions.
 
 ## Data Flow
 
@@ -163,7 +163,7 @@ open → main.enqueueImport() → import-worker (parsers/index.js, streaming)
 4. On completion the main process adopts the worker's DB; the initial row window + metadata go to the renderer.
 5. After the queue drains, `index-worker` builds column indexes, then the FTS5 index, in the background (`index-progress` / `fts-progress`).
 
-### AI Artifacts Pipeline (v1.0.7)
+### AI Artifacts Pipeline (v1.0.8)
 
 ```
 Collect AI Artifacts → discover-ai-history-profile (main)

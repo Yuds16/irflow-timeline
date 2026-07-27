@@ -1,8 +1,16 @@
+---
+description: Forensic artifact paths and parsing coverage for Grok Build, Claude, Codex, ChatGPT, Copilot, Gemini, Cursor, Windsurf, Continue, and other local AI applications.
+---
+
 # AI Query History and AI App Artifacts
 
 IRFlow Timeline includes a native **AI Query History** extractor for investigating local AI assistant usage during incident response. It parses local desktop, CLI, and editor-assistant stores into one timeline so analysts can review prompts, responses, tool calls, workspaces, source files, and possible pasted secrets.
 
 For the feature-level overview, see [AI Artifacts](/features/ai-artifacts). This guide is the deeper artifact inventory and investigation workflow.
+
+::: tip v1.0.8 coverage
+The v1.0.8 parser expansion adds **Grok Build**, recursive **Claude Desktop/Cowork** transcripts and audit records, versioned **Codex** SQLite recovery with WAL/SHM companions, and exact `ToolCommand`/structured `ToolInput` preservation across modern JSONL formats.
+:::
 
 ## AI History vs AI Prompts
 
@@ -141,9 +149,9 @@ ChatGPT stores vary by version:
 
 The macOS **Codex** app in `~/Library/Application Support/Codex` is UI cache only; forensic content is under **`~/.codex`**.
 
-### Grok Build (official terminal agent)
+### Grok Build (Grok AI terminal agent)
 
-[Grok Build](https://github.com/xai-org/grok-build) is xAI's official terminal coding agent. Its default data root is `~/.grok`; `GROK_HOME` can override that location. The official [authentication guide](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md) documents `~/.grok/auth.json` and `~/.grok/mcp_credentials.json`, both of which should be treated as credential-bearing evidence.
+[Grok Build](https://github.com/xai-org/grok-build) is the terminal coding agent distributed as the `grok` CLI. Its default data root is `~/.grok`; `GROK_HOME` can override that location. The upstream [authentication guide](https://github.com/xai-org/grok-build/blob/main/crates/codegen/xai-grok-pager/docs/user-guide/02-authentication.md) documents `~/.grok/auth.json` and `~/.grok/mcp_credentials.json`, both of which should be treated as credential-bearing evidence.
 
 | Artifact | Forensic value |
 |----------|----------------|
