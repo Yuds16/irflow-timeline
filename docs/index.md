@@ -47,12 +47,13 @@ features:
     details: Bookmarks, color-coded tags, conditional formatting with KAPE-aware presets, and full session save/restore.
 ---
 
-## What's New · v1.0.7
+## What's New · v1.0.8
 
-- **AI Artifacts** — Collect local assistant history into one **AI Query History** tab; **AI Secret Hunt** for redacted secret exposure
-- **Process Inspector (ongoing)** — Story / Graph / Raw views, verdict hero, Filter Grid pivots, cross-feature handoffs, and a **Rules** health report — see [Process Inspector](/features/process-tree)
+- **Grok Build support (new)** — Parse Grok AI prompts, responses, reasoning, exact terminal commands, completion output, session metadata, and file-change hunks.
+- **Expanded AI application forensics** — Deeper Claude Desktop/Cowork transcripts and audit trails, Codex SQLite recovery with WAL/SHM, and bounded tool evidence across supported assistants.
+- **Collection-scale investigations** — Open KAPE/triage collections and pivot through the upgraded Process Inspector, Persistence Analyzer, and Lateral Movement Tracker.
 
-[Full changelog →](/about/changelog)
+[Read the v1.0.8 announcement →](/blog/v1.0.8-ai-application-forensics) · [Full changelog →](/about/changelog)
 
 ## What is IRFlow Timeline?
 

@@ -5,6 +5,26 @@ All notable changes to IRFlow Timeline. The macOS release workflow
 released version as the GitHub release notes — keep version headers in the form
 `## v<MAJOR.MINOR.PATCH>`.
 
+## v1.0.8
+
+IRFlow Timeline 1.0.8 significantly expands **AI application forensics**, adding deeper artifact collection and parsing across popular AI assistants.
+
+### AI Application Forensics
+
+- **Grok Build support (new)** — collect and analyze Grok AI prompts, responses, reasoning, exact terminal commands, tool results, session context, and file-change records.
+- **Claude expanded** — recursively parse Claude Code and Claude Desktop/Cowork sessions, transcripts, audit records, tool activity, and actual shell commands.
+- **Codex expanded** — recover versioned SQLite data with WAL/SHM support, dated rollout sessions, commands, tool calls, and bounded outputs.
+- Improved parsing for ChatGPT Desktop, GitHub Copilot CLI, Gemini CLI, Cursor, and other supported assistants.
+- Better provenance, session relationships, and AI Secret Hunt safeguards.
+
+### Additional Improvements
+
+- New guided workflow for importing KAPE and triage collections.
+- Enhanced Process Inspector, Persistence Analyzer, and Lateral Movement Tracker.
+- Improved timeline navigation, bulk actions, and evidence review.
+- Memory-safe queries and bounded workers for greater stability with large datasets.
+- Signed and notarized universal macOS release for Apple Silicon and Intel.
+
 ## v1.0.7
 
 Brings **AI assistant query history** into the timeline as a first-class forensic artifact: collect it from a host or triage package, normalize every tool into one tab, and **hunt for secrets that were leaked into AI chats** — passwords, API keys, tokens, and private keys.

@@ -8,6 +8,10 @@ AI Artifacts turns local AI assistant history into timeline evidence. It helps i
 
 The feature creates an **AI Query History** timeline tab from local desktop, CLI, and editor-assistant stores. Each row keeps the evidence context analysts need: timestamp, role, AI app, invoked action, session, workspace, source file, summary, full text, and endpoint attribution when available.
 
+::: tip Expanded in v1.0.8
+**Grok Build is now a native evidence source.** IRFlow also adds recursive Claude Desktop/Cowork transcript and audit parsing, version-aware Codex SQLite discovery with WAL/SHM acquisition, and bounded JSONL/tool evidence that preserves exact shell commands without allowing one oversized record to exhaust Electron memory.
+:::
+
 ## Opening AI Artifacts
 
 - **Menu:** **Tools → Analysis → AI Artifacts → Collect AI Artifacts**

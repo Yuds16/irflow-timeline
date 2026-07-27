@@ -29,7 +29,7 @@
       <!-- Header -->
       <text x="24" y="24" fill="#777" font-size="8" font-family="'JetBrains Mono', monospace" letter-spacing="1.4">AI APPS SCAN</text>
       <rect x="224" y="10" width="52" height="18" rx="3" fill="#E85D2A18" stroke="#E85D2A" stroke-width="0.7" stroke-opacity="0.55" />
-      <text x="250" y="22" fill="#E85D2A" font-size="7" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-weight="700">8 APPS</text>
+      <text x="250" y="22" fill="#E85D2A" font-size="7" text-anchor="middle" font-family="'JetBrains Mono', monospace" font-weight="700">{{ apps.length }} APPS</text>
 
       <!-- Scan rays + flowing packets -->
       <g v-for="(app, i) in apps" :key="'r' + i">

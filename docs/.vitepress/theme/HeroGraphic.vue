@@ -20,7 +20,7 @@
       </div>
       <div class="title-right">
         <span class="brand-name">IRFlow</span>
-        <span class="brand-version">v1.0.7</span>
+        <span class="brand-version">v1.0.8</span>
       </div>
     </div>
 
@@ -111,7 +111,7 @@
         <div class="panel ai-apps-panel" :class="{ 'tour-focus': tourStep === 4 }" :style="{ opacity: sectionOpacity(4, showAiApps), transform: showAiApps ? 'translateY(0)' : 'translateY(10px)' }">
           <div class="panel-header">
             <span class="panel-title">AI APPS SCAN</span>
-            <span class="panel-badge badge-orange">8 APPS</span>
+            <span class="panel-badge badge-orange">{{ aiApps.length }} APPS</span>
           </div>
           <svg viewBox="0 0 380 140" class="ai-apps-svg" aria-hidden="true">
             <defs>
@@ -250,7 +250,7 @@ const tourSteps = [
   { index: 1, shortLabel: 'Search', icon: '\uD83D\uDD0D', caption: '5 search modes: text, regex, fuzzy, FTS, mixed' },
   { index: 2, shortLabel: 'Processes', icon: '\uD83C\uDF33', caption: 'Reconstruct attack chains with MITRE ATT&CK mapping', desktopOnly: true },
   { index: 3, shortLabel: 'Network', icon: '\uD83D\uDD17', caption: 'Track multi-hop lateral movement across your network', desktopOnly: true },
-  { index: 4, shortLabel: 'AI Apps', icon: '\uD83E\uDD16', caption: 'Collect AI history from Claude, Codex, Cursor, Copilot, ChatGPT, Gemini, Windsurf, and Continue' },
+  { index: 4, shortLabel: 'AI Apps', icon: '\uD83E\uDD16', caption: 'Collect AI history from Grok Build, Claude, Codex, ChatGPT, Copilot, Gemini, Cursor, and more' },
 ]
 
 const visibleTourSteps = computed(() => {
@@ -313,6 +313,7 @@ const maxHist = Math.max(...histogramData)
 const aiTimelineEvents = [
   { time: '2025-02-14 03:11:02', source: 'AI: Cursor', event: 'USER', detail: 'paste AWS key into agent prompt', severity: 'critical' },
   { time: '2025-02-14 03:11:18', source: 'AI: Codex', event: 'TOOL', detail: 'shell: whoami /priv', severity: 'high' },
+  { time: '2025-02-14 03:11:31', source: 'AI: Grok', event: 'TOOL', detail: 'run_terminal_command: systeminfo', severity: 'high' },
   { time: '2025-02-14 03:11:44', source: 'AI: Claude', event: 'ASST', detail: 'powershell lateral movement steps', severity: 'high' },
   { time: '2025-02-14 03:12:05', source: 'AI: Copilot', event: 'USER', detail: 'decrypt mimikatz output', severity: 'critical' },
   { time: '2025-02-14 03:12:22', source: 'AI: ChatGPT', event: 'USER', detail: 'ransomware recovery script', severity: 'medium' },
@@ -399,7 +400,7 @@ const filterTags = [
 ]
 
 const aiFilterTags = [
-  { label: 'AI Apps: 8 sources merged', color: '#E8613A' },
+  { label: 'AI Apps: 9 sources merged', color: '#E8613A' },
   { label: 'Tag: Secret Hunt', color: '#FF3B3B' },
   { label: 'Workspace: finance-api', color: '#9B59B6' },
 ]
@@ -415,6 +416,7 @@ watch(tourStep, (step) => {
 const aiApps = [
   { label: 'Claude', abbr: 'CL', color: '#D4A574', x: 42, y: 28 },
   { label: 'Codex', abbr: 'CX', color: '#10A37F', x: 42, y: 112 },
+  { label: 'Grok', abbr: 'GK', color: '#F5F5F5', x: 190, y: 16 },
   { label: 'Cursor', abbr: 'CU', color: '#6BA3E8', x: 108, y: 18 },
   { label: 'Copilot', abbr: 'CP', color: '#4A90D9', x: 108, y: 122 },
   { label: 'ChatGPT', abbr: 'GPT', color: '#74AA9C', x: 272, y: 28 },
