@@ -6,6 +6,21 @@ description: KAPE integration — auto-detect and pre-configure display settings
 
 IRFlow Timeline automatically detects and pre-configures display settings for output from KAPE and Eric Zimmerman's (EZ) tools, giving you an optimized view from the moment you open a file.
 
+## Open Triage Collection
+
+For a full KAPE (or similar) triage **folder** — not a single CSV — use:
+
+**File → Open Triage Collection…**
+
+1. Choose the collection root (for example a KAPE output directory or mounted evidence tree).
+2. IRFlow inventories recognizable artifacts (EVTX channels, `$MFT` / `$J`, KAPE CSVs, Prefetch, Amcache, registry hives, LNK/Jump Lists, and more).
+3. Review two independent lanes:
+   - **Lateral Movement** — pre-selects LM-relevant EVTX (Security, Sysmon, TerminalServices, RDP, …), imports them as timeline tabs, then can hand off to the [Lateral Movement Tracker](/features/lateral-movement).
+   - **EVTX → Sigma** — optional Hayabusa/Sigma path over the Windows event-log directory (same dual-engine flow as [Sigma Detection](/features/sigma-detection)).
+4. Artifacts that this build cannot parse are **listed with a tool hint** (for example Prefetch → PECmd) rather than dropped silently.
+
+Host attribution (when the collection encodes a hostname) is applied so imported tabs stay tied to the right endpoint. You can still open individual KAPE CSVs with **File → Open** for profile auto-detection below.
+
 ## How Auto-Detection Works
 
 When you open a CSV or XLSX file, IRFlow Timeline analyzes the column headers to identify the source tool. If a known profile matches, it automatically applies:

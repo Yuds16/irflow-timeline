@@ -114,6 +114,7 @@ For a fast first pass on event logs, choose **Tools → Detection → Sigma Scan
 - Learn about all [search modes and filters](/features/search-filtering)
 - Set up [color rules](/features/color-rules) for visual pattern matching
 - Run rule-based detection with [Sigma Detection](/features/sigma-detection)
-- Explore the [Process Inspector](/features/process-tree) for Sysmon analysis
+- Explore the [Process Inspector](/features/process-tree) for Sysmon analysis (Story / Graph / Rules health / Filter Grid)
+- Open a full KAPE folder with **File → Open Triage Collection…** ([KAPE workflow](/workflows/kape-integration#open-triage-collection))
 - Track lateral movement with the [Lateral Movement Tracker](/features/lateral-movement)
 - Configure [KAPE integration](/workflows/kape-integration) for auto-detection

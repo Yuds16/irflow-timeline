@@ -29,7 +29,7 @@ features:
     details: Dual-engine Sigma scanning — bundled Hayabusa over raw EVTX plus an in-app JS engine for imported timelines, with MITRE ATT&CK-mapped triage, custom rules, and persistent scan history.
   - icon: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#E85D2A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v6"/><circle cx="12" cy="12" r="3"/><path d="M12 15v3"/><path d="M8 15l-3 3"/><path d="M16 15l3 3"/><path d="M5 18v2"/><path d="M12 18v2"/><path d="M19 18v2"/></svg>'
     title: Process Inspector
-    details: Reconstruct process trees from Sysmon and Security logs with 4-tier threat scoring, 342 chain rules + 13 standalone patterns mapped to MITRE ATT&CK.
+    details: Reconstruct process trees from Sysmon and Security logs — Story/Graph/Raw views, multi-pass enrichment, ~330 chain rules + ~60 standalone detections, rule health coverage, and one-click Filter Grid pivots.
   - icon: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#E85D2A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="6" cy="6" r="3"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="18" r="3"/><line x1="8.5" y1="7.5" x2="15.5" y2="16.5"/><line x1="15.5" y1="7.5" x2="8.5" y2="16.5"/><line x1="6" y1="9" x2="6" y2="15"/><line x1="18" y1="9" x2="18" y2="15"/></svg>'
     title: Lateral Movement Tracker
     details: Network graph with multi-hop chain reconstruction and RDP session correlation. Detects brute force, password spray, Impacket, 33 RMM tools, and 7 network tunnels.
@@ -48,6 +48,9 @@ features:
 ---
 
 ## What's New · v1.0.7
+
+- **AI Artifacts** — Collect local assistant history into one **AI Query History** tab; **AI Secret Hunt** for redacted secret exposure
+- **Process Inspector (ongoing)** — Story / Graph / Raw views, verdict hero, Filter Grid pivots, cross-feature handoffs, and a **Rules** health report — see [Process Inspector](/features/process-tree)
 
 [Full changelog →](/about/changelog)
 

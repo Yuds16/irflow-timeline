@@ -22,7 +22,9 @@ Correlate logon and lateral-movement evidence across **multiple open tabs** — 
 
 ![Lateral Movement Tracker multi-source setup with tab checkboxes to include Security, Sysmon, and other loaded timelines](/dfir-tips/Lateral-Movement-Multi-Source.png)
 
-In the tracker configuration phase, enable **Multi-source** and select the tabs to merge. Each tab’s format (raw EVTX, EvtxECmd, Hayabusa, Chainsaw, etc.) is detected automatically so edges and sessions stitch together correctly.
+In the tracker configuration phase, enable **Multi-source** and select the tabs to merge. Each tab’s format (raw EVTX, EvtxECmd, Hayabusa, Chainsaw, etc.) is detected automatically so edges and sessions stitch together correctly. The row budget (`maxRows`) is split across selected tabs so one large Security log cannot starve Sysmon (and vice versa). A detector registry keeps spine Event IDs aligned between single-tab and multi-source runs.
+
+You can also start from **File → Open Triage Collection…**, which pre-selects LM-relevant EVTX channels from a KAPE folder and can hand off into this tracker after import. From the [Process Inspector](/features/process-tree) detail panel, **Lateral** applies host + time filters on the current tab and opens the tracker.
 
 ## Detection Rules
 

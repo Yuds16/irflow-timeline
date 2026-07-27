@@ -10,6 +10,14 @@ This page outlines the planned direction for IRFlow Timeline. Priorities may shi
 
 ## In Progress
 
+### Process Inspector depth (next release)
+- Verdict hero, Story / Graph / Raw modes, **Rules** health coverage report, Filter Grid pivots, and Lateral/Persistence/Sigma handoffs — see [Process Inspector](/features/process-tree) and the [changelog Unreleased](/about/changelog) section
+- Further rule-catalog expansion and analyst-facing coverage tooling
+
+### Open Triage Collection & multi-source analyzers
+- Folder-level KAPE/triage inventory with LM and Sigma lanes
+- Persistence multi-source + **Analyze KAPE Collection**; Lateral Movement multi-source budget and detector registry hardening
+
 ### Enhanced Detection Rules
 - Expand the detection rules library beyond the current ones
 - Community-contributed rule packs with shared rule repositories
@@ -55,6 +63,7 @@ This page outlines the planned direction for IRFlow Timeline. Priorities may shi
 
 See the [Changelog](/about/changelog) for detailed release notes on everything shipped so far. Highlights from recent releases:
 
+- **Process Inspector investigation UX (unreleased / in tree)** — multi-pass enrichment, async scoring, Story/Graph views, rule health report, Filter Grid, cross-analyzer handoffs
 - **AI Artifacts (v1.0.7)** — **Collect AI Artifacts** merges local assistant stores (Claude, Codex, ChatGPT Desktop, Gemini CLI, Cursor, Copilot, Windsurf, Continue) into one **AI Query History** tab from this Mac or KAPE/triage folders; **AI Secret Hunt** finds exposed keys, tokens, and credentials with redacted-by-default triage and exportable exposure briefs
 - **Sigma Detection** — Dual JS Sigma + Hayabusa engine scanning raw EVTX, EvtxECmd output, and imported timelines, with custom rule collections, MITRE ATT&CK mapping, a triage dashboard, noisy-rule suppression, and persistent scan history
 - **RDP Bitmap Cache** — ANSSI-FR `bmc-tools` integration to recover bitmap tiles from `bcache*.bmc` / `cache????.bin` artifacts with an exportable, hashed evidence package

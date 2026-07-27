@@ -17,6 +17,7 @@ The menu bar provides access to all application features through five dropdown m
 | Item | Shortcut | Description |
 |------|----------|-------------|
 | **Open** | `⌘O` | Open a file via the system dialog |
+| **Open Triage Collection…** | | Point at a KAPE / triage folder: inventory artifacts, import selected EVTX (and other ingestible kinds) as tabs, optional Lateral Movement or Sigma handoff — see [KAPE Integration](/workflows/kape-integration#open-triage-collection) |
 | **Export** | `⌘E` | Export filtered data as CSV, TSV, XLSX, or XLS |
 | **Save Session** | `⌘S` | Save all tabs, filters, bookmarks, tags, and color rules to a `.tle` file |
 | **Load Session** | `⇧⌘O` | Restore a previously saved session |
@@ -41,7 +42,7 @@ The menu bar provides access to all application features through five dropdown m
 | Item | Description |
 |------|-------------|
 | **Show Flagged Only** | Toggle between all rows and bookmarked-only view |
-| **Select All** | Select all rows (checkbox) |
+| **Select All** | Select all rows (checkbox); also available from the selection bar |
 | **Deselect All** | Clear checkbox selection |
 | **Invert Selection** | Toggle the selection state of every row |
 | **Copy Selected Rows** | Copy selected rows as tab-separated text to clipboard |
@@ -85,17 +86,15 @@ Timeline-wide analytics that work on any imported tab (CSV, EVTX, XLSX, Plaso, e
 
 #### Platforms
 
-Platform-specific analyzers are grouped under collapsible OS sections. **Windows** is fully enabled today; **Linux**, **macOS**, and **Cloud** list upcoming analyzers as disabled menu placeholders until those platforms ship in a future release.
-
-![Tools Platforms section expanded showing Windows tools active and Linux, macOS, and Cloud placeholder groups](/dfir-tips/Platform-PLaceholders.png)
+Platform-specific analyzers live under **Windows** (active today). A single collapsed **Coming soon** group lists planned Linux, macOS, and cloud analyzers.
 
 **Windows** includes:
 
 | Menu path | Description |
 |-----------|-------------|
-| **Tools → Platforms → Windows → Process Inspector** | Parent-child process hierarchy with MITRE ATT&CK detection |
-| **Tools → Platforms → Windows → Lateral Movement Tracker** | Network graph of host-to-host logon activity with attack pattern detection |
-| **Tools → Platforms → Windows → Persistence Analyzer** | 36 EVTX + 33 registry persistence rules with risk scoring |
+| **Tools → Platforms → Windows → Process Inspector** | Parent-child process trees, Story/Graph/Raw views, rule health, Filter Grid pivots — see [Process Inspector](/features/process-tree) |
+| **Tools → Platforms → Windows → Lateral Movement Tracker** | Network graph of host-to-host logon activity with multi-source correlation |
+| **Tools → Platforms → Windows → Persistence Analyzer** | EVTX + registry persistence rules; multi-source and KAPE collection modes |
 | **Tools → Platforms → Windows → RDP Bitmap Cache** | Recover bitmap tiles from RDP cache artifacts (`bmc-tools`) |
 | **Tools → Platforms → Windows → Master File Table → …** | Ransomware analysis, timestomping, file activity heatmap, ADS analyzer, extract resident data — requires a raw `$MFT` tab |
 | **Tools → Platforms → Windows → USN Journal → USN Journal Analysis** | USN Journal analysis with UsnJrnl Rewind path reconstruction — requires a raw `$J` tab |
@@ -112,11 +111,16 @@ See [NTFS Analysis](/features/ntfs-analysis) for the MFT and USN Journal tools.
 
 | Item | Shortcut | Description |
 |------|----------|-------------|
+| **Command Palette** | `⌘K` | Searchable list of File / View / Actions / Tools / Help commands |
 | **Quick Help** | | In-app guide covering supported formats, search modes, and shortcuts |
 | **Keyboard Shortcuts** | `⌘/` | Reference card of all keyboard shortcuts |
 | **Check for Updates** | | Check for new versions and install updates |
 | **Website** | | Open the IRFlow Timeline documentation site |
 | **About IRFlow Timeline** | | Version info, author, and social links |
+
+### Selection bar
+
+When one or more rows are checked, a compact **selection bar** appears above the grid with the selection count, copy, bulk tag/bookmark, and clear actions — so multi-row ops stay one click away without opening the Actions menu.
 
 ### Toolbar Controls
 

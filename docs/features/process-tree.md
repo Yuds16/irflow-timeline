@@ -1,10 +1,10 @@
 ---
-description: Process Inspector — parent-child process trees, multi-pass detection, sequences, graph view, and grid pivots from Sysmon and Security process telemetry.
+description: Process Inspector — parent-child process trees, multi-pass detection, sequences, graph view, rule health coverage, and grid pivots from Sysmon and Security process telemetry.
 ---
 
 # Process Inspector
 
-The Process Inspector builds parent-child process trees from **Sysmon Event ID 1** and **Windows Security Event ID 4688**, then scores execution chains with chain rules, standalone detections, prevalence, binary trust, lifetime, injection, and privilege-use correlation. Results open as **Story / Triage / Hunt / Graph / Raw** views with analyst suppressions, custom rules, and one-click pivots into the main grid and other IRFlow features.
+The Process Inspector builds parent-child process trees from **Sysmon Event ID 1** and **Windows Security Event ID 4688**, then scores execution chains with chain rules, standalone detections, prevalence, binary trust, lifetime, injection, and privilege-use correlation. Results open as **Story / Triage / Hunt / Graph / Raw** views plus a **Rules** health report, with analyst suppressions, custom rules, and one-click pivots into the main grid and other IRFlow features.
 
 ![Process Inspector graph view with parent-child execution chains](/dfir-tips/Process-Tree-Analyzer-Sysmon.png)
 
@@ -54,7 +54,7 @@ Some interpreter chains are **gated**: benign `svchost→powershell` / `cmd→po
 
 ### Standalone + context rules (PI rule catalog)
 
-Implemented in `src/utils/process-inspector.js` (~55 `pi-*` rules) across groups:
+Implemented in `src/utils/process-inspector.js` (~60 `pi-*` rules, including path masquerade, binary trust, lifetime, and grandparent chains) across groups:
 
 | Group | Examples |
 |-------|----------|
@@ -81,17 +81,17 @@ Exact triples such as `winword → cmd → powershell` fire on the leaf even whe
 
 Sliding ~10-minute windows promote multi-behavior attack stories, for example:
 
-- Download → Execute
-- Office/Script → LOLBin
-- Recon → Lateral
-- Credential Access → Lateral / LSASS dump → Lateral
-- Multi-hop LOLBIN chain
-- Office/Script → Download → RMM
-- AMSI/ETW patch → Inject
-- Disable Defender → Payload
-- Download/Stage → Persistence
-- Suspicious Exec → Network/DNS
-- Drop File/Module → Execute
+- Download → Execute  
+- Office/Script → LOLBin  
+- Recon → Lateral  
+- Credential Access → Lateral / LSASS dump → Lateral  
+- Multi-hop LOLBIN chain  
+- Office/Script → Download → RMM  
+- AMSI/ETW patch → Inject  
+- Disable Defender → Payload  
+- Download/Stage → Persistence  
+- Suspicious Exec → Network/DNS  
+- Drop File/Module → Execute  
 
 Sequences appear as **SEQ** badges and feed Story mode.
 
@@ -112,12 +112,24 @@ Toolbar: search, severity toggles, expand/depth (tree modes), copy/export, rare-
 
 After a build, open **Rules** in the results toolbar for a coverage brief:
 
-- Coverage % of enabled built-in rules that fired on this tree
-- Fired / silent / disabled counts, custom-rule hits, sequence hits
-- Top fired rules, silent high-value (critical/high with zero hits), by-group breakdown
-- Techniques seen; copy or download a plain-text report
+- Coverage % of enabled built-in rules that fired on this tree  
+- Fired / silent / disabled counts, custom-rule hits, sequence hits  
+- Top fired rules, silent high-value (critical/high with zero hits), by-group breakdown  
+- Techniques seen; copy or download a plain-text report (`process-rule-health.txt`)  
 
-Use this to tune intents, spot telemetry gaps (silent high-value rules), and document which detections applied to a case.
+Use this to tune intents (Low-noise / Balanced / Broad), spot telemetry gaps (silent high-value rules on a clean-looking host), and document which detections applied to a case. Toggle **Rules** again to return to the previous view mode.
+
+### Config phase (before build)
+
+Before the tree runs, the config panel surfaces:
+
+- **Readiness score** and detection capability chips (tree reconstruction, chain detections, standalone, sequences)
+- **Telemetry toggles** — Sysmon EID 1 and Security 4688, with live event counts from preview
+- **Intent presets** — Low-noise triage, Balanced, or Broad hunt (adjusts which `pi-*` groups are disabled)
+- **Technique groups** — enable/disable rule groups with partial-state support
+- **Custom rules** — parent/child name, path/cmdline contains, optional regex (ReDoS-guarded), severity, MITRE, behavior tag
+- **Column mapping** disclosure when auto-map needs override
+- Max process limit (default **200,000**)
 
 ### Verdict hero (results)
 
@@ -130,28 +142,29 @@ On build complete, a **verdict-first** banner shows:
 - Link quality (GUID vs PID)
 - Telemetry completeness (Process Create · Terminate · Process Access · Privilege Use)
 - Truncation warning when the max process limit was hit
+- **Scoped rebuild** — host and/or time window when the global max truncated the tree
 
 ## Detail panel
 
 Select a process for:
 
-- Detection reason, confidence, triage score, evidence pills, MITRE badges
-- Fields: path, parent, link provenance, prevalence, integrity, cmdline (token highlight + base64 decode)
-- Source event, Related EVTX timeline, cross-telemetry pivots
-- **Filter Grid** — ProcessGuid (or host+PID) ± time window, including child creates; optional scroll to create event
-- **Graph** — focus this process in Graph mode
-- **Open Lateral / Persistence / Sigma** — time+host context handoffs
-- **VirusTotal** — in-app lookup when a VT API key is configured; otherwise opens the public VT page
+- Detection reason, confidence, triage score, evidence pills, MITRE badges  
+- Fields: path, parent, link provenance, prevalence, integrity, cmdline (token highlight + base64 decode)  
+- Source event, Related EVTX timeline, cross-telemetry pivots  
+- **Filter Grid** — ProcessGuid (or host+PID) ± time window, including child creates; optional scroll to create event  
+- **Graph** — focus this process in Graph mode  
+- **Open Lateral / Persistence / Sigma** — time+host context handoffs  
+- **VirusTotal** — in-app lookup when a VT API key is configured; otherwise opens the public VT page  
 - Baseline / Suppress (Analyst Profile)
 
 ## Grid pivot (Filter Grid)
 
 One click from a process:
 
-1. Prefer **ProcessGuid contains** (and ParentProcessGuid for children)
-2. Else **PID** (decimal + hex) + PPID, scoped by hostname when available
-3. Always apply **±N minutes** on the timestamp column when parseable (5m / 15m / 1h / 6h)
-4. Clears competing search/column filters so the pivot is deterministic
+1. Prefer **ProcessGuid contains** (and ParentProcessGuid for children)  
+2. Else **PID** (decimal + hex) + PPID, scoped by hostname when available  
+3. Always apply **±N minutes** on the timestamp column when parseable (5m / 15m / 1h / 6h)  
+4. Clears competing search/column filters so the pivot is deterministic  
 5. Sets the proximity pill and, when possible, **scrolls to the create event**
 
 Works with EvtxECmd/Hayabusa blob columns via `contains` on the payload field.
@@ -172,31 +185,31 @@ Suppressions and baselines (process, parent, host, user, image, cmdline contains
 
 **Custom detection rules** live in the Process Inspector config panel under **Custom Rules**. Each rule can match any combination of:
 
-- Parent process name
-- Process name
-- Image path contains
-- Command line contains
-- Optional regex (process / cmdline / path)
+- Parent process name  
+- Process name  
+- Image path contains  
+- Command line contains  
+- Optional regex (process / cmdline / path)  
 - Severity, MITRE technique, and **behavior tag** (so the rule participates in sequence detection)
 
 ## Exports
 
-- CSV / JSON of visible processes (with link provenance and detection fields)
-- Copy chain / tree / selected rows / stories
-- Linked evidence export from Related EVTX pivots
+- CSV / JSON of visible processes (with link provenance and detection fields)  
+- Copy chain / tree / selected rows / stories  
+- Linked evidence export from Related EVTX pivots  
 
 ## Scale & rebuild
 
-- Tree build runs in an **analyzer worker** (job-backed).
-- Detection scoring runs **chunked asynchronously** after the tree returns (progress bar in the hero on large sets) so the UI stays responsive.
-- When the process limit truncates results, the hero offers a **scoped rebuild**: pick host and/or time window and re-run without raising the global max.
+- Tree build runs in an **analyzer worker** (job-backed).  
+- Detection scoring runs **chunked asynchronously** after the tree returns (progress bar in the hero on large sets) so the UI stays responsive.  
+- When the process limit truncates results, the hero offers a **scoped rebuild**: pick host and/or time window and re-run without raising the global max.  
 
 ## Limitations
 
-- Windows process-create focused (Sysmon 1 / Security 4688). Linux/macOS process telemetry is not modeled.
-- Graph and detection score **cap** large trees (default 200k processes; graph seeds ~220 nodes). Truncation is warned in the hero and header.
-- EID 10 / 5 / 3 / 22 / 7 / 11 / 4673 enrichment requires those events in the **same** imported table.
-- PID-only linking remains best-effort under logon/session scope; prefer Sysmon GUIDs.
+- Windows process-create focused (Sysmon 1 / Security 4688). Linux/macOS process telemetry is not modeled.  
+- Graph and detection score **cap** large trees (default 200k processes; graph seeds ~220 nodes). Truncation is warned in the hero and header.  
+- EID 10 / 5 / 3 / 22 / 7 / 11 / 4673 enrichment requires those events in the **same** imported table.  
+- PID-only linking remains best-effort under logon/session scope; prefer Sysmon GUIDs.  
 - Sigma handoff opens the wizard with tab + filters prepared; it does not auto-start a Hayabusa scan.
 
 ## Tips
@@ -215,9 +228,9 @@ Use Story/Triage first, then Graph for spatial chains. When truncated, raise max
 
 ## See Also
 
-- [Analyst Profiles](/features/analyst-profiles)
-- [Persistence Analyzer](/features/persistence-analyzer)
-- [Lateral Movement Tracker](/features/lateral-movement)
-- [Sigma Detection](/features/sigma-detection)
-- [IOC Matching](/features/ioc-matching) / VirusTotal
-- [Search & Filtering](/features/search-filtering)
+- [Analyst Profiles](/features/analyst-profiles)  
+- [Persistence Analyzer](/features/persistence-analyzer)  
+- [Lateral Movement Tracker](/features/lateral-movement)  
+- [Sigma Detection](/features/sigma-detection)  
+- [IOC Matching](/features/ioc-matching) / VirusTotal  
+- [Search & Filtering](/features/search-filtering)  

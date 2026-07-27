@@ -9,6 +9,7 @@ description: Keyboard shortcuts reference for IRFlow Timeline — file operation
 | Shortcut | Action |
 |----------|--------|
 | `Cmd+O` | Open file |
+| Menu | **File → Open Triage Collection…** — inventory a KAPE/triage folder and import selected artifacts ([workflow](/workflows/kape-integration#open-triage-collection)) |
 | `Cmd+E` | Export filtered data |
 | `Cmd+S` | Save session |
 | `Cmd+Shift+O` | Load session |
@@ -70,7 +71,7 @@ description: Keyboard shortcuts reference for IRFlow Timeline — file operation
 | `Cmd+Plus` / `Cmd+-` | Increase / decrease font size (macOS **Tools → Font Size**) |
 | Toolbar **☀ / 🌙** | Toggle dark / light theme |
 
-Analysis tools in the **in-app Tools** menu are grouped in four sections: **Analysis** (Stack Values, Gap Analysis, Log Sources, Burst Detection), **Detection** (Sigma Scan), **Platforms** (active Windows tools plus one collapsed **Coming soon** group for planned Linux, macOS, and cloud analyzers), and **Export** (Generate Report).
+Analysis tools in the **in-app Tools** menu are grouped in four sections: **Analysis** (Stack Values, Gap Analysis, Log Sources, Burst Detection, **AI Artifacts**), **Detection** (Sigma Scan and **AI Secret Hunt**), **Platforms** (active Windows tools plus one collapsed **Coming soon** group for planned Linux, macOS, and cloud analyzers), and **Export** (Generate Report).
 
 ![Tools → Analysis → AI Artifacts with Collect AI Artifacts and AI Apps](/dfir-tips/Tools-Menu-AI-Artifacts.png)
 

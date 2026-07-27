@@ -4,6 +4,48 @@ description: IRFlow Timeline changelog — version history, new features, perfor
 
 # Changelog
 
+## Unreleased — Process Inspector & investigation UX
+
+Work in progress toward the next release. Feature pages already describe the UI; summary of the major deltas:
+
+### Process Inspector
+
+- **Verdict-first results** — severity hero with counts, top stories, ATT&CK chips, link quality, and telemetry completeness after every build
+- **Story / Triage / Hunt / Graph / Raw** view modes — investigation stories, chain clusters, spatial multi-host graph, and full tree
+- **Rules health report** — coverage of fired / silent / disabled built-in rules, custom rules, and multi-stage sequences; copy or download plain-text report
+- **Async chunked scoring** — detection scoring no longer blocks the UI on large trees; progress in the hero
+- **Filter Grid pivot** — one click from a process applies ProcessGuid (or host+PID) ± time window and scrolls to the create event
+- **Cross-feature handoffs** — Open Lateral Movement / Persistence / Sigma around the selected process (host + time window)
+- **Enrichment passes** — terminate (5/4689), process access (10), privilege use (4673/4674), network (3), DNS (22), image load (7), file create (11)
+- **Grandparent chains (pi-60)** and expanded standalone catalog (~60 `pi-*` rules), gated interpreter chains, prevalence, allowlist dampening
+- **Scoped rebuild** when the process limit truncates — re-run for a host and/or time window without raising the global max
+- **Modal architecture** — config / loading / results phases split for maintainability; keyboard navigation in the tree
+
+### File & grid UX
+
+- **Open Triage Collection** — point at a KAPE/triage folder; review what is present, import LM-relevant EVTX (and other ingestible artifacts), optional Sigma handoff; unparsed artifact kinds surface tool hints (e.g. PECmd for Prefetch) instead of silent drops
+- **Command palette** — `Cmd+K` searchable actions across File / View / Actions / Tools / Help
+- **Selection bar** — compact strip for multi-row selection with copy, bulk actions, and clear
+- Keyboard and filter-bar polish (command palette active-descendant pattern, responsive search options)
+
+### Persistence Analyzer
+
+- **Multi-source scan** — correlate persistence evidence across multiple open tabs
+- **Analyze KAPE Collection** — folder-level scan of KAPE outputs (EVTX + registry exports), with incident clustering and explicit “unread artifact” warnings
+- Hardened registry shape matching and remote-origin scoring for service/task installs
+
+### Lateral Movement Tracker
+
+- Detector registry for spine event IDs, safer `maxRows` clamping, multi-source budget split per tab
+- Timezone-aware scoring paths and stage isolation improvements for large multi-tab runs
+
+### Data quality
+
+- Plaso parser field-discovery and import path improvements
+- Process tree worker enrichment and link-provenance fields on export (CSV/JSON)
+
+---
+
 ## v1.0.7 — June 4, 2026
 
 ### New Features

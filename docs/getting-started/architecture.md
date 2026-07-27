@@ -31,10 +31,10 @@ The diagram uses a **semantic color system** — color maps to function, not jus
 
 The renderer runs in a sandboxed browser context with no direct Node.js access — all system operations go through the IPC bridge. `App.jsx` is now a thin top-level coordinator; responsibility is distributed across focused trees:
 
-- **`components/`** — `VirtualGrid`, `MenuBar`, `FilterBar`, `TabBar`, `StatusBar`; `primitives/` (Modal, Button, Toast, ConfirmDialog, …); `modals/` (one file per analysis modal — Sigma, Lateral Movement, Persistence, Ransomware, USN, ADS, Timestomping, RDP bitmap cache, AI history extract/secret hunt, …); `process-analyzer/` (process-tree UI subsystem)
+- **`components/`** — `VirtualGrid`, `MenuBar`, `FilterBar`, `TabBar`, `StatusBar`, `SelectionBar`; `primitives/` (Modal, Button, Toast, ConfirmDialog, …); `modals/` (one file per analysis modal — Sigma, Lateral Movement, Persistence, Ransomware, USN, ADS, Timestomping, RDP bitmap cache, Triage Collection, …); `process-analyzer/` (Process Inspector UI: orchestrator modal + config / loading / results / graph / verdict hero / rule health phases)
 - **`store/`** — Zustand stores: `useTabStore`, `useUIStore`, `useGridInteractionStore`, `useConfirmStore`, `useToastStore`
-- **`hooks/`**, **`modals/modalRegistry.js`** (namespaced modal state), **`constants/`** (`themes.js`, `presets.js`, `kape-profiles.js`, …), **`utils/`** (`ipc-result.js`, `datetime.js`, a mirror of `forensic-normalize`, …)
-- **`detection-rules.js`** (~400 lines) + **`detection-rules/`** (`tool-aliases.js` — the canonical RMM/tunnel/exfil tool catalog), mapped to MITRE ATT&CK and consumed by the process analyzer
+- **`hooks/`**, **`modals/modalRegistry.js`** (namespaced modal state), **`constants/`** (`themes.js`, `presets.js`, `kape-profiles.js`, …), **`utils/`** (`ipc-result.js`, `datetime.js`, `process-inspector` / `process-inspector-pipeline` / `process-rule-health` / `process-grid-pivot` / `process-handoffs`, a mirror of `forensic-normalize`, …)
+- **`detection-rules.js`** + **`detection-rules/`** (`tool-aliases.js` — the canonical RMM/tunnel/exfil tool catalog), mapped to MITRE ATT&CK and consumed by the process analyzer
 
 Responsibilities: grid rendering with virtual scrolling, user-interaction handling, Zustand state management, visualization (histogram, process inspector, lateral-movement graphs, NTFS analysis panels), KAPE profile auto-detection, VirusTotal verdict display, and theme management (dark default + light).
 
@@ -68,7 +68,7 @@ The main process runs with full Node.js access and acts as the orchestrator:
 
 - **`main.js`** — creates the `BrowserWindow`, wires crash guards, defines the `safeHandle` / `safeSend` IPC primitives, owns the serialized import queue and the deferred index/FTS build queue, and delegates IPC registration to `ipc/index.js`, menus to `menu.js`, and updates to `updater.js`. Raises the V8 heap to **16 GB** for large imports.
 - **`import.js`** — import pipeline: validation, XLSX sheet selection, large-file warnings, USN↔MFT path resolution, and index scheduling.
-- **`ipc/`** — one registration module per domain (`query-`, `tag-`, `analysis-`, `export-`, `session-`, `vt-`, `sigma-`, `job-`, `rdp-bitmap-cache-`, `ai-history-handlers`), all registered by `ipc/index.js`. Each handler is wrapped by `safeHandle()`. Collect/extract routes live in `ai-history-handlers.js`; Secret Hunt runs through `analysis-handlers.js`; AI exports through `export-handlers.js`.
+- **`ipc/`** — one registration module per domain (`query-`, `tag-`, `analysis-`, `export-`, `session-`, `vt-`, `sigma-`, `job-`, `rdp-bitmap-cache-`, `triage-handlers`, and release-specific modules such as AI history when enabled), all registered by `ipc/index.js`. Each handler is wrapped by `safeHandle()`.
 - **`updater.js`** — auto-update lifecycle (check → download → install) via `electron-updater`.
 - **`logger.js`** — shared singleton debug logger (`electron/logger.js`) with ~5 MB rotation and a write buffer (`~/tle-debug.log`); `dbg(scope, message, data?)` is used across main-process modules (not the legacy monolithic `parser.js` / `db.js` paths).
 

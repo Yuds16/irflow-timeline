@@ -14,15 +14,24 @@ The Persistence Analyzer automatically scans your timeline data for Windows pers
 
 ## Data Source Modes
 
-The analyzer supports three input modes, selectable in the configuration panel:
+The analyzer supports tab-level modes plus multi-source and whole-collection scans:
 
 | Mode | Input Data | Best For |
 |------|-----------|----------|
-| **Auto-detect** | Analyzes column names to determine type | Quick start -- let the tool decide |
+| **Auto-detect** | Analyzes column names to determine type | Quick start — let the tool decide |
 | **EVTX Logs** | EvtxECmd CSV or parsed EVTX output | Event-based persistence (services, tasks, WMI) |
 | **Registry Export** | RECmd or other registry CSV output | Registry-based persistence (Run keys, COM hijacks, LSA) |
+| **Multi-source** | Several open tabs in one run | Correlate EVTX + registry (or multiple hosts) without re-import |
+| **Analyze KAPE Collection** | A KAPE output **folder** | Folder-level EVTX + registry discovery, incident clustering, and unread-artifact warnings |
 
 In auto-detect mode, the analyzer examines your column headers to determine whether the data contains event log fields (`EventId`, `Channel`, `Provider`) or registry fields (`KeyPath`, `ValueName`, `ValueData`).
+
+### Multi-source and KAPE collection
+
+- **Multi-source** — enable in the config panel and select other open tabs to merge. Formats are detected per tab so service-install events and RECmd rows can cluster into the same incident when they describe the same host/key.
+- **Analyze KAPE Collection** — browse to a collection root; IRFlow scans for supported EVTX and registry exports, runs the matching rule packs, clusters findings into **incidents**, and reports coverage gaps (for example EVTX files present but not read). Prefer this when the evidence is still a folder rather than a single imported CSV.
+
+Handoffs from the [Process Inspector](/features/process-tree) detail panel (**Persistence**) open this analyzer with host + time context already applied.
 
 ## EVTX Detection Rules
 
