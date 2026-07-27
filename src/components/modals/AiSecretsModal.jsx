@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import useUIStore from "../../store/useUIStore.js";
 import useTabStore from "../../store/useTabStore.js";
 import { toast } from "../../store/useToastStore.js";
+import { confirm } from "../../store/useConfirmStore.js";
 import { isIpcError, ipcErrorMessage } from "../../utils/ipc-result.js";
 import DraggableResizableModal from "../primitives/DraggableResizableModal.jsx";
 
@@ -326,9 +327,19 @@ export default function AiSecretsModal({ th }) {
     try { await navigator.clipboard?.writeText?.(String(text || "")); toast.success(label); }
     catch (e) { toast.error("Copy failed", { detail: String(e?.message || e) }); }
   };
-  const confirmReveal = (key) => {
-    if (!reveal[key] && typeof window !== "undefined" && !window.confirm("Reveal cleartext secret in this result?")) return;
-    patch({ reveal: { ...reveal, [key]: !reveal[key] } });
+  const confirmReveal = async (key) => {
+    if (!reveal[key]) {
+      const approved = await confirm({
+        title: "Reveal cleartext secret?",
+        message: "This displays sensitive evidence in the application window. Continue only if screen exposure is acceptable.",
+        confirmLabel: "Reveal",
+        destructive: true,
+      });
+      if (!approved) return;
+    }
+    patch((prev) => ({
+      reveal: { ...(prev.reveal || {}), [key]: !(prev.reveal || {})[key] },
+    }));
   };
   const openSource = async (f) => {
     if (!f?.sourceFile || !tle?.openAiSource) { toast.error("No source file recorded for this evidence row"); return; }
