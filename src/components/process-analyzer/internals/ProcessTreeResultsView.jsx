@@ -5,8 +5,13 @@ import { _integrityShort, _providerShort, _ptFormatDuration } from "../../../uti
 import { consistentParentKey } from "../../../utils/process-inspector-pipeline.js";
 import { normalizeTimestamp } from "../../../utils/forensic-normalize.js";
 import { toast } from "../../../store/useToastStore.js";
-import { PT_VIEW_MODES } from "../constants.js";
+import { PI_TYPOGRAPHY, PT_VIEW_MODES } from "../constants.js";
 import { PI_GRID_PIVOT_WINDOWS } from "../../../utils/process-grid-pivot.js";
+import {
+  fitProcessRawColumnWidths,
+  PI_RAW_TREE_LAYOUT,
+  processRawGridWidth,
+} from "../../../utils/process-raw-grid-layout.js";
 
 /**
  * Process Inspector results phase — toolbar, hero, stories/clusters, graph, table, detail, footer.
@@ -23,13 +28,14 @@ export default function ProcessTreeResultsView(p) {
     ptHeaders, ptDefWidths, ptColWidths, ptSortCol, ptSortDir, ptColFilters,
     ptCellVal, togglePtSort, onPtResizeStart, openPtFilter,
     ptFilterOpen, ptFilterPos, ptFilterVals, ptFilterCounts, ptFilterSel, ptFilterSearch, ptFilterDisplay, ptActiveFilterCount,
-    ptChecked, ptCheckedCount, PT_CHK_W, totalPtW,
+    ptChecked, ptCheckedCount, PT_CHK_W,
     expandAll, collapseAll, expandToDepth,
     applyProcessGridPivot, applyProcessHandoff, lookupProcessHash,
     openPiSourceEvent, makePiAnalystEntry, upsertPiAnalystEntry, removePiAnalystEntry,
     handleBuild, _downloadFile, _toCSV,
     piAnalystProfile,
     updateActiveTab,
+    pw,
   } = p;
 
         const tle = typeof window !== "undefined" ? window.tle : null;
@@ -120,9 +126,9 @@ export default function ProcessTreeResultsView(p) {
           users: new Set(filteredStories.flatMap((s) => s.users)).size,
           sequences: filteredStories.reduce((sum, s) => sum + s.sequenceCount, 0),
         };
-        const _ptPivotBtn = { padding: "2px 8px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 4, fontSize: 9, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 };
+        const _ptPivotBtn = { padding: "2px 8px", background: `${th.accent}15`, color: th.accent, border: `1px solid ${th.accent}33`, borderRadius: 4, fontSize: PI_TYPOGRAPHY.control, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 };
         const _ptSevLabel = (lv) => lv >= 3 ? "CRIT" : lv >= 2 ? "HIGH" : lv >= 1 ? "MED" : "LOW";
-        const _ptSevPill = (color) => ({ fontSize: 9, padding: "1px 6px", borderRadius: 3, background: color + "22", color, fontWeight: 600 });
+        const _ptSevPill = (color) => ({ fontSize: PI_TYPOGRAPHY.badge, padding: "1px 6px", borderRadius: 3, background: color + "22", color, fontWeight: 600 });
         const _ptCopyStory = (story) => {
           const lines = [
             `[${_ptSevLabel(story.level)}] ${story.hostname ? `${story.hostname} — ` : ""}${story.leadReason}`,
@@ -145,7 +151,7 @@ export default function ProcessTreeResultsView(p) {
             {/* View mode toggle */}
             {Object.entries(PT_VIEW_MODES).map(([k, m]) => (
               <button key={k} onClick={() => setModal(p => ({ ...p, ptViewMode: k, _ptExpandedCluster: null, _ptExpandedIncident: null, ptClusterKeys: m.clustered ? null : p.ptClusterKeys, ptClusterContext: m.clustered ? false : p.ptClusterContext }))} title={m.incident ? `${m.label}: grouped into investigation stories` : m.graph ? `${m.label}: spatial parent-child node graph (multi-host)` : m.clustered ? `${m.label}: clustered by chain` : `${m.label}: full tree view`}
-                style={{ padding: "4px 10px", fontSize: 10, fontWeight: ptViewMode === k ? 700 : 500, background: ptViewMode === k ? th.accent : `${th.accent}15`, color: ptViewMode === k ? "#fff" : th.accent, border: `1px solid ${ptViewMode === k ? th.accent : th.accent + "33"}`, borderRadius: 4, cursor: "pointer", fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap", flexShrink: 0 }}>{m.label}</button>
+                style={{ padding: "4px 10px", fontSize: PI_TYPOGRAPHY.control, fontWeight: ptViewMode === k ? 700 : 500, background: ptViewMode === k ? th.accent : `${th.accent}15`, color: ptViewMode === k ? "#fff" : th.accent, border: `1px solid ${ptViewMode === k ? th.accent : th.accent + "33"}`, borderRadius: 4, cursor: "pointer", fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap", flexShrink: 0 }}>{m.label}</button>
             ))}
             <button
               type="button"
@@ -156,7 +162,7 @@ export default function ProcessTreeResultsView(p) {
               }))}
               title="Rule health & coverage report — which rules fired, stayed silent, or are disabled"
               style={{
-                padding: "4px 10px", fontSize: 10, fontWeight: isHealthMode ? 700 : 500,
+                padding: "4px 10px", fontSize: PI_TYPOGRAPHY.control, fontWeight: isHealthMode ? 700 : 500,
                 background: isHealthMode ? th.accent : `${th.accent}15`,
                 color: isHealthMode ? "#fff" : th.accent,
                 border: `1px solid ${isHealthMode ? th.accent : th.accent + "33"}`,
@@ -165,11 +171,12 @@ export default function ProcessTreeResultsView(p) {
               }}
             >Rules</button>
             <div style={{ width: 1, height: 16, background: th.border, flexShrink: 0 }} />
-            {!isHealthMode && <input value={searchText || ""} onChange={(e) => setModal((p) => ({ ...p, searchText: e.target.value }))} placeholder={ptMode.incident ? "Search stories by host, user, ATT&CK, process, or reason..." : ptMode.clustered ? "Search chains by name, host, user, command..." : ptMode.graph ? "Search does not filter the graph — select a node or use Sev filters..." : "Search by process name, PID, command line, or user..."} style={{ flex: 1, background: th.bgInput, color: th.text, border: `1px solid ${th.border}`, borderRadius: 6, padding: "6px 10px", fontSize: 12, fontFamily: "monospace", outline: "none", boxSizing: "border-box" }} />}
-            {isHealthMode && <div style={{ flex: 1, fontSize: 11, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>Built-in + custom rule coverage for this tree</div>}
+            {!isHealthMode && <input value={searchText || ""} onChange={(e) => setModal((p) => ({ ...p, searchText: e.target.value }))} placeholder={ptMode.incident ? "Search stories by host, user, ATT&CK, process, or reason..." : ptMode.clustered ? "Search chains by name, host, user, command..." : ptMode.graph ? "Search does not filter the graph — select a node or use Sev filters..." : "Search by process name, PID, command line, or user..."} style={{ flex: 1, background: th.bgInput, color: th.text, border: `1px solid ${th.border}`, borderRadius: 6, padding: "6px 10px", fontSize: PI_TYPOGRAPHY.body, fontFamily: "monospace", outline: "none", boxSizing: "border-box" }} />}
+            {isHealthMode && <div style={{ flex: 1, fontSize: PI_TYPOGRAPHY.body, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>Built-in + custom rule coverage for this tree</div>}
             {!isHealthMode && !ptMode.clustered && !ptMode.graph && <button onClick={expandAll} style={{ padding: "4px 8px", borderRadius: 4, fontSize: 10, cursor: "pointer", background: th.btnBg, color: th.textDim, border: `1px solid ${th.border}`, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap", flexShrink: 0 }} title="Expand all nodes">Expand All</button>}
             {!isHealthMode && !ptMode.clustered && !ptMode.graph && <button onClick={collapseAll} style={{ padding: "4px 8px", borderRadius: 4, fontSize: 10, cursor: "pointer", background: th.btnBg, color: th.textDim, border: `1px solid ${th.border}`, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap", flexShrink: 0 }} title="Collapse all nodes">Collapse</button>}
             {!isHealthMode && !ptMode.clustered && !ptMode.graph && <button onClick={() => setModal((p) => p ? { ...p, ptDensity: p.ptDensity === "compact" ? undefined : "compact" } : p)} style={{ padding: "4px 8px", borderRadius: 4, fontSize: 10, cursor: "pointer", background: modal.ptDensity === "compact" ? (th.accent) + "22" : th.btnBg, color: modal.ptDensity === "compact" ? th.accent : th.textDim, border: `1px solid ${modal.ptDensity === "compact" ? (th.accent) + "55" : th.border}`, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap", flexShrink: 0, fontWeight: modal.ptDensity === "compact" ? 600 : 400 }} title="Toggle compact row height">{modal.ptDensity === "compact" ? "Compact" : "Comfortable"}</button>}
+            {!isHealthMode && !ptMode.clustered && !ptMode.graph && ptColWidths && <button onClick={() => setModal((p) => p ? { ...p, ptColWidths: null } : p)} style={{ padding: "4px 8px", borderRadius: 4, fontSize: PI_TYPOGRAPHY.control, cursor: "pointer", background: th.btnBg, color: th.accent, border: `1px solid ${th.border}`, fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap", flexShrink: 0 }} title="Restore responsive column widths">Fit Columns</button>}
             {!isHealthMode && !ptMode.clustered && !ptMode.graph && <select onChange={(e) => { if (e.target.value) expandToDepth(parseInt(e.target.value)); }} value="" style={{ padding: "4px 4px", borderRadius: 4, fontSize: 10, cursor: "pointer", background: th.bgInput, color: th.textDim, border: `1px solid ${th.border}`, fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>
               <option value="">Depth...</option>
               {[1, 2, 3, 4, 5].filter((d) => d <= (data.stats.maxDepth || 5)).map((d) => <option key={d} value={d}>Depth {d}</option>)}
@@ -187,6 +194,23 @@ export default function ProcessTreeResultsView(p) {
                 <option value={3}>Seeds: Critical</option>
                 <option value={0}>Seeds: All</option>
               </select>
+            )}
+            {!isHealthMode && ptViewMode === "hunt" && _ptPrevalenceSummary.items.length > 0 && (
+              <button
+                type="button"
+                aria-expanded={!!modal.ptRareOpen}
+                onClick={() => setModal((p) => p ? { ...p, ptRareOpen: !p.ptRareOpen } : p)}
+                title="Show prevalence-based rare process leads"
+                style={{
+                  padding: "4px 8px", borderRadius: 4, fontSize: 10, cursor: "pointer",
+                  background: modal.ptRareOpen ? `${th.accent}22` : th.btnBg,
+                  color: modal.ptRareOpen ? th.accent : th.textDim,
+                  border: `1px solid ${modal.ptRareOpen ? th.accent + "55" : th.border}`,
+                  fontFamily: "-apple-system, sans-serif", whiteSpace: "nowrap", flexShrink: 0,
+                }}
+              >
+                Rare processes {modal.ptRareOpen ? "▴" : "▾"}
+              </button>
             )}
             {!isHealthMode && <div style={{ display: "flex", gap: 2, alignItems: "center", flexShrink: 0 }} title="Filter by detection severity (toggle; none selected = show all)">
               <span style={{ fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif", marginRight: 1 }}>Sev</span>
@@ -327,7 +351,6 @@ export default function ProcessTreeResultsView(p) {
                 stories={_ptIncidentStories}
                 clusters={_ptChainClusters}
                 th={th}
-                sevColors={SUS_COLORS}
                 ptMitreBadge={ptMitreBadge}
                 scoring={!!modal.ptScoring || _ptScoring}
                 scorePercent={modal.ptScorePercent || 0}
@@ -347,17 +370,11 @@ export default function ProcessTreeResultsView(p) {
                   from: modal.ptRebuildFrom || "",
                   to: modal.ptRebuildTo || "",
                 })}
-                onOpenStory={(s) => setModal((p) => ({
-                  ...p,
-                  ptViewMode: "story",
-                  _ptExpandedIncident: s.id,
-                  selectedKey: s.anchorKey || p.selectedKey,
-                }))}
               />
             );
           })()}
 
-          {_ptPrevalenceSummary.items.length > 0 && (
+          {ptViewMode === "hunt" && modal.ptRareOpen && _ptPrevalenceSummary.items.length > 0 && (
             <div style={{ padding: "7px 20px", borderBottom: `1px solid ${th.border}44`, background: `${th.modalBg}aa`, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", flexShrink: 0 }}>
               <span style={{ fontSize: 9, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.08em", fontFamily: "'SF Mono', Menlo, monospace", fontWeight: 700 }}>Rare Processes</span>
               <span style={{ fontSize: 10, color: th.textDim, fontFamily: "'SF Mono', Menlo, monospace" }}>
@@ -465,17 +482,17 @@ export default function ProcessTreeResultsView(p) {
                         <div key={story.id} style={{ borderRadius: 8, border: `1px solid ${susColor}${isExp ? "44" : "22"}`, background: `${susColor}${isExp ? "0c" : "04"}`, cursor: "pointer", transition: "border-color var(--m-base)" }}
                           onClick={() => setModal((p) => ({ ...p, _ptExpandedIncident: isExp ? null : story.id, selectedKey: story.anchorKey || p.selectedKey }))}>
                           <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "8px 10px", minHeight: 34, flexWrap: "wrap" }}>
-                            <span style={{ padding: "1px 6px", background: susColor + "22", color: susColor, borderRadius: 3, fontSize: 8, fontWeight: 700, textTransform: "uppercase", fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>{_ptSevLabel(story.level)}</span>
-                            <span style={{ fontSize: 11, fontWeight: 700, color: th.text, fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>{story.title}</span>
-                            <span style={{ fontSize: 10, color: th.textDim, fontFamily: "-apple-system, sans-serif", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={story.narrative}>{story.leadReason}</span>
-                            {story.hostname && <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: th.textMuted + "18", color: th.textDim, fontWeight: 500, flexShrink: 0 }}>{story.hostname}</span>}
-	                            {story.users.length > 0 && <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: th.textMuted + "18", color: th.textDim, fontWeight: 500, flexShrink: 0 }}>{story.users[0]}{story.users.length > 1 ? ` +${story.users.length - 1}` : ""}</span>}
-	                            {story.prevalenceSignals?.length > 0 && <span title={story.prevalenceSignals.join("\n")} style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: th.accent + "18", color: th.accent, fontWeight: 600, flexShrink: 0 }}>rare</span>}
-	                            <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: `${th.accent}15`, color: th.accent, fontWeight: 600, flexShrink: 0 }}>{story.eventCount} suspicious</span>
-                            {story.contextOnlyCount > 0 && <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: `${th.border}22`, color: th.textMuted, fontWeight: 500, flexShrink: 0 }}>{story.contextEventCount} with context</span>}
-                            <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: `${th.border}22`, color: th.textMuted, fontFamily: "'SF Mono', Menlo, monospace", flexShrink: 0 }}>{story.chainCount} chains{story.sequenceCount ? ` · ${story.sequenceCount} seq` : ""}</span>
-                            {story.durationLabel && <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: `${th.border}22`, color: th.textMuted, fontFamily: "'SF Mono', Menlo, monospace", flexShrink: 0 }}>{story.durationLabel}</span>}
-                            <span style={{ fontSize: 8, color: th.textMuted, flexShrink: 0 }}>{isExp ? "\u25BC" : "\u25B6"}</span>
+                            <span style={{ padding: "1px 6px", background: susColor + "22", color: susColor, borderRadius: 3, fontSize: PI_TYPOGRAPHY.badge, fontWeight: 700, textTransform: "uppercase", fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>{_ptSevLabel(story.level)}</span>
+                            <span style={{ fontSize: PI_TYPOGRAPHY.title, fontWeight: 700, color: th.text, fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>{story.title}</span>
+                            <span style={{ fontSize: PI_TYPOGRAPHY.body, color: th.textDim, fontFamily: "-apple-system, sans-serif", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={story.narrative}>{story.leadReason}</span>
+                            {story.hostname && <span style={{ fontSize: PI_TYPOGRAPHY.badge, padding: "1px 5px", borderRadius: 3, background: th.textMuted + "18", color: th.textDim, fontWeight: 500, flexShrink: 0 }}>{story.hostname}</span>}
+	                            {story.users.length > 0 && <span style={{ fontSize: PI_TYPOGRAPHY.badge, padding: "1px 5px", borderRadius: 3, background: th.textMuted + "18", color: th.textDim, fontWeight: 500, flexShrink: 0 }}>{story.users[0]}{story.users.length > 1 ? ` +${story.users.length - 1}` : ""}</span>}
+	                            {story.prevalenceSignals?.length > 0 && <span title={story.prevalenceSignals.join("\n")} style={{ fontSize: PI_TYPOGRAPHY.badge, padding: "1px 5px", borderRadius: 3, background: th.accent + "18", color: th.accent, fontWeight: 600, flexShrink: 0 }}>rare</span>}
+	                            <span style={{ fontSize: PI_TYPOGRAPHY.badge, padding: "1px 5px", borderRadius: 3, background: `${th.accent}15`, color: th.accent, fontWeight: 600, flexShrink: 0 }}>{story.eventCount} suspicious</span>
+                            {story.contextOnlyCount > 0 && <span style={{ fontSize: PI_TYPOGRAPHY.badge, padding: "1px 5px", borderRadius: 3, background: `${th.border}22`, color: th.textMuted, fontWeight: 500, flexShrink: 0 }}>{story.contextEventCount} with context</span>}
+                            <span style={{ fontSize: PI_TYPOGRAPHY.badge, padding: "1px 5px", borderRadius: 3, background: `${th.border}22`, color: th.textMuted, fontFamily: "'SF Mono', Menlo, monospace", flexShrink: 0 }}>{story.chainCount} chains{story.sequenceCount ? ` · ${story.sequenceCount} seq` : ""}</span>
+                            {story.durationLabel && <span style={{ fontSize: PI_TYPOGRAPHY.badge, padding: "1px 5px", borderRadius: 3, background: `${th.border}22`, color: th.textMuted, fontFamily: "'SF Mono', Menlo, monospace", flexShrink: 0 }}>{story.durationLabel}</span>}
+                            <span style={{ fontSize: PI_TYPOGRAPHY.badge, color: th.textMuted, flexShrink: 0 }}>{isExp ? "\u25BC" : "\u25B6"}</span>
                           </div>
                           {isExp && (
                             <div style={{ padding: "8px 10px 10px", borderTop: `1px solid ${susColor}22` }} onClick={(e) => e.stopPropagation()}>
@@ -487,7 +504,7 @@ export default function ProcessTreeResultsView(p) {
 	                                {story.rootNames.length > 0 && <span>Roots: {story.rootNames.slice(0, 2).join(", ")}{story.rootNames.length > 2 ? ` +${story.rootNames.length - 2}` : ""}</span>}
 	                                {story.prevalenceSignals?.length > 0 && <span>Prevalence: {story.prevalenceSignals.slice(0, 2).join(", ")}{story.prevalenceSignals.length > 2 ? ` +${story.prevalenceSignals.length - 2}` : ""}</span>}
 	                              </div>
-                              <div style={{ marginBottom: 8, fontSize: 11, color: th.textDim, fontFamily: "-apple-system, sans-serif", lineHeight: 1.5 }}>
+                              <div style={{ marginBottom: 8, fontSize: PI_TYPOGRAPHY.body, color: th.textDim, fontFamily: "-apple-system, sans-serif", lineHeight: 1.5 }}>
                                 {story.narrative}
                               </div>
                               {story.steps.length > 0 && (
@@ -496,7 +513,7 @@ export default function ProcessTreeResultsView(p) {
                                   <div style={{ display: "flex", flexDirection: "column", gap: 3 }}>
                                     {story.steps.map((step) => (
                                       <div key={step.key} onClick={() => setModal((p) => ({ ...p, selectedKey: step.key }))}
-                                        style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, fontFamily: "'SF Mono', Menlo, monospace", color: th.textDim, padding: "3px 5px", borderRadius: 4, background: step.key === selectedKey ? `${th.accent}15` : `${th.border}10`, cursor: "pointer", border: step.key === selectedKey ? `1px solid ${th.accent}33` : `1px solid ${th.border}11` }}>
+                                        style={{ display: "flex", alignItems: "center", gap: 6, fontSize: PI_TYPOGRAPHY.control, fontFamily: "'SF Mono', Menlo, monospace", color: th.textDim, padding: "3px 5px", borderRadius: 4, background: step.key === selectedKey ? `${th.accent}15` : `${th.border}10`, cursor: "pointer", border: step.key === selectedKey ? `1px solid ${th.accent}33` : `1px solid ${th.border}11` }}>
                                         <span style={{ minWidth: 126, color: th.textMuted, flexShrink: 0 }}>{(step.ts || "").slice(0, 19) || "Unknown time"}</span>
                                         <span style={{ color: th.text, flexShrink: 0 }}>{step.parent} {"\u2192"} {step.child}</span>
                                         <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{step.reason}</span>
@@ -539,7 +556,7 @@ export default function ProcessTreeResultsView(p) {
                       );
                     })}
                     {filteredStories.length === 0 && (
-                      <div style={{ padding: "40px 20px", textAlign: "center", color: th.textMuted, fontFamily: "'SF Mono', Menlo, monospace", fontSize: 12 }}>
+                      <div style={{ padding: "40px 20px", textAlign: "center", color: th.textMuted, fontFamily: "'SF Mono', Menlo, monospace", fontSize: PI_TYPOGRAPHY.body }}>
                         No investigation stories built from current detections
                       </div>
                     )}
@@ -568,16 +585,16 @@ export default function ProcessTreeResultsView(p) {
                           onClick={() => setModal(p => ({ ...p, _ptExpandedCluster: isExp ? null : cl.id, selectedKey: cl.members[0]?.key || p.selectedKey }))}>
                           {/* Collapsed summary row */}
                           <div style={{ display: "flex", alignItems: "center", gap: 6, padding: "6px 10px", minHeight: 28, flexWrap: "wrap" }}>
-                            <span style={{ padding: "1px 6px", background: susColor + "22", color: susColor, borderRadius: 3, fontSize: 8, fontWeight: 700, textTransform: "uppercase", fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>{_ptSevLabel(cl.level)}</span>
-                            {cl.mitreId && <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: th.textMuted + "18", color: th.textDim, fontWeight: 600, fontFamily: "SF Mono, monospace", flexShrink: 0 }}>{cl.mitreId}</span>}
-                            <span style={{ fontSize: 10, fontWeight: 600, color: th.text, fontFamily: "'SF Mono', Menlo, monospace", flexShrink: 0 }}>{cl.displayParent} {"\u2192"} {cl.displayChild}</span>
-                            <span style={{ fontSize: 11, fontWeight: 500, color: th.textDim, fontFamily: "-apple-system, sans-serif", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={cl.displayReason}>{cl.displayReason}</span>
-                            {cl.cmdTemplate && <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: `${th.border}22`, color: th.textMuted, fontFamily: "'SF Mono', Menlo, monospace", flexShrink: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }} title={cl.cmdTemplate}>{cl.cmdTemplate}</span>}
-                            {cl.hostname && <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: th.textMuted + "18", color: th.textDim, fontWeight: 500, flexShrink: 0 }}>{cl.hostname}</span>}
-	                            {cl.count > 1 && <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: `${th.accent}15`, color: th.accent, fontWeight: 600, flexShrink: 0 }}>{cl.count}x</span>}
-	                            {(cl.rareCount > 0 || cl.uncommonCount > 0) && <span title={(cl.prevalenceSignals || []).join("\n")} style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: th.accent + "18", color: th.accent, fontWeight: 600, flexShrink: 0 }}>{cl.rareCount > 0 ? `${cl.rareCount} rare` : `${cl.uncommonCount} uncommon`}</span>}
-	                            {cl.users.length > 1 && <span style={{ fontSize: 8, padding: "1px 5px", borderRadius: 3, background: th.textMuted + "18", color: th.textDim, fontWeight: 500, flexShrink: 0 }}>{cl.users.length} users</span>}
-                            <span style={{ fontSize: 8, color: th.textMuted, flexShrink: 0 }}>{isExp ? "\u25BC" : "\u25B6"}</span>
+                            <span style={{ padding: "1px 6px", background: susColor + "22", color: susColor, borderRadius: 3, fontSize: PI_TYPOGRAPHY.badge, fontWeight: 700, textTransform: "uppercase", fontFamily: "-apple-system, sans-serif", flexShrink: 0 }}>{_ptSevLabel(cl.level)}</span>
+                            {cl.mitreId && <span style={{ fontSize: PI_TYPOGRAPHY.badge, padding: "1px 5px", borderRadius: 3, background: th.textMuted + "18", color: th.textDim, fontWeight: 600, fontFamily: "SF Mono, monospace", flexShrink: 0 }}>{cl.mitreId}</span>}
+                            <span style={{ fontSize: PI_TYPOGRAPHY.title, fontWeight: 600, color: th.text, fontFamily: "'SF Mono', Menlo, monospace", flexShrink: 0 }}>{cl.displayParent} {"\u2192"} {cl.displayChild}</span>
+                            <span style={{ fontSize: PI_TYPOGRAPHY.body, fontWeight: 500, color: th.textDim, fontFamily: "-apple-system, sans-serif", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={cl.displayReason}>{cl.displayReason}</span>
+                            {cl.cmdTemplate && <span style={{ fontSize: PI_TYPOGRAPHY.badge, padding: "1px 5px", borderRadius: 3, background: `${th.border}22`, color: th.textMuted, fontFamily: "'SF Mono', Menlo, monospace", flexShrink: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: 200 }} title={cl.cmdTemplate}>{cl.cmdTemplate}</span>}
+                            {cl.hostname && <span style={{ fontSize: PI_TYPOGRAPHY.badge, padding: "1px 5px", borderRadius: 3, background: th.textMuted + "18", color: th.textDim, fontWeight: 500, flexShrink: 0 }}>{cl.hostname}</span>}
+	                            {cl.count > 1 && <span style={{ fontSize: PI_TYPOGRAPHY.badge, padding: "1px 5px", borderRadius: 3, background: `${th.accent}15`, color: th.accent, fontWeight: 600, flexShrink: 0 }}>{cl.count}x</span>}
+	                            {(cl.rareCount > 0 || cl.uncommonCount > 0) && <span title={(cl.prevalenceSignals || []).join("\n")} style={{ fontSize: PI_TYPOGRAPHY.badge, padding: "1px 5px", borderRadius: 3, background: th.accent + "18", color: th.accent, fontWeight: 600, flexShrink: 0 }}>{cl.rareCount > 0 ? `${cl.rareCount} rare` : `${cl.uncommonCount} uncommon`}</span>}
+	                            {cl.users.length > 1 && <span style={{ fontSize: PI_TYPOGRAPHY.badge, padding: "1px 5px", borderRadius: 3, background: th.textMuted + "18", color: th.textDim, fontWeight: 500, flexShrink: 0 }}>{cl.users.length} users</span>}
+                            <span style={{ fontSize: PI_TYPOGRAPHY.badge, color: th.textMuted, flexShrink: 0 }}>{isExp ? "\u25BC" : "\u25B6"}</span>
                           </div>
                           {/* Expanded detail */}
                           {isExp && (
@@ -646,7 +663,7 @@ export default function ProcessTreeResultsView(p) {
                       );
                     })}
                     {filteredClusters.length === 0 && (
-                      <div style={{ padding: "40px 20px", textAlign: "center", color: th.textMuted, fontFamily: "'SF Mono', Menlo, monospace", fontSize: 12 }}>
+                      <div style={{ padding: "40px 20px", textAlign: "center", color: th.textMuted, fontFamily: "'SF Mono', Menlo, monospace", fontSize: PI_TYPOGRAPHY.body }}>
                         No suspicious chains found{ptViewMode === "triage" ? " \u2014 try Hunt or Raw mode" : ""}
                       </div>
                     )}
@@ -661,7 +678,7 @@ export default function ProcessTreeResultsView(p) {
               if (!selNode) return (
                 <div style={{ width: detailW, borderLeft: `1px solid ${th.border}44`, background: `${th.modalBg}cc`, flexShrink: 0, display: "flex", flexDirection: "column" }}>
                   <div style={{ padding: "10px 16px 8px", borderBottom: `1px solid ${th.border}44`, background: `${th.headerBg}88`, fontSize: 9, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 600, fontFamily: "'SF Mono', Menlo, monospace" }}>Event Details</div>
-                  <div style={{ padding: 40, textAlign: "center", color: th.textMuted, fontFamily: "'SF Mono', Menlo, monospace", fontSize: 12 }}>Click an occurrence to view details</div>
+                  <div style={{ padding: 40, textAlign: "center", color: th.textMuted, fontFamily: "'SF Mono', Menlo, monospace", fontSize: PI_TYPOGRAPHY.body }}>Click an occurrence to view details</div>
                 </div>
               );
 	              const parentNode = byKeyMap.get(selNode.parentKey);
@@ -670,8 +687,8 @@ export default function ProcessTreeResultsView(p) {
 	              const selLink = ptLinkMeta(selNode);
 	              const selPrev = selSusInfo.prevalence || null;
 	              const nodeCluster = _ptNodeClusterMap.get(selectedKey);
-              const gLbl = { fontFamily: "'SF Mono', Menlo, monospace", fontSize: 10, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", paddingTop: 2 };
-              const gVal = { fontFamily: "'SF Mono', Menlo, monospace", fontSize: 12, color: th.text, wordBreak: "break-all", lineHeight: 1.5 };
+              const gLbl = { fontFamily: "'SF Mono', Menlo, monospace", fontSize: PI_TYPOGRAPHY.control, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", paddingTop: 2 };
+              const gVal = { fontFamily: "'SF Mono', Menlo, monospace", fontSize: PI_TYPOGRAPHY.body, color: th.text, wordBreak: "break-all", lineHeight: 1.5 };
               const fields = [
                 ["Timestamp", selNode.ts ? selNode.ts.replace("T", " ").substring(0, 19) : ""],
                 ["Process", selNode.processName], ["Full Path", selNode.image],
@@ -691,8 +708,8 @@ export default function ProcessTreeResultsView(p) {
                   <div style={{ padding: "12px 16px 8px", borderBottom: `1px solid ${th.border}33`, flexShrink: 0 }}>
                     <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
 	                      {ptIcon(selNode.processName)}
-	                      <span style={{ fontFamily: "'SF Mono', Menlo, monospace", fontWeight: 700, fontSize: 15, color: selSusColor || th.text }}>{selNode.processName}</span>
-	                      <span style={{ fontFamily: "'SF Mono', Menlo, monospace", fontSize: 11, color: th.textMuted }}> PID {selNode.pid}</span>
+	                      <span style={{ fontFamily: "'SF Mono', Menlo, monospace", fontWeight: 700, fontSize: PI_TYPOGRAPHY.heading, color: selSusColor || th.text }}>{selNode.processName}</span>
+	                      <span style={{ fontFamily: "'SF Mono', Menlo, monospace", fontSize: PI_TYPOGRAPHY.body, color: th.textMuted }}> PID {selNode.pid}</span>
 	                      <span title={selLink.title} style={{ fontSize: 9, padding: "1px 6px", borderRadius: 3, background: `${selLink.color}18`, color: selLink.color, border: `1px solid ${selLink.color}33`, fontFamily: "'SF Mono', Menlo, monospace", fontWeight: 700, textTransform: "uppercase" }}>{selLink.label}</span>
 	                      {selPrev?.signals?.length > 0 && <span title={selPrev.signals.join("\n")} style={{ fontSize: 9, padding: "1px 6px", borderRadius: 3, background: th.accent + "18", color: th.accent, border: `1px solid ${th.accent}33`, fontFamily: "'SF Mono', Menlo, monospace", fontWeight: 700, textTransform: "uppercase" }}>{selPrev.rarity}</span>}
 	                    </div>
@@ -803,7 +820,6 @@ export default function ProcessTreeResultsView(p) {
               focusKeys={modal.ptClusterKeys || null}
               minLevel={modal.ptGraphMinLevel ?? (ptSevFilter.length ? Math.min(...ptSevFilter) : 1)}
               th={th}
-              sevColors={SUS_COLORS}
               ptIcon={ptIcon}
               onSelect={(key) => setModal((p) => p ? { ...p, selectedKey: p.selectedKey === key ? null : key } : p)}
             />
@@ -818,21 +834,44 @@ export default function ProcessTreeResultsView(p) {
             const startIdx = Math.max(0, Math.floor(ptST / PT_ROW_H) - OVERSCAN);
             const endIdx = Math.min(totalRows, Math.ceil((ptST + ptCH) / PT_ROW_H) + OVERSCAN);
             const visibleSlice = flatNodes.slice(startIdx, endIdx);
+            const hasFindingsRail = flatNodes.length > 40 && !!_ptRail;
+            const rawDetailW = modal.ptDetailW || 380;
+            const rawAvailableW = Math.max(
+              480,
+              (Number(pw) || 1200) - rawDetailW - 4 - (hasFindingsRail ? 11 : 0),
+            );
+            const rawColWidths = ptColWidths || fitProcessRawColumnWidths(
+              ptDefWidths,
+              ptHeaders,
+              rawAvailableW,
+              PT_CHK_W + 50,
+            );
+            const rawTotalPtW = processRawGridWidth(rawColWidths, ptHeaders, PT_CHK_W + 50);
+            const rawColumnStyle = (header) => {
+              const width = rawColWidths[header] || ptDefWidths[header];
+              return {
+                width,
+                minWidth: width,
+                maxWidth: width,
+                flex: `0 0 ${width}px`,
+                boxSizing: "border-box",
+              };
+            };
 
             return (
               <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0, minWidth: 0, overflow: "hidden" }}>
                 {/* Fixed column header — OUTSIDE scroll container to prevent overlap */}
-                <div ref={ptHeaderRef} style={{ flexShrink: 0, overflowX: "hidden", backgroundColor: th.modalBg, backgroundImage: `linear-gradient(180deg, ${th.accent}22 0%, transparent 100%)`, borderBottom: `2px solid ${th.accent}55`, boxShadow: `0 2px 8px ${th.accent}18` }}>
+                <div ref={ptHeaderRef} style={{ flexShrink: 0, overflowX: "hidden", marginRight: hasFindingsRail ? 11 : 0, backgroundColor: th.modalBg, backgroundImage: `linear-gradient(180deg, ${th.accent}22 0%, transparent 100%)`, borderBottom: `2px solid ${th.accent}55`, boxShadow: `0 2px 8px ${th.accent}18` }}>
                   {/* Filter active indicator */}
                   {ptActiveFilterCount > 0 && (
-                    <div style={{ padding: "4px 12px", display: "flex", alignItems: "center", gap: 8, borderBottom: `1px solid ${th.border}33`, borderLeft: `3px solid ${th.accent}`, minWidth: totalPtW }}>
+                    <div style={{ padding: "4px 12px", display: "flex", alignItems: "center", gap: 8, borderBottom: `1px solid ${th.border}33`, boxShadow: `inset 3px 0 0 ${th.accent}`, width: rawTotalPtW, minWidth: rawTotalPtW, boxSizing: "border-box" }}>
                       <span style={{ fontSize: 10, fontWeight: 600, color: th.accent, fontFamily: "-apple-system, sans-serif" }}>Filter active ({ptActiveFilterCount} column{ptActiveFilterCount > 1 ? "s" : ""})</span>
                       <span style={{ fontSize: 10, color: th.textDim }}>{"\u2014"} {flatNodes.length} of {data.stats.totalProcesses} processes</span>
                       <button onClick={() => setModal((p) => ({ ...p, ptColFilters: {} }))} style={{ padding: "1px 8px", fontSize: 9, background: th.accent, color: "#fff", border: "none", borderRadius: 4, cursor: "pointer", fontWeight: 600, fontFamily: "-apple-system, sans-serif" }}>Clear All</button>
                     </div>
                   )}
                   {/* Column header row */}
-                  <div style={{ display: "flex", minWidth: totalPtW }}>
+                  <div style={{ display: "flex", width: rawTotalPtW, minWidth: rawTotalPtW }}>
                     {/* Select-all checkbox */}
                     <div style={{ width: PT_CHK_W, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", boxSizing: "border-box" }}>
                       <input type="checkbox" checked={flatNodes.length > 0 && ptCheckedCount === flatNodes.length} ref={(el) => { if (el) el.indeterminate = ptCheckedCount > 0 && ptCheckedCount < flatNodes.length; }}
@@ -840,12 +879,12 @@ export default function ProcessTreeResultsView(p) {
                         style={{ width: 13, height: 13, cursor: "pointer", accentColor: th.accent }} title="Select all" />
                     </div>
                     {ptHeaders.map((h) => (
-                      <div key={h} onClick={() => togglePtSort(h)} style={{ width: ptColWidths[h] || ptDefWidths[h], flexShrink: 0, padding: "9px 8px", fontSize: 11, fontFamily: "'SF Mono', Menlo, monospace", fontWeight: 700, color: (ptSortCol || "Timestamp") === h ? th.accent : `${th.accent}99`, textTransform: "uppercase", letterSpacing: "0.08em", whiteSpace: "nowrap", overflow: "hidden", userSelect: "none", position: "relative", boxSizing: "border-box", cursor: "pointer" }}>
+                      <div key={h} onClick={() => togglePtSort(h)} style={{ ...rawColumnStyle(h), padding: h === "Process" ? `9px 8px 9px ${PI_RAW_TREE_LAYOUT.headerInset}px` : "9px 8px", fontSize: PI_TYPOGRAPHY.control, fontFamily: "'SF Mono', Menlo, monospace", fontWeight: 700, color: (ptSortCol || "Timestamp") === h ? th.accent : `${th.accent}99`, textTransform: "uppercase", letterSpacing: "0.08em", whiteSpace: "nowrap", overflow: "hidden", userSelect: "none", position: "relative", cursor: "pointer" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 3 }}>
                           <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>{h}</span>
                           {(ptSortCol || "Timestamp") === h && <span style={{ fontSize: 7, color: th.accent }}>{(ptSortDir || "asc") === "asc" ? "\u25B2" : "\u25BC"}</span>}
                           <span onClick={(e) => { e.stopPropagation(); openPtFilter(h, e); }} style={{ cursor: "pointer", fontSize: 7, color: ptColFilters[h] ? (th.accent) : (th.textDim) + "66", flexShrink: 0, marginLeft: "auto", paddingRight: 8 }}>{"\u25BC"}</span>
-                          <div onMouseDown={(e) => { e.stopPropagation(); onPtResizeStart(h, e); }} style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: 6, cursor: "col-resize" }}>
+                          <div onMouseDown={(e) => { e.stopPropagation(); onPtResizeStart(h, e, rawColWidths); }} style={{ position: "absolute", right: 0, top: 0, bottom: 0, width: 6, cursor: "col-resize" }}>
                             <div style={{ position: "absolute", right: 2, top: 4, bottom: 4, width: 1, background: `${th.accent}44` }} />
                           </div>
                         </div>
@@ -873,10 +912,10 @@ export default function ProcessTreeResultsView(p) {
                 }} style={{ flex: 1, overflowY: "auto", overflowX: "auto", minHeight: 0, contain: "strict", willChange: "transform" }}>
                 {/* Virtualized tree rows */}
                 {flatNodes.length === 0 && (
-                  <div style={{ padding: 20, textAlign: "center", color: th.textDim, fontSize: 12 }}>{searchText ? "No matching processes" : "No process creation events found"}</div>
+                  <div style={{ padding: 20, textAlign: "center", color: th.textDim, fontSize: PI_TYPOGRAPHY.body }}>{searchText ? "No matching processes" : "No process creation events found"}</div>
                 )}
                 {flatNodes.length > 0 && (
-                  <div style={{ height: totalH, position: "relative", minWidth: totalPtW, contain: "layout size" }}>
+                  <div style={{ height: totalH, position: "relative", width: rawTotalPtW, minWidth: rawTotalPtW, contain: "layout size" }}>
                     <div style={{ position: "absolute", top: startIdx * PT_ROW_H, left: 0, right: 0 }}>
                       {visibleSlice.map((node, vi) => {
                         const i = startIdx + vi;
@@ -890,13 +929,14 @@ export default function ProcessTreeResultsView(p) {
                         const isSelected = node.key === selectedKey;
                         const lineColor = th.textMuted || th.textDim;
                         const chainColor = th.accent;
-                        const INDENT = 20, LEFT_PAD = 16;
+                        const INDENT = PI_RAW_TREE_LAYOUT.indent;
+                        const LEFT_PAD = PI_RAW_TREE_LAYOUT.leftPad;
 
                         return (
                           <div key={node.key + ":" + i}
                             onClick={() => setModal((p) => p ? { ...p, selectedKey: p.selectedKey === node.key ? null : node.key } : p)}
                             className={isSelected ? "pt-row pt-sel" : "pt-row"}
-                            style={{ display: "flex", height: PT_ROW_H, fontSize: 13, fontFamily: "'SF Mono', Menlo, monospace", cursor: "pointer", background: isSelected ? (th.accent) + "10" : susColor && !inChain ? susColor + "06" : "transparent", borderBottom: `1px solid ${th.border}18`, borderLeft: isSelected ? `2px solid ${chainColor}` : susColor ? `2px solid ${susColor}55` : "2px solid transparent", alignItems: "center", minHeight: PT_ROW_H, contain: "layout style" }}>
+                            style={{ display: "flex", width: rawTotalPtW, minWidth: rawTotalPtW, height: PT_ROW_H, boxSizing: "border-box", fontSize: PI_TYPOGRAPHY.body, fontFamily: "'SF Mono', Menlo, monospace", cursor: "pointer", background: isSelected ? (th.accent) + "10" : susColor && !inChain ? susColor + "06" : "transparent", borderBottom: `1px solid ${th.border}18`, boxShadow: `inset 2px 0 0 ${isSelected ? chainColor : susColor ? susColor + "55" : "transparent"}`, alignItems: "center", minHeight: PT_ROW_H, contain: "layout style" }}>
 
                             {/* Row checkbox */}
                             <div style={{ width: PT_CHK_W, flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center", boxSizing: "border-box" }}>
@@ -907,12 +947,12 @@ export default function ProcessTreeResultsView(p) {
                             </div>
 
                             {/* Timestamp column */}
-                            <div style={{ width: ptColWidths.Timestamp || ptDefWidths.Timestamp, flexShrink: 0, display: "flex", alignItems: "center", padding: "0 8px", overflow: "hidden", boxSizing: "border-box" }}>
-                              <span style={{ fontFamily: "monospace", color: th.textDim, fontSize: 13, whiteSpace: "nowrap" }}>{tsDisplay}</span>
+                            <div style={{ ...rawColumnStyle("Timestamp"), display: "flex", alignItems: "center", padding: "0 8px", overflow: "hidden" }}>
+                              <span style={{ fontFamily: "monospace", color: th.textDim, fontSize: PI_TYPOGRAPHY.body, whiteSpace: "nowrap" }}>{tsDisplay}</span>
                             </div>
 
                             {/* Detection column — severity dot + reason + confidence + MITRE chips */}
-	                            <div style={{ width: ptColWidths.Detection || ptDefWidths.Detection, flexShrink: 0, display: "flex", alignItems: "center", gap: 3, padding: "0 8px", overflow: "hidden", boxSizing: "border-box" }}>
+	                            <div style={{ ...rawColumnStyle("Detection"), display: "flex", alignItems: "center", gap: 3, padding: "0 8px", overflow: "hidden" }}>
 	                              {sus > 0 && <span title={sus >= 3 ? "Critical" : sus >= 2 ? "High" : "Medium"} style={{ width: 6, height: 6, borderRadius: "50%", background: susColor, flexShrink: 0 }} />}
 	                              {susInfo.reason && <span style={{ fontSize: 10, padding: "1px 6px", borderRadius: 4, background: susColor + "22", color: susColor, border: `1px solid ${susColor}44`, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", flexShrink: 1, minWidth: 0 }} title={susInfo.reason}>{susInfo.reason}</span>}
 	                              {susInfo.confidence && susInfo.confidence !== "context" && <span title={`Confidence: ${susInfo.confidence}`} style={{ fontSize: 8, padding: "1px 4px", borderRadius: 3, fontWeight: 700, flexShrink: 0, fontFamily: "'SF Mono', Menlo, monospace", background: (susInfo.confidence === "confirmed" ? th.sev.critical : susInfo.confidence === "likely" ? th.sev.high : th.sev.low) + "22", color: susInfo.confidence === "confirmed" ? th.sev.critical : susInfo.confidence === "likely" ? th.sev.high : th.sev.low }}>{susInfo.confidence === "confirmed" ? "✓✓" : susInfo.confidence === "likely" ? "✓" : "~"}</span>}
@@ -922,7 +962,7 @@ export default function ProcessTreeResultsView(p) {
 	                            </div>
 
 	                            {/* Trust column */}
-	                            <div style={{ width: ptColWidths.Prevalence || ptDefWidths.Prevalence, flexShrink: 0, display: "flex", alignItems: "center", gap: 4, padding: "0 8px", overflow: "hidden", boxSizing: "border-box" }}>
+	                            <div style={{ ...rawColumnStyle("Prevalence"), display: "flex", alignItems: "center", gap: 4, padding: "0 8px", overflow: "hidden" }}>
 	                              {(() => {
 	                                const prev = susInfo.prevalence || null;
 	                                if (!prev || prev.rarity === "common" || !prev.signals?.length) return null;
@@ -941,17 +981,17 @@ export default function ProcessTreeResultsView(p) {
                                 has no parent image — this handles Security 4688 (no ParentImage field at
                                 all), EvtxECmd, and any dataset where parent linkage exists via PID/GUID
                                 but the parent's executable name lives on a different row. */}
-                            <div style={{ width: ptColWidths["Parent Process"] || ptDefWidths["Parent Process"], flexShrink: 0, display: "flex", alignItems: "center", padding: "0 8px", overflow: "hidden", boxSizing: "border-box" }}>
+                            <div style={{ ...rawColumnStyle("Parent Process"), display: "flex", alignItems: "center", padding: "0 8px", overflow: "hidden" }}>
                               {(() => {
                                 const linked = byKeyMap.get(node.parentKey);
                                 const display = node.parentProcessName || linked?.processName || "";
                                 const titleAttr = node.parentImage || linked?.image || "";
-                                return <span style={{ color: th.textDim, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={titleAttr}>{display}</span>;
+                                return <span style={{ color: th.textDim, fontSize: PI_TYPOGRAPHY.body, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={titleAttr}>{display}</span>;
                               })()}
                             </div>
 
                             {/* Process column */}
-                            <div style={{ width: ptColWidths.Process || ptDefWidths.Process, flexShrink: 0, position: "relative", display: "flex", alignItems: "center", gap: 4, overflow: "hidden", boxSizing: "border-box" }}>
+                            <div style={{ ...rawColumnStyle("Process"), position: "relative", display: "flex", alignItems: "center", gap: 4, overflow: "hidden" }}>
                               {node.depth > 0 && (node.connectors || []).map((active, d) => (
                                 active ? <div key={`vl${d}`} style={{ position: "absolute", left: LEFT_PAD + d * INDENT + INDENT / 2, top: 0, bottom: 0, width: 1, background: inChain && d >= 0 ? chainColor + "66" : lineColor + "44" }} /> : null
                               ))}
@@ -973,38 +1013,38 @@ export default function ProcessTreeResultsView(p) {
                             </div>
 
                             {/* Command Line column */}
-                            <div style={{ width: ptColWidths["Command Line"] || ptDefWidths["Command Line"], flexShrink: 0, display: "flex", alignItems: "center", padding: "0 8px", overflow: "hidden", boxSizing: "border-box" }}>
-                              <span style={{ color: th.textDim, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={node.cmdLine}>{node.cmdLine}</span>
+                            <div style={{ ...rawColumnStyle("Command Line"), display: "flex", alignItems: "center", padding: "0 8px", overflow: "hidden" }}>
+                              <span style={{ color: th.textDim, fontSize: PI_TYPOGRAPHY.body, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={node.cmdLine}>{node.cmdLine}</span>
                             </div>
 
                             {/* PID column */}
-                            <div style={{ width: ptColWidths.PID || ptDefWidths.PID, flexShrink: 0, display: "flex", alignItems: "center", padding: "0 8px", overflow: "hidden", boxSizing: "border-box" }}>
-                              <span style={{ fontFamily: "monospace", color: inChain ? chainColor + "cc" : th.textDim, fontSize: 13, whiteSpace: "nowrap" }}>{node.pid}</span>
+                            <div style={{ ...rawColumnStyle("PID"), display: "flex", alignItems: "center", padding: "0 8px", overflow: "hidden" }}>
+                              <span style={{ fontFamily: "monospace", color: inChain ? chainColor + "cc" : th.textDim, fontSize: PI_TYPOGRAPHY.body, whiteSpace: "nowrap" }}>{node.pid}</span>
                             </div>
 
                             {/* PPID column */}
-                            <div style={{ width: ptColWidths.PPID || ptDefWidths.PPID, flexShrink: 0, display: "flex", alignItems: "center", padding: "0 8px", overflow: "hidden", boxSizing: "border-box" }}>
-                              <span style={{ fontFamily: "monospace", color: th.textDim, fontSize: 13, whiteSpace: "nowrap" }}>{node.ppid || ""}</span>
+                            <div style={{ ...rawColumnStyle("PPID"), display: "flex", alignItems: "center", padding: "0 8px", overflow: "hidden" }}>
+                              <span style={{ fontFamily: "monospace", color: th.textDim, fontSize: PI_TYPOGRAPHY.body, whiteSpace: "nowrap" }}>{node.ppid || ""}</span>
                             </div>
 
                             {/* User column */}
-                            <div style={{ width: ptColWidths.User || ptDefWidths.User, flexShrink: 0, display: "flex", alignItems: "center", padding: "0 8px", overflow: "hidden", boxSizing: "border-box" }}>
-                              <span style={{ color: th.textDim, fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{node.user || ""}</span>
+                            <div style={{ ...rawColumnStyle("User"), display: "flex", alignItems: "center", padding: "0 8px", overflow: "hidden" }}>
+                              <span style={{ color: th.textDim, fontSize: PI_TYPOGRAPHY.body, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{node.user || ""}</span>
                             </div>
 
                             {/* Provider column */}
-                            <div style={{ width: ptColWidths.Provider || ptDefWidths.Provider, flexShrink: 0, display: "flex", alignItems: "center", padding: "0 8px", overflow: "hidden", boxSizing: "border-box" }}>
-                              <span style={{ fontSize: 12, color: th.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{_providerShort(node.provider)}</span>
+                            <div style={{ ...rawColumnStyle("Provider"), display: "flex", alignItems: "center", padding: "0 8px", overflow: "hidden" }}>
+                              <span style={{ fontSize: PI_TYPOGRAPHY.body, color: th.textDim, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{_providerShort(node.provider)}</span>
                             </div>
 
                             {/* Event ID column */}
-                            <div style={{ width: ptColWidths["Event ID"] || ptDefWidths["Event ID"], flexShrink: 0, display: "flex", alignItems: "center", padding: "0 8px", overflow: "hidden", boxSizing: "border-box" }}>
-                              <span style={{ fontFamily: "monospace", color: th.textDim, fontSize: 12, whiteSpace: "nowrap" }}>{node.eventId || ""}</span>
+                            <div style={{ ...rawColumnStyle("Event ID"), display: "flex", alignItems: "center", padding: "0 8px", overflow: "hidden" }}>
+                              <span style={{ fontFamily: "monospace", color: th.textDim, fontSize: PI_TYPOGRAPHY.body, whiteSpace: "nowrap" }}>{node.eventId || ""}</span>
                             </div>
 
                             {/* Integrity column */}
-                            <div style={{ width: ptColWidths.Integrity || ptDefWidths.Integrity, flexShrink: 0, display: "flex", alignItems: "center", padding: "0 8px", overflow: "hidden", boxSizing: "border-box" }}>
-                              {(() => { const il = _integrityShort(node.integrity); const ic = INT_COLOR[il]; return il ? <span style={{ fontSize: 11, padding: "2px 6px", borderRadius: 3, background: (ic || th.textDim) + "18", color: ic || th.textDim, fontWeight: 500, whiteSpace: "nowrap" }}>{il}</span> : null; })()}
+                            <div style={{ ...rawColumnStyle("Integrity"), display: "flex", alignItems: "center", padding: "0 8px", overflow: "hidden" }}>
+                              {(() => { const il = _integrityShort(node.integrity); const ic = INT_COLOR[il]; return il ? <span style={{ fontSize: PI_TYPOGRAPHY.badge, padding: "2px 6px", borderRadius: 3, background: (ic || th.textDim) + "18", color: ic || th.textDim, fontWeight: 500, whiteSpace: "nowrap" }}>{il}</span> : null; })()}
                             </div>
 
                             {/* Filter grid: ProcessGuid/PID identity ± time window */}
@@ -1021,7 +1061,7 @@ export default function ProcessTreeResultsView(p) {
                   </div>
                 )}
               </div>
-              {flatNodes.length > 40 && _ptRail && (
+              {hasFindingsRail && (
                 <div
                   onClick={(e) => { const r = e.currentTarget.getBoundingClientRect(); const frac = Math.max(0, Math.min(1, (e.clientY - r.top) / r.height)); if (ptScrollRef.current) ptScrollRef.current.scrollTop = frac * Math.max(0, totalH - ptCH); }}
                   title="Findings overview — click to jump to that position"
@@ -1146,7 +1186,7 @@ export default function ProcessTreeResultsView(p) {
               <div style={{ width: detailW, position: "relative", borderLeft: `1px solid ${th.border}44`, background: `${th.modalBg}cc`, backdropFilter: "blur(12px)", WebkitBackdropFilter: "blur(12px)", flexShrink: 0, display: "flex", flexDirection: "column" }}>
                 {detailResizeHandle}
                 <div style={{ padding: "10px 16px 8px", borderBottom: `1px solid ${th.border}44`, background: `${th.headerBg}88`, fontSize: 9, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 600, fontFamily: "'SF Mono', Menlo, monospace" }}>Event Details</div>
-                <div style={{ padding: 40, textAlign: "center", color: th.textMuted, fontFamily: "'SF Mono', Menlo, monospace", fontSize: 12 }}>Select a process node to view details</div>
+                <div style={{ padding: 40, textAlign: "center", color: th.textMuted, fontFamily: "'SF Mono', Menlo, monospace", fontSize: PI_TYPOGRAPHY.body }}>Select a process node to view details</div>
               </div>
             );
 	            const parentNode = byKeyMap.get(selNode.parentKey);
@@ -1189,17 +1229,37 @@ export default function ProcessTreeResultsView(p) {
             };
             const bookmarkLinkedRows = async () => {
               if (!tle?.setBookmarks || !crossRefs.length) return;
-              for (const [tabId, rowIds] of groupRefsByTab(crossRefs)) await tle.setBookmarks(tabId, [...new Set(rowIds)], true);
-              setModal((p) => p?.type === "processTree" ? { ...p, ptLinkedActionStatus: `Bookmarked ${crossRefs.length} linked evidence rows.` } : p);
-            };
-            const tagLinkedRows = async () => {
-              if (!tle?.addTag || !crossRefs.length) return;
-              const tag = window.prompt("Tag linked evidence rows", "PI:Linked Evidence");
-              if (!tag) return;
-              for (const [tabId, rowIds] of groupRefsByTab(crossRefs)) {
-                for (const rowId of [...new Set(rowIds)]) await tle.addTag(tabId, rowId, tag);
+              try {
+                for (const [tabId, rowIds] of groupRefsByTab(crossRefs)) await tle.setBookmarks(tabId, [...new Set(rowIds)], true);
+                setModal((p) => p?.type === "processTree" ? { ...p, ptLinkedActionStatus: `Bookmarked ${crossRefs.length} linked evidence rows.` } : p);
+              } catch (err) {
+                toast.error("Bookmarking failed", { detail: err?.message || "Could not bookmark the linked evidence rows." });
               }
-              setModal((p) => p?.type === "processTree" ? { ...p, ptLinkedActionStatus: `Tagged ${crossRefs.length} linked evidence rows as ${tag}.` } : p);
+            };
+            const tagLinkedRows = () => {
+              if (!tle?.addTag || !crossRefs.length) return;
+              setModal((p) => p?.type === "processTree" ? {
+                ...p,
+                ptLinkedTagKey: selectedKey,
+                ptLinkedTagDraft: "PI:Linked Evidence",
+              } : p);
+            };
+            const applyLinkedTag = async () => {
+              const tag = String(modal.ptLinkedTagDraft || "").trim();
+              if (!tag || !tle?.addTag || !crossRefs.length) return;
+              try {
+                for (const [tabId, rowIds] of groupRefsByTab(crossRefs)) {
+                  for (const rowId of [...new Set(rowIds)]) await tle.addTag(tabId, rowId, tag);
+                }
+                setModal((p) => p?.type === "processTree" ? {
+                  ...p,
+                  ptLinkedTagKey: null,
+                  ptLinkedTagDraft: "",
+                  ptLinkedActionStatus: `Tagged ${crossRefs.length} linked evidence rows as ${tag}.`,
+                } : p);
+              } catch (err) {
+                toast.error("Tagging failed", { detail: err?.message || "Could not tag the linked evidence rows." });
+              }
             };
             const exportLinkedEvidence = () => {
               if (!crossTelemetry) return;
@@ -1266,8 +1326,8 @@ export default function ProcessTreeResultsView(p) {
               ].filter(Boolean);
               navigator.clipboard?.writeText?.(lines.join("\n"));
             };
-            const gLbl = { fontFamily: "'SF Mono', Menlo, monospace", fontSize: 10, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", paddingTop: 2 };
-            const gVal = { fontFamily: "'SF Mono', Menlo, monospace", fontSize: 12, color: th.text, wordBreak: "break-all", lineHeight: 1.5 };
+            const gLbl = { fontFamily: "'SF Mono', Menlo, monospace", fontSize: PI_TYPOGRAPHY.control, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.05em", paddingTop: 2 };
+            const gVal = { fontFamily: "'SF Mono', Menlo, monospace", fontSize: PI_TYPOGRAPHY.body, color: th.text, wordBreak: "break-all", lineHeight: 1.5 };
             const fields = [
               ["Timestamp", selNode.ts ? selNode.ts.replace("T", " ").substring(0, 19) : ""],
               ["Process", selNode.processName],
@@ -1310,8 +1370,8 @@ export default function ProcessTreeResultsView(p) {
                 <div style={{ padding: "12px 16px 8px", borderBottom: `1px solid ${th.border}33`, flexShrink: 0 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
 	                    {ptIcon(selNode.processName)}
-	                    <span style={{ fontFamily: "'SF Mono', Menlo, monospace", fontWeight: 700, fontSize: 15, color: selSusColor || th.text }}>{selNode.processName}</span>
-	                    <span style={{ fontFamily: "'SF Mono', Menlo, monospace", fontSize: 11, color: th.textMuted, marginLeft: 4 }}>PID {selNode.pid}</span>
+	                    <span style={{ fontFamily: "'SF Mono', Menlo, monospace", fontWeight: 700, fontSize: PI_TYPOGRAPHY.heading, color: selSusColor || th.text }}>{selNode.processName}</span>
+	                    <span style={{ fontFamily: "'SF Mono', Menlo, monospace", fontSize: PI_TYPOGRAPHY.body, color: th.textMuted, marginLeft: 4 }}>PID {selNode.pid}</span>
 	                    <span title={selLink.title} style={{ fontSize: 9, padding: "1px 6px", borderRadius: 3, background: `${selLink.color}18`, color: selLink.color, border: `1px solid ${selLink.color}33`, fontFamily: "'SF Mono', Menlo, monospace", fontWeight: 700, textTransform: "uppercase" }}>{selLink.label}</span>
 	                    {selPrev?.signals?.length > 0 && <span title={selPrev.signals.join("\n")} style={{ fontSize: 9, padding: "1px 6px", borderRadius: 3, background: th.accent + "18", color: th.accent, border: `1px solid ${th.accent}33`, fontFamily: "'SF Mono', Menlo, monospace", fontWeight: 700, textTransform: "uppercase" }}>{selPrev.rarity}</span>}
 	                  </div>
@@ -1493,6 +1553,23 @@ export default function ProcessTreeResultsView(p) {
                                 <button onClick={tagLinkedRows} style={_ptPivotBtn}>Tag Linked</button>
                                 <button onClick={exportLinkedEvidence} style={_ptPivotBtn}>Export Evidence</button>
                               </div>
+                              {modal.ptLinkedTagKey === selectedKey && (
+                                <div style={{ display: "flex", gap: 5, marginTop: 7, alignItems: "center" }}>
+                                  <input
+                                    autoFocus
+                                    value={modal.ptLinkedTagDraft || ""}
+                                    onChange={(ev) => setModal((p) => p?.type === "processTree" ? { ...p, ptLinkedTagDraft: ev.target.value } : p)}
+                                    onKeyDown={(ev) => {
+                                      if (ev.key === "Enter") applyLinkedTag();
+                                      if (ev.key === "Escape") setModal((p) => p?.type === "processTree" ? { ...p, ptLinkedTagKey: null, ptLinkedTagDraft: "" } : p);
+                                    }}
+                                    placeholder="Tag name"
+                                    style={{ minWidth: 0, flex: 1, padding: "4px 7px", borderRadius: 4, border: `1px solid ${th.border}`, background: th.bgInput, color: th.text, fontSize: PI_TYPOGRAPHY.control, fontFamily: "-apple-system, sans-serif" }}
+                                  />
+                                  <button onClick={applyLinkedTag} disabled={!String(modal.ptLinkedTagDraft || "").trim()} style={{ ..._ptPivotBtn, opacity: String(modal.ptLinkedTagDraft || "").trim() ? 1 : 0.5 }}>Apply</button>
+                                  <button onClick={() => setModal((p) => p?.type === "processTree" ? { ...p, ptLinkedTagKey: null, ptLinkedTagDraft: "" } : p)} style={_ptPivotBtn}>Cancel</button>
+                                </div>
+                              )}
                             </div>
                           )}
                           {relatedTimeline.length > 0 ? (

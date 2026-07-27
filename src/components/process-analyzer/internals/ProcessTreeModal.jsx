@@ -4,7 +4,7 @@ import useTabStore from "../../../store/useTabStore.js";
 import { toast } from "../../../store/useToastStore.js";
 import useCurrentTab from "../../../hooks/useCurrentTab.js";
 import useTheme from "../../../hooks/useTheme.js";
-import { _integrityShort, _providerShort, _ptFormatDuration, PI_ALL_RULES, PI_TECHNIQUE_GROUPS, piSevColorsFor } from "../../../utils/process-inspector.js";
+import { _integrityShort, _providerShort, _ptFormatDuration, PI_ALL_RULES, PI_TECHNIQUE_GROUPS } from "../../../utils/process-inspector.js";
 import { analyzeCommandLine, tokenizeCommandLine } from "../../../utils/cmdline-decode.js";
 import {
   buildByKeyMap,
@@ -26,7 +26,8 @@ import { PI_GRID_PIVOT_WINDOWS, detectTimestampColumn, detectHostnameColumn } fr
 import { buildProcessHandoff, publicVtUrlForHash, vtCategoryForHash } from "../../../utils/process-handoffs.js";
 import { normalizeTimestamp, normalizeHost } from "../../../utils/forensic-normalize.js";
 import { clearIpcSubscription, replaceIpcSubscription } from "../../../utils/ipc-subscriptions.js";
-import { susColorsFor, intColorFor } from "../../../constants/presets.js";
+import { isIpcError, ipcErrorMessage } from "../../../utils/ipc-result.js";
+import { processInspectorPaletteFor } from "../../../constants/presets.js";
 import { PT_ICON_STYLE, PT_VIEW_MODES } from "../constants.js";
 import { DraggableResizableModal } from "../../primitives/index.js";
 import useModalChrome from "../../../hooks/useModalChrome.js";
@@ -52,11 +53,12 @@ export default function ProcessTreeModal() {
   const setProximityFilter = useUIStore(s => s.setProximityFilter);
   const ct = useCurrentTab();
   const { th } = useTheme();
-  // Theme-aware severity palettes — shadow the static names so existing call-sites
-  // (SUS_COLORS[x], INT_COLOR[x], PI_SEV_COLORS[x]) keep working without per-line edits.
-  const SUS_COLORS = susColorsFor(th);
-  const INT_COLOR = intColorFor(th);
-  const PI_SEV_COLORS = piSevColorsFor(th);
+  // Process Inspector uses one restrained theme-aware palette. Existing
+  // call-sites keep their severity semantics while rendering orange/neutral.
+  const piPalette = processInspectorPaletteFor(th);
+  const SUS_COLORS = piPalette.severity;
+  const INT_COLOR = piPalette.integrity;
+  const PI_SEV_COLORS = piPalette.ruleSeverity;
   const tle = typeof window !== "undefined" ? window.tle : null;
   const updateActiveTab = useTabStore(s => s.updateActiveTab);
 
@@ -413,7 +415,7 @@ const ptDecodePanel = (cmd, gLbl) => {
 // Process tree column configuration
 	const ptHeaders = ["Timestamp", "Detection", "Prevalence", "Parent Process", "Process", "Command Line", "PID", "PPID", "User", "Provider", "Event ID", "Integrity"];
 	const ptDefWidths = { Timestamp: 195, Provider: 100, "Event ID": 65, "Parent Process": 170, Process: 280, Detection: 290, Prevalence: 150, PID: 75, PPID: 75, User: 150, "Command Line": 300, Integrity: 80 };
-const ptColWidths = modal.ptColWidths || ptDefWidths;
+const ptColWidths = modal.ptColWidths || null;
 const ptSortCol = modal.ptSortCol || "Timestamp";
 const ptSortDir = modal.ptSortDir || "asc";
 const ptColFilters = modal.ptColFilters || {};
@@ -567,15 +569,16 @@ const togglePtSort = (col) => {
     return { ...p, ptSortCol: col, ptSortDir: (col === "Detection" || col === "Prevalence") ? "desc" : "asc" };
   });
 };
-const onPtResizeStart = (colName, e) => {
+const onPtResizeStart = (colName, e, displayedWidths = null) => {
   e.preventDefault(); e.stopPropagation();
   ptResizingRef.current = true;
   const startX = e.clientX;
-  const startW = ptColWidths[colName] || ptDefWidths[colName];
+  const baseWidths = displayedWidths || ptColWidths || ptDefWidths;
+  const startW = baseWidths[colName] || ptDefWidths[colName];
   document.body.style.cursor = "col-resize"; document.body.style.userSelect = "none";
   const move = (ev) => {
     const newW = Math.max(40, startW + ev.clientX - startX);
-    setModal((p) => ({ ...p, ptColWidths: { ...(p.ptColWidths || ptDefWidths), [colName]: newW } }));
+    setModal((p) => ({ ...p, ptColWidths: { ...baseWidths, ...(p.ptColWidths || {}), [colName]: newW } }));
   };
   const up = () => { document.body.style.cursor = ""; document.body.style.userSelect = ""; document.removeEventListener("mousemove", move); document.removeEventListener("mouseup", up); setTimeout(() => { ptResizingRef.current = false; }, 0); };
   document.addEventListener("mousemove", move); document.addEventListener("mouseup", up);
@@ -599,7 +602,6 @@ const ptFilterSearch = modal.ptFilterSearch || "";
 const ptFilterDisplay = ptFilterSearch ? ptFilterVals.filter((v) => v.toLowerCase().includes(ptFilterSearch.toLowerCase())) : ptFilterVals;
 const ptActiveFilterCount = Object.values(ptColFilters).filter((v) => v && v.length > 0).length;
 const PT_CHK_W = 32;
-const totalPtW = PT_CHK_W + ptHeaders.reduce((s, h) => s + (ptColWidths[h] || ptDefWidths[h]), 0) + 50;
 const ptChecked = modal.ptChecked || new Set();
 const ptCheckedCount = ptChecked.size;
 
@@ -777,6 +779,7 @@ const handleBuild = async (scopeOverrides = null) => {
         applyProcessTreeResult(payload, progInt);
       });
       const started = await tle.startProcessTree(ct.id, options);
+      if (isIpcError(started)) throw new Error(ipcErrorMessage(started));
       if (started?.result || started?.error) {
         applyProcessTreeResult(started, progInt);
         return;
@@ -785,6 +788,7 @@ const handleBuild = async (scopeOverrides = null) => {
       setModal((p) => p?.type === "processTree" ? { ...p, _ptJobId: started.jobId } : p);
     } else {
       const result = await tle.getProcessTree(ct.id, options);
+      if (isIpcError(result)) throw new Error(ipcErrorMessage(result));
       applyProcessTreeResult({ result }, progInt);
     }
   } catch (e) {
@@ -1194,7 +1198,6 @@ return (
           ptChecked={ptChecked}
           ptCheckedCount={ptCheckedCount}
           PT_CHK_W={PT_CHK_W}
-          totalPtW={totalPtW}
           expandAll={expandAll}
           collapseAll={collapseAll}
           expandToDepth={expandToDepth}
@@ -1210,6 +1213,7 @@ return (
           _toCSV={_toCSV}
           piAnalystProfile={piAnalystProfile}
           updateActiveTab={updateActiveTab}
+          pw={pw}
         />
       )}
     </>)}

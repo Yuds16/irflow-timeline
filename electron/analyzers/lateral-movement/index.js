@@ -11,6 +11,7 @@ const { aggregateAccounts } = require("./assemble/accounts");
 const { computeSysmonRdpAndCoverage } = require("./processing/sysmon-rdp-coverage");
 const { detectAdminShareAndExecution } = require("./detectors/admin-share-and-execution");
 const { runProcessServiceScan } = require("./detectors/process-service-scan");
+const { normalizeHostEndpoint } = require("./endpoint-normalize");
 const { dbg } = require("../../logger");
 const { resolveSpineEventIds } = require("./detector-registry");
 const {
@@ -230,7 +231,9 @@ function getLateralMovement(meta, options = {}, ctx) {
       // Telemetry trackers (per-host / per-user / dataset-wide counts) → ./telemetry
       const { hostTelemetry, userEventCounts, userEventCountsScoped, userEventOriginalName, datasetEventCounts, userFirstSuccessTs, _bumpHostTelemetry, _bumpUserEvent, _bumpUserEventScoped, _bumpDatasetEvent } = createTelemetryTracker();
 
-      const _normLmHost = (value) => cleanWrappedField(value).replace(/^\\\\/, "").replace(/^[A-Z]+\/+/i, "").toUpperCase();
+      const _normLmHost = (value) => normalizeHostEndpoint(
+        cleanWrappedField(value).replace(/^[A-Z]+\/+/i, ""),
+      );
       // IP-to-hostname resolution map — populated when EvtxECmd "WorkstationName (IpAddress)" provides both
       const _ipToHostname = new Map(); // IP -> hostname (from events where both are present)
 
@@ -275,7 +278,7 @@ function getLateralMovement(meta, options = {}, ctx) {
       // === Parse events -> graph + RDP sessions + chains + convention outliers -> ./build-graph.js ===
       const _spine = runStage(
         "Event graph",
-        () => buildGraphAndChains({ rows, columns, meta, options, db, edgeMap, hostSet, timeOrdered, rdpEvents, _ipToHostname, isEvtxECmd, isHayabusa, _dedupeEvidenceRefs, _rowEvidenceRef, _refsFromEvents, _rowidsFromRefs, _bumpHostTelemetry, _bumpUserEvent, _bumpUserEventScoped, _bumpDatasetEvent, _normLmHost, excludeLocalLogons, excludeServiceAccounts, privLogonEvents }),
+        () => buildGraphAndChains({ rows, columns, meta, options, db, edgeMap, hostSet, timeOrdered, rdpEvents, _ipToHostname, isEvtxECmd, isHayabusa, _dedupeEvidenceRefs, _rowEvidenceRef, _refsFromEvents, _rowidsFromRefs, _bumpHostTelemetry, _bumpUserEvent, _bumpUserEventScoped, _bumpDatasetEvent, _normLmHost, excludeLocalLogons, excludeServiceAccounts, privLogonEvents, hostTelemetry }),
         () => ({ rdpSessions: [], chains: [], findings: [], fid: 0, _outlierHosts: new Set(), _computerHosts: new Set(), _conventionOutliers: new Map(), detectOutlier: () => "", chainWarnings: [] }),
       );
       const rdpSessions = _spine.rdpSessions;
@@ -457,6 +460,7 @@ function getLateralMovement(meta, options = {}, ctx) {
               id, label: id, eventCount: info.eventCount,
               isSource: info.isSource, isTarget: info.isTarget,
               isBoth: info.isSource && info.isTarget,
+              aliases: [...(info.aliases || [])],
               isOutlier: !!outlierReason || !!convOutlier, outlierReason: outlierReason || (convOutlier ? convOutlier.reason : ""),
               conventionOutlier: !!convOutlier, conventionReason: convOutlier ? convOutlier.reason : "",
               telemetry: hostCoverage.get(id) || null,
@@ -498,9 +502,18 @@ function getLateralMovement(meta, options = {}, ctx) {
           failedLogons: [...edgeMap.values()].reduce((s, e) => s + (e.hasFailures ? 1 : 0), 0),
           longestChain: chains.length > 0 ? chains[0].hops : 0,
           chainCount: chains.length,
-          rdpSessionCount: rdpSessions.length,
-          adminSessions: rdpSessions.filter((s) => s.hasAdmin).length,
-          suspiciousSessions: rdpSessions.filter((s) => (s.suspicionScore || 0) >= 25).length,
+          // A failed authentication episode is RDP activity, not an established
+          // session. Keep the two populations explicit so the hero metric and
+          // Accounts tab do not call password attempts "sessions".
+          rdpSessionCount: rdpSessions.filter((s) => s.status !== "failed").length,
+          rdpActivityCount: rdpSessions.length,
+          rdpFailureEpisodeCount: rdpSessions.filter((s) => s.status === "failed").length,
+          rdpFailedAttemptCount: rdpSessions
+            .filter((s) => s.status === "failed")
+            .reduce((sum, s) => sum + (s.attemptCount || 1), 0),
+          adminSessions: rdpSessions.filter((s) => s.status !== "failed" && s.hasAdmin).length,
+          suspiciousSessions: rdpSessions.filter((s) => s.status !== "failed" && (s.suspicionScore || 0) >= 25).length,
+          suspiciousRdpActivity: rdpSessions.filter((s) => (s.suspicionScore || 0) >= 25).length,
           findingsCount: findings.length,
           criticalFindings: findings.filter((f) => f.severity === "critical").length,
           incidentCount: incidents.length,

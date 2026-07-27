@@ -1,5 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { buildNodeSubLine, layoutProcessGraph } from "../../../utils/process-graph-layout.js";
+import {
+  buildNodeSubLine,
+  calculateGraphViewport,
+  collectGraphLineage,
+  layoutProcessGraph,
+  selectGraphSeedKeys,
+  selectGraphViewportKeys,
+} from "../../../utils/process-graph-layout.js";
+import { PI_TYPOGRAPHY } from "../constants.js";
 
 /**
  * SVG node-link process graph with pan/zoom.
@@ -14,13 +22,13 @@ export default function ProcessGraphView({
   focusKeys = null,
   minLevel = 1,
   th,
-  sevColors,
   onSelect,
   ptIcon,
 }) {
   const wrapRef = useRef(null);
   const [size, setSize] = useState({ w: 800, h: 500 });
   const [view, setView] = useState({ x: 0, y: 0, k: 1 });
+  const [showOverview, setShowOverview] = useState(false);
   const dragRef = useRef(null);
 
   useEffect(() => {
@@ -36,25 +44,84 @@ export default function ProcessGraphView({
     return () => ro.disconnect();
   }, []);
 
+  const effectiveFocusKeys = useMemo(() => {
+    if (!selectedKey) return focusKeys;
+    // Selected node is first so a large story/cluster focus cannot push it
+    // beyond the graph seed cap.
+    return new Set([selectedKey, ...(focusKeys || [])]);
+  }, [focusKeys, selectedKey]);
+
+  const compactFocusKeys = useMemo(() => {
+    if (selectedKey) return new Set([selectedKey]);
+    if (focusKeys?.size) {
+      const ranked = [...focusKeys]
+        .filter((key) => byKeyMap?.has?.(key))
+        .sort((a, b) => {
+          const ad = detMap?.get?.(a) || {};
+          const bd = detMap?.get?.(b) || {};
+          return (bd.level || 0) - (ad.level || 0)
+            || (bd.triageScore || 0) - (ad.triageScore || 0);
+        });
+      if (ranked[0]) return new Set([ranked[0]]);
+    }
+    return new Set(selectGraphSeedKeys(processes, detMap, {
+      minLevel,
+      maxSeeds: 1,
+    }));
+  }, [selectedKey, focusKeys, byKeyMap, processes, detMap, minLevel]);
+
   const layout = useMemo(() => layoutProcessGraph(processes, detMap, {
     byKey: byKeyMap,
     childMap,
-    focusKeys,
+    focusKeys: showOverview ? effectiveFocusKeys : compactFocusKeys,
     minLevel,
-    maxNodes: 220,
-  }), [processes, detMap, byKeyMap, childMap, focusKeys, minLevel]);
+    maxNodes: showOverview ? (selectedKey ? 160 : 180) : 24,
+    maxSeeds: showOverview ? 80 : 1,
+    descendantDepth: showOverview ? (selectedKey ? 3 : 2) : 3,
+    includeBranchContext: showOverview,
+  }), [processes, detMap, byKeyMap, childMap, effectiveFocusKeys, compactFocusKeys, minLevel, selectedKey, showOverview]);
 
-  // Fit graph into viewport when layout identity changes
+  const lineage = useMemo(
+    () => collectGraphLineage(selectedKey, byKeyMap, childMap, { maxDescendantDepth: 3 }),
+    [selectedKey, byKeyMap, childMap],
+  );
+  const layoutNodeMap = useMemo(
+    () => new Map(layout.nodes.map((n) => [n.key, n])),
+    [layout.nodes],
+  );
+  const pathLabel = useMemo(() => {
+    if (!lineage.pathKeys.length) return "";
+    const names = lineage.pathKeys.map((key) => {
+      const p = byKeyMap?.get?.(key);
+      return String(p?.processName || p?.image || "(unknown)").split(/[/\\]/).pop();
+    });
+    const visible = names.length > 6 ? ["…", ...names.slice(-5)] : names;
+    return visible.join(" › ");
+  }, [lineage.pathKeys, byKeyMap]);
+  const viewportFocusKeys = useMemo(
+    () => selectGraphViewportKeys(layout, { selectedKey }),
+    [layout, selectedKey],
+  );
+
+  useEffect(() => {
+    if (selectedKey) setShowOverview(false);
+  }, [selectedKey]);
+
+  // Open on the highest-value local chain at a readable zoom. Fitting every
+  // disconnected root made large investigations render as a tiny thumbnail.
   useEffect(() => {
     if (!layout.nodes.length || size.w < 40 || size.h < 40) return;
-    const pad = 48;
-    const sx = (size.w - pad * 2) / Math.max(layout.width, 1);
-    const sy = (size.h - pad * 2) / Math.max(layout.height, 1);
-    const k = Math.max(0.15, Math.min(1.15, Math.min(sx, sy)));
-    const x = (size.w - layout.width * k) / 2;
-    const y = Math.max(12, (size.h - layout.height * k) / 2);
-    setView({ x, y, k });
-  }, [layout, size.w, size.h]);
+    setView(calculateGraphViewport(layout, size, showOverview ? {
+      minScale: 0.01,
+      maxScale: 1.05,
+      padX: 48,
+      padY: 48,
+    } : {
+      focusKeys: viewportFocusKeys,
+      minScale: 0.45,
+      maxScale: 1.05,
+    }));
+  }, [layout, size.w, size.h, viewportFocusKeys, showOverview]);
 
   // Pan selected node into view (soft)
   useEffect(() => {
@@ -117,43 +184,108 @@ export default function ProcessGraphView({
   };
   const onPointerUp = () => { dragRef.current = null; };
 
-  const resetView = () => {
+  const focusView = () => {
     if (!layout.nodes.length) return;
-    const pad = 48;
-    const sx = (size.w - pad * 2) / Math.max(layout.width, 1);
-    const sy = (size.h - pad * 2) / Math.max(layout.height, 1);
-    const k = Math.max(0.15, Math.min(1.15, Math.min(sx, sy)));
-    setView({ x: (size.w - layout.width * k) / 2, y: Math.max(12, (size.h - layout.height * k) / 2), k });
+    setShowOverview(false);
+    if (showOverview) return;
+    setView(calculateGraphViewport(layout, size, {
+      focusKeys: viewportFocusKeys,
+      minScale: 0.45,
+      maxScale: 1.05,
+    }));
+  };
+
+  const fitAllView = () => {
+    if (!layout.nodes.length) return;
+    setShowOverview(true);
+    if (!showOverview) return;
+    setView(calculateGraphViewport(layout, size, {
+      minScale: 0.01,
+      maxScale: 1.05,
+      padX: 48,
+      padY: 48,
+    }));
   };
 
   const levelColor = (lv) => {
-    if (lv >= 3) return sevColors?.[3] || th.sev.critical;
-    if (lv >= 2) return sevColors?.[2] || th.sev.high;
-    if (lv >= 1) return sevColors?.[1] || th.sev.med;
+    if (lv >= 2) return th.accent;
+    if (lv >= 1) return th.textDim;
     return th.border;
   };
 
   return (
-    <div ref={wrapRef} style={{ flex: 1, minHeight: 0, minWidth: 0, position: "relative", overflow: "hidden", background: `radial-gradient(ellipse at 30% 20%, ${th.accent}08 0%, transparent 55%), ${th.modalBg}` }}>
+    <div ref={wrapRef} style={{ flex: 1, minHeight: 0, minWidth: 0, position: "relative", overflow: "hidden", background: th.modalBg }}>
       {/* HUD */}
       <div style={{ position: "absolute", top: 8, left: 10, zIndex: 2, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", pointerEvents: "none" }}>
-        <span style={{ fontSize: 10, color: th.textMuted, fontFamily: "-apple-system, sans-serif", background: `${th.panelBg}cc`, border: `1px solid ${th.border}33`, borderRadius: 6, padding: "3px 8px", backdropFilter: "blur(8px)" }}>
-          Graph · {layout.stats.rendered.toLocaleString()} of {layout.stats.total.toLocaleString()} processes
+        <span style={{ fontSize: PI_TYPOGRAPHY.control, color: th.textMuted, fontFamily: "-apple-system, sans-serif", background: `${th.panelBg}cc`, border: `1px solid ${th.border}33`, borderRadius: 6, padding: "3px 8px", backdropFilter: "blur(8px)" }}>
+          {showOverview ? "Overview" : "Focused chain"} · {layout.stats.rendered.toLocaleString()} of {layout.stats.total.toLocaleString()} processes
           {layout.stats.hosts > 1 ? ` · ${layout.stats.hosts} hosts` : ""}
           {layout.stats.truncated ? " · truncated" : ""}
         </span>
-        <span style={{ fontSize: 9, color: th.textMuted, fontFamily: "-apple-system, sans-serif", pointerEvents: "auto" }}>
-          Scroll zoom · drag pan · click select
+        <span style={{ fontSize: PI_TYPOGRAPHY.meta, color: th.textMuted, fontFamily: "-apple-system, sans-serif", pointerEvents: "auto" }}>
+          Select a process to trace ancestors and descendants
         </span>
       </div>
+      {selectedKey && pathLabel && (
+        <div style={{
+          position: "absolute",
+          top: 34,
+          left: 10,
+          right: 118,
+          zIndex: 2,
+          display: "flex",
+          gap: 6,
+          alignItems: "center",
+          minWidth: 0,
+          pointerEvents: "none",
+        }}>
+          <span style={{
+            flex: "0 0 auto",
+            fontSize: PI_TYPOGRAPHY.meta,
+            color: th.accent,
+            fontWeight: 700,
+            textTransform: "uppercase",
+            letterSpacing: "0.07em",
+            fontFamily: "-apple-system, sans-serif",
+          }}>
+            Ancestry
+          </span>
+          <span title={pathLabel} style={{
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+            fontSize: PI_TYPOGRAPHY.meta,
+            color: th.textDim,
+            fontFamily: "'SF Mono', Menlo, monospace",
+            background: `${th.panelBg}ee`,
+            border: `1px solid ${th.border}55`,
+            borderRadius: 4,
+            padding: "3px 7px",
+          }}>
+            {pathLabel}
+          </span>
+          {lineage.descendantKeys.size > 0 && (
+            <span style={{ flex: "0 0 auto", fontSize: PI_TYPOGRAPHY.meta, color: th.textMuted, fontFamily: "-apple-system, sans-serif" }}>
+              + {lineage.descendantKeys.size} downstream
+            </span>
+          )}
+          {lineage.brokenParent && (
+            <span title={`${lineage.brokenParent.reason}: ${lineage.brokenParent.declaredName || lineage.brokenParent.parentKey}`} style={{ flex: "0 0 auto", fontSize: PI_TYPOGRAPHY.meta, color: th.accent, fontFamily: "-apple-system, sans-serif" }}>
+              ancestry stops at unresolved parent
+            </span>
+          )}
+        </div>
+      )}
       <div style={{ position: "absolute", top: 8, right: 10, zIndex: 2, display: "flex", gap: 4 }}>
-        <button type="button" onClick={resetView} style={{ padding: "3px 8px", fontSize: 10, borderRadius: 4, cursor: "pointer", background: th.btnBg, color: th.textDim, border: `1px solid ${th.border}`, fontFamily: "-apple-system, sans-serif" }}>Fit</button>
-        <button type="button" onClick={() => setView((v) => ({ ...v, k: Math.min(2.5, v.k * 1.15) }))} style={{ padding: "3px 8px", fontSize: 10, borderRadius: 4, cursor: "pointer", background: th.btnBg, color: th.textDim, border: `1px solid ${th.border}`, fontFamily: "-apple-system, sans-serif" }}>+</button>
-        <button type="button" onClick={() => setView((v) => ({ ...v, k: Math.max(0.12, v.k / 1.15) }))} style={{ padding: "3px 8px", fontSize: 10, borderRadius: 4, cursor: "pointer", background: th.btnBg, color: th.textDim, border: `1px solid ${th.border}`, fontFamily: "-apple-system, sans-serif" }}>−</button>
+        <button type="button" onClick={focusView} title="Render and center the highest-priority local process chain" style={{ padding: "3px 8px", fontSize: PI_TYPOGRAPHY.control, borderRadius: 4, cursor: "pointer", background: !showOverview ? `${th.accent}18` : th.btnBg, color: !showOverview ? th.accent : th.textDim, border: `1px solid ${!showOverview ? th.accent + "55" : th.border}`, fontFamily: "-apple-system, sans-serif" }}>Focus</button>
+        <button type="button" onClick={fitAllView} title="Render the broader process overview and fit it into the viewport" style={{ padding: "3px 8px", fontSize: PI_TYPOGRAPHY.control, borderRadius: 4, cursor: "pointer", background: showOverview ? `${th.accent}18` : th.btnBg, color: showOverview ? th.accent : th.textDim, border: `1px solid ${showOverview ? th.accent + "55" : th.border}`, fontFamily: "-apple-system, sans-serif" }}>Fit all</button>
+        <button type="button" onClick={() => setView((v) => ({ ...v, k: Math.min(2.5, v.k * 1.15) }))} style={{ padding: "3px 8px", fontSize: PI_TYPOGRAPHY.control, borderRadius: 4, cursor: "pointer", background: th.btnBg, color: th.textDim, border: `1px solid ${th.border}`, fontFamily: "-apple-system, sans-serif" }}>+</button>
+        <button type="button" onClick={() => setView((v) => ({ ...v, k: Math.max(0.12, v.k / 1.15) }))} style={{ padding: "3px 8px", fontSize: PI_TYPOGRAPHY.control, borderRadius: 4, cursor: "pointer", background: th.btnBg, color: th.textDim, border: `1px solid ${th.border}`, fontFamily: "-apple-system, sans-serif" }}>−</button>
       </div>
 
       {layout.nodes.length === 0 ? (
-        <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: th.textMuted, fontSize: 12, fontFamily: "-apple-system, sans-serif" }}>
+        <div style={{ height: "100%", display: "flex", alignItems: "center", justifyContent: "center", color: th.textMuted, fontSize: PI_TYPOGRAPHY.body, fontFamily: "-apple-system, sans-serif" }}>
           No processes to graph for the current filter. Try Hunt/Raw detections or clear severity filters.
         </div>
       ) : (
@@ -169,6 +301,9 @@ export default function ProcessGraphView({
           <defs>
             <marker id="pi-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
               <path d="M 0 0 L 10 5 L 0 10 z" fill={th.textMuted} />
+            </marker>
+            <marker id="pi-arrow-accent" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+              <path d="M 0 0 L 10 5 L 0 10 z" fill={th.accent} />
             </marker>
           </defs>
           <g transform={`translate(${view.x},${view.y}) scale(${view.k})`}>
@@ -207,27 +342,68 @@ export default function ProcessGraphView({
             {/* Edges */}
             {layout.edges.map((e) => {
               const midX = (e.x1 + e.x2) / 2;
-              const color = e.level > 0 ? levelColor(e.level) : th.textMuted;
+              const isAncestry = lineage.ancestryEdgeIds.has(e.id);
+              const isDownstream = lineage.descendantEdgeIds.has(e.id);
+              const isRelated = isAncestry || isDownstream;
+              const color = isRelated ? th.accent : e.level > 0 ? levelColor(e.level) : th.textMuted;
               const conf = e.confidence === "high" ? 0.9 : e.confidence === "medium" ? 0.65 : 0.4;
+              const sourceNode = layoutNodeMap.get(e.source);
+              const targetNode = layoutNodeMap.get(e.target);
+              const linkLabel = e.sourceKind === "guid" ? "Process GUID"
+                : e.sourceKind === "pid-logon" ? "PID + logon"
+                : e.sourceKind === "pid-session" ? "PID + session"
+                : e.sourceKind === "pid-host" ? "PID + host"
+                : e.sourceKind || "resolved parent";
+              const shortLinkLabel = e.sourceKind === "guid" ? "GUID"
+                : e.sourceKind === "pid-logon" ? "PID + logon"
+                : e.sourceKind === "pid-session" ? "PID + session"
+                : e.sourceKind === "pid-host" ? "PID + host"
+                : "parent";
               return (
-                <path
-                  key={e.id}
-                  d={`M ${e.x1} ${e.y1} C ${midX} ${e.y1}, ${midX} ${e.y2}, ${e.x2} ${e.y2}`}
-                  fill="none"
-                  stroke={color}
-                  strokeOpacity={0.35 + conf * 0.35}
-                  strokeWidth={e.level >= 2 ? 2.2 : 1.4}
-                  markerEnd="url(#pi-arrow)"
-                />
+                <g key={e.id}>
+                  <path
+                    d={`M ${e.x1} ${e.y1} C ${midX} ${e.y1}, ${midX} ${e.y2}, ${e.x2} ${e.y2}`}
+                    fill="none"
+                    stroke={color}
+                    strokeOpacity={selectedKey && !isRelated ? 0.18 : isRelated ? 0.95 : 0.35 + conf * 0.25}
+                    strokeWidth={isAncestry ? 2.8 : isDownstream ? 2 : e.level >= 2 ? 1.8 : 1.2}
+                    markerEnd={isRelated ? "url(#pi-arrow-accent)" : "url(#pi-arrow)"}
+                  >
+                    <title>{[
+                      `${sourceNode?.processName || e.source} → ${targetNode?.processName || e.target}`,
+                      `Link: ${linkLabel}`,
+                      e.confidence ? `Confidence: ${e.confidence}` : null,
+                    ].filter(Boolean).join("\n")}</title>
+                  </path>
+                  {isAncestry && (
+                    <text
+                      x={midX}
+                      y={(e.y1 + e.y2) / 2 - 5}
+                      textAnchor="middle"
+                      fill={th.textMuted}
+                      fontSize={8}
+                      fontFamily="'SF Mono', Menlo, monospace"
+                      pointerEvents="none"
+                    >
+                      {shortLinkLabel}
+                    </text>
+                  )}
+                </g>
               );
             })}
 
             {/* Nodes — full labels wrap onto new lines; card height grows to fit */}
             {layout.nodes.map((n, idx) => {
               const isSel = n.key === selectedKey;
+              const isAncestry = lineage.ancestorKeys.includes(n.key);
+              const isDownstream = lineage.descendantKeys.has(n.key);
+              const isRelated = !selectedKey || lineage.relatedKeys.has(n.key);
               const col = n.level > 0 ? levelColor(n.level) : th.border;
-              const fill = isSel ? `${th.accent}22` : n.level > 0 ? `${col}14` : `${th.panelBg}ee`;
-              const stroke = isSel ? th.accent : col;
+              const fill = isSel ? `${th.accent}20`
+                : isAncestry ? `${th.accent}0d`
+                : isDownstream ? `${th.accent}08`
+                : `${th.panelBg}ee`;
+              const stroke = isSel || isAncestry || isDownstream ? th.accent : col;
               const padL = 8;
               const padR = n.isSeed && n.level > 0 ? 16 : 8;
               const contentX = padL;
@@ -239,6 +415,7 @@ export default function ProcessGraphView({
                 <g
                   key={n.key}
                   transform={`translate(${n.x},${n.y})`}
+                  opacity={isRelated ? 1 : 0.48}
                   style={{ cursor: "pointer" }}
                   onPointerDown={(ev) => ev.stopPropagation()}
                   onClick={(ev) => {
@@ -248,6 +425,7 @@ export default function ProcessGraphView({
                 >
                   <title>{[
                     n.processName,
+                    isSel ? "Selected process" : isAncestry ? "Ancestor of selected process" : isDownstream ? "Descendant of selected process" : null,
                     n.pid ? `PID ${n.pid}` : null,
                     n.user || null,
                     n.reason || null,
@@ -267,10 +445,9 @@ export default function ProcessGraphView({
                     fill={fill}
                     stroke={stroke}
                     strokeWidth={isSel ? 2.2 : 1.2}
-                    style={{ filter: isSel ? `drop-shadow(0 0 8px ${th.accent}55)` : n.level >= 2 ? `drop-shadow(0 0 4px ${col}33)` : undefined }}
                   />
                   <g clipPath={`url(#${clipId})`}>
-                    <rect x={0} y={0} width={4} height={n.height} fill={stroke} opacity={n.level > 0 || isSel ? 1 : 0.35} />
+                    <rect x={0} y={0} width={4} height={n.height} fill={stroke} opacity={n.level > 0 || isSel || isAncestry || isDownstream ? 1 : 0.35} />
                     <foreignObject
                       x={contentX}
                       y={0}
@@ -312,7 +489,7 @@ export default function ProcessGraphView({
                               minWidth: 0,
                               maxWidth: "100%",
                               fontFamily: "'SF Mono', Menlo, monospace",
-                              fontSize: 12,
+                              fontSize: PI_TYPOGRAPHY.title,
                               fontWeight: 700,
                               color: titleColor,
                               lineHeight: "16px",
@@ -328,7 +505,7 @@ export default function ProcessGraphView({
                           style={{
                             maxWidth: "100%",
                             fontFamily: "'SF Mono', Menlo, monospace",
-                            fontSize: 9,
+                            fontSize: PI_TYPOGRAPHY.meta,
                             color: th.textMuted,
                             lineHeight: "12px",
                             paddingLeft: typeof ptIcon === "function" ? 19 : 0,

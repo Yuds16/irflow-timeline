@@ -252,6 +252,13 @@ export const buildPrevalenceSummary = (data, detMap, limit = 12) => {
   for (const p of processes) {
     const prevalence = model.scoreNode(p);
     const det = detMap?.get?.(p.key) || null;
+    // Clean sanctioned EDR agents are expected to be uncommon in many exports.
+    // Do not promote them into the analyst-facing rare-process strip solely
+    // because the collection contains few agent events.
+    if (det?.sanctioned?.cat === "edr" && (det.level || 0) <= 0) {
+      stats.common++;
+      continue;
+    }
     if (prevalence.rarity === "rare") stats.rare++;
     else if (prevalence.rarity === "uncommon") stats.uncommon++;
     else stats.common++;
@@ -442,6 +449,20 @@ const _trustEvidenceFor = (info, disabledRules) => {
 };
 
 const _applyTrust = (det, trustInfo, disabledRules) => {
+  // An allowlisted vendor binary can legitimately execute from more than one
+  // protected install/staging path. Preserve the cross-host hash-mismatch
+  // signal (possible tampering/version drift), but do not turn path rarity
+  // alone into pi-57 for an exact-name, trusted-root sanctioned match.
+  if (det?.sanctioned && trustInfo?.type === "same-name-unusual-path") {
+    return {
+      ...det,
+      trust: {
+        ...trustInfo,
+        suppressed: true,
+        suppressionReason: "sanctioned vendor path",
+      },
+    };
+  }
   const evidence = _trustEvidenceFor(trustInfo, disabledRules);
   if (!evidence) return det;
 
@@ -478,10 +499,24 @@ const _applyTrust = (det, trustInfo, disabledRules) => {
 const _applyPrevalence = (det, node, model) => {
   if (!det) return det;
   const prevalence = model?.scoreNode ? model.scoreNode(node) : null;
+  if (det.sanctioned?.cat === "edr" && (det.level || 0) <= 0) {
+    return {
+      ...det,
+      prevalence: prevalence ? {
+        ...prevalence,
+        rawRarity: prevalence.rarity,
+        rarity: "baseline",
+        scoreBoost: 0,
+        signals: [],
+        suppressed: true,
+      } : null,
+    };
+  }
   if ((det.level || 0) <= 0) return { ...det, prevalence };
   const boost = prevalence?.scoreBoost || 0;
   const lifetimeBoost = det.lifetime?.type === "short-respawn" ? 15 : 0;
-  const trustBoost = det.trust?.type === "cross-host-hash-mismatch" ? 25
+  const trustBoost = det.trust?.suppressed ? 0
+    : det.trust?.type === "cross-host-hash-mismatch" ? 25
     : det.trust?.type === "same-name-unusual-path" ? 15
     : 0;
   const triageScore = (det.level * 100) + _confidenceScore(det.confidence) + boost + lifetimeBoost + trustBoost + Math.min(12, (det.evidence?.length || 0) * 2);

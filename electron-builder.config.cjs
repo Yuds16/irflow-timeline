@@ -12,6 +12,9 @@ const updateChannel =
 const config = {
   appId: "com.dfir.irflow-timeline",
   productName: "IRFlow Timeline",
+  // Keep physical artifact names identical to electron-updater's URL-safe
+  // names so manual GitHub/S3 uploads cannot publish a broken update feed.
+  artifactName: "IRFlow-Timeline-${version}-${arch}.${ext}",
   mac: {
     category: "public.app-category.developer-tools",
     icon: "assets/icon.icns",

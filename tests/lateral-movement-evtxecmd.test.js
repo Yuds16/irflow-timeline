@@ -428,7 +428,7 @@ test("single-tab lateral movement preserves evidence refs on edges, sessions, fi
   const { meta, ctx } = makeStub(EVTXECMD_HEADERS, rows);
   const result = getLateralMovement(meta, { excludeServiceAccounts: false, excludeLocalLogons: false }, ctx);
 
-  const edge = (result.edges || []).find(e => e.source === "GFUA-WKS01" && e.target === "GFUA-DC01.GFUA.LOCAL");
+  const edge = (result.edges || []).find(e => e.source === "GFUA-WKS01" && e.target === "GFUA-DC01");
   assert.ok(edge, `expected WKS01 -> DC01 edge, got ${JSON.stringify(result.edges)}`);
   assert.ok(edge.evidenceRefs.some(ref => ref.tabId === "lm-evtxecmd-test" && ref.rowId === 2),
     `edge should preserve the Security 4624 source row: ${JSON.stringify(edge.evidenceRefs)}`);
@@ -442,7 +442,10 @@ test("single-tab lateral movement preserves evidence refs on edges, sessions, fi
 
   const firstSeen = (result.findings || []).find(f => f.category === "First Seen" && f.source === "GFUA-WKS01");
   if (firstSeen) {
-    assert.ok(firstSeen.evidenceRefs.some(ref => ref.tabId === "lm-evtxecmd-test" && ref.rowId === 2), "First Seen finding should preserve source row ref");
+    assert.ok(
+      firstSeen.evidenceRefs.some(ref => ref.tabId === "lm-evtxecmd-test" && [1, 2, 3].includes(ref.rowId)),
+      "First Seen finding should preserve an originating RDP source row ref",
+    );
   }
 
   if ((result.chains || []).length > 0) {

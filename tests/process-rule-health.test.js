@@ -161,6 +161,30 @@ describe("process-rule-health", () => {
     assert.ok(report.techniques.some((t) => t.tid === "T1059" && t.count >= 1));
   });
 
+  it("orders fired and silent rules by severity before hit count", () => {
+    const detMap = new Map([
+      ["critical", det([{ ruleId: "pi-0", level: 3 }])],
+      ["high", det([{ ruleId: "pi-1", level: 2 }])],
+      ["medium-1", det([{ ruleId: "unknown-legacy", level: 1 }])],
+      ["medium-2", det([{ ruleId: "unknown-legacy", level: 1 }])],
+      ["medium-3", det([{ ruleId: "unknown-legacy", level: 1 }])],
+    ]);
+    const report = buildRuleHealthReport(detMap, {});
+
+    assert.deepEqual(
+      Array.from(report.topFired.slice(0, 3), (r) => r.id),
+      ["pi-0", "pi-1", "unknown-legacy"],
+      "critical and high rules must stay above noisier medium rules",
+    );
+
+    const silent = buildRuleHealthReport(new Map(), {});
+    assert.deepEqual(
+      Array.from(silent.silentHighValue, (r) => r.id),
+      ["pi-0", "pi-1", "pi-46"],
+      "silent coverage gaps must also be severity-first",
+    );
+  });
+
   it("formats a plain-text export", () => {
     const detMap = new Map([
       ["a", det([{ ruleId: "pi-0", level: 3, reason: "Office", tid: ["T1059"], beh: "shell-exec" }])],

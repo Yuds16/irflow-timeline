@@ -37,6 +37,11 @@ function runProcessServiceScan(state) {
       const _structColImage = _scanDetect([/^Image$/i, /^NewProcessName$/i, /^process_name$/i, /^FileName$/i, /^ImagePath$/i]);
       const _structColParent = _scanDetect([/^ParentImage$/i, /^ParentProcessName$/i, /^ParentCommandLine$/i]);
       const _structColCmd = _scanDetect([/^CommandLine$/i, /^command_line$/i, /^ProcessCommandLine$/i, /^cmdline$/i]);
+      const _structColSvc = _scanDetect([/^ServiceName$/i, /^Service_Name$/i, /^TargetServiceName$/i]);
+      const _structColServiceAccount = _scanDetect([/^ServiceAccount$/i, /^ServiceAccountName$/i, /^AccountName$/i]);
+      const _structColActor = _scanDetect([/^SubjectUserName$/i, /^Subject_User_Name$/i, /^SubjectAccountName$/i, /^UserName$/i]);
+      const _structColActorDomain = _scanDetect([/^SubjectDomainName$/i, /^Subject_Domain_Name$/i, /^AccountDomain$/i]);
+      const _structColExecutableInfo = _scanDetect([/^ExecutableInfo$/i]);
       const _scanColImage = _structColImage || (isHayabusa ? _scanDetect([/^Details$/i]) : null);
       const _scanColParent = _structColParent || (isHayabusa ? _scanDetect([/^ExtraFieldInfo$/i]) : null);
       const _scanColCmd = _structColCmd || (isHayabusa ? _scanDetect([/^CommandLine$/i]) : null) || (isHayabusa ? _scanDetect([/^Details$/i]) : null);
@@ -49,8 +54,11 @@ function runProcessServiceScan(state) {
       const _hasStructuredProcCols = !!(_structColParent && _structColImage);
       const _scanCols = [
         _scanColCmd, _scanColImage, _scanColParent,
-        _scanDetect([/^ExecutableInfo$/i]),
-        _scanDetect([/^ServiceName$/i]),
+        _structColExecutableInfo,
+        _structColSvc,
+        _structColServiceAccount,
+        _structColActor,
+        _structColActorDomain,
         _scanDetect([/^MapDescription$/i]),
         _scanDetect([/^Details$/i]),
         _scanDetect([/^ExtraFieldInfo$/i]),
@@ -235,8 +243,12 @@ function runProcessServiceScan(state) {
         if (_scanColImage) _scanSelParts.push(`${_scanColImage} as _image`);
         if (_scanColParent) _scanSelParts.push(`${_scanColParent} as _parent`);
         if (_scanColCmd) _scanSelParts.push(`${_scanColCmd} as _cmd`);
-        const _scanColSvc = _scanDetect([/^ServiceName$/i, /^Service_Name$/i]) || (isHayabusa ? _scanDetect([/^Details$/i, /^ExtraFieldInfo$/i]) : null);
+        const _scanColSvc = _structColSvc || (isHayabusa ? _scanDetect([/^Details$/i, /^ExtraFieldInfo$/i]) : null);
         if (_scanColSvc) _scanSelParts.push(`${_scanColSvc} as _svc`);
+        if (_structColServiceAccount) _scanSelParts.push(`${_structColServiceAccount} as _service_account`);
+        if (_structColActor) _scanSelParts.push(`${_structColActor} as _actor`);
+        if (_structColActorDomain) _scanSelParts.push(`${_structColActorDomain} as _actor_domain`);
+        if (_structColExecutableInfo) _scanSelParts.push(`${_structColExecutableInfo} as _exec_info`);
         const _scanChanFilter = _scanChanCol
           ? ` AND (LOWER(${_scanChanCol}) LIKE '%security%' OR LOWER(${_scanChanCol}) LIKE '%sysmon%' OR LOWER(${_scanChanCol}) LIKE '%system%' OR LOWER(${_scanChanCol}) IN ('sec','sysmon','sys'))`
           : "";
@@ -286,6 +298,16 @@ function runProcessServiceScan(state) {
         // Sort merged rows by timestamp
         if (_scanTsCol) _scanRows.sort((a, b) => ((a._ts || "") > (b._ts || "") ? 1 : (a._ts || "") < (b._ts || "") ? -1 : 0));
         const _extractHost = (row) => (row._host || "").toString().trim();
+        const _escapeRe = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        const _extractLabeledValue = (blob, labels) => {
+          const source = String(blob || "");
+          for (const label of labels) {
+            const pattern = new RegExp(`(?:^|[|¦;\\r\\n])\\s*${_escapeRe(label)}\\s*(?::|=)\\s*([^|¦\\r\\n]{1,1000})`, "i");
+            const match = source.match(pattern);
+            if (match?.[1]) return match[1].trim().replace(/^["']|["']$/g, "");
+          }
+          return "";
+        };
 
           // Accumulators: PsExec, Impacket, credential access, remote service, WMI, WinRM, RMM, scheduled tasks
           const _psexecNative = [];
@@ -303,7 +325,8 @@ function runProcessServiceScan(state) {
 
           // Scan loop — isolated so a single bad row doesn't kill all detectors
           try { for (const row of _scanRows) {
-            const text = (row._alltext || "").toLowerCase();
+            const rawText = String(row._alltext || "");
+            const text = rawText.toLowerCase();
             const eid = String(row._eid || "");
             const ts = row._ts || "";
             const host = _extractHost(row);
@@ -341,10 +364,37 @@ function runProcessServiceScan(state) {
               }
             }
             // Structured fields for directional detection (null if column absent)
-            const _image = row._image ? row._image.toString().toLowerCase() : null;
+            const _isServiceEvent = eid === "7045" || eid === "4697";
+            const _imageRaw = _structColImage && row._image
+              ? String(row._image).trim()
+              : _isServiceEvent && row._exec_info
+                ? String(row._exec_info).trim()
+                : _extractLabeledValue(rawText, ["ServiceFileName", "Service File Name", "ImagePath", "Image Path", "BinaryPathName", "Binary Path Name", "ServiceBinaryPath"]);
+            const _cmdRaw = _structColCmd && row._cmd
+              ? String(row._cmd).trim()
+              : _extractLabeledValue(rawText, ["CommandLine", "Command Line"]);
+            const _svcRaw = _structColSvc && row._svc
+              ? String(row._svc).trim()
+              : _extractLabeledValue(rawText, _isServiceEvent ? ["ServiceName", "Service Name", "TargetServiceName", "Name"] : ["ServiceName", "Service Name", "TargetServiceName"]);
+            const _serviceAccountRaw = _structColServiceAccount && row._service_account
+              ? String(row._service_account).trim()
+              : _isServiceEvent
+                ? _extractLabeledValue(rawText, ["ServiceAccount", "Service Account", "AccountName", "Account"])
+                : "";
+            const _actorName = row._actor
+              ? String(row._actor).trim()
+              : _extractLabeledValue(rawText, ["SubjectUserName", "Subject User Name", "SubjectAccountName"]);
+            const _actorDomain = row._actor_domain
+              ? String(row._actor_domain).trim()
+              : _extractLabeledValue(rawText, ["SubjectDomainName", "Subject Domain Name", "AccountDomain"]);
+            const _actorCombined = _actorName && _actorDomain && _actorDomain !== "-" && !_actorName.includes("\\")
+              ? `${_actorDomain}\\${_actorName}`
+              : _actorName;
+            const _actorRaw = /^(?:-|\\-|-\s*\\\s*-|n\/a|unknown)$/i.test(_actorCombined || "") ? "" : _actorCombined;
+            const _image = _imageRaw ? _imageRaw.toLowerCase() : null;
             const _parent = row._parent ? row._parent.toString().toLowerCase() : null;
-            const _cmd = row._cmd ? row._cmd.toString().toLowerCase() : null;
-            const _svc = row._svc ? row._svc.toString().toLowerCase() : null;
+            const _cmd = _cmdRaw ? _cmdRaw.toLowerCase() : null;
+            const _svc = _svcRaw ? _svcRaw.toLowerCase() : null;
             const _isCortexCollector = _isSanctionedCortexPayload(_image, _cmd, text);
 
             // --- Native PsExec (Sysinternals PSEXESVC) — checked first ---
@@ -486,7 +536,14 @@ function runProcessServiceScan(state) {
                 }
               }
               if (suspicious) {
-                _remoteSvcExec.push({ ts, eid, rid, d: reason, host, side: "dest" });
+                _remoteSvcExec.push({
+                  ts, eid, rid, d: reason, host, side: "dest",
+                  serviceName: _svcRaw,
+                  imagePath: _imageRaw,
+                  commandLine: _cmdRaw || _imageRaw,
+                  eventActor: _actorRaw,
+                  serviceAccount: _serviceAccountRaw,
+                });
               }
             }
 
@@ -1273,13 +1330,53 @@ function runProcessServiceScan(state) {
             // to a ±5 min Type 3 logon on the same target host to surface who initiated it.
             const _rsUsers = _usersFromCorrelation(_remoteSvcExec);
             const _rsSources = _sourcesFromCorrelation(_remoteSvcExec);
+            const _uniqueText = (values) => [...new Set(values.map(v => String(v || "").trim()).filter(Boolean))];
+            const executionDetails = _remoteSvcExec.map((h) => {
+              const correlated = _correlatedExecLogon(h.host, h.ts);
+              const attributedUser = correlated?.user ? String(correlated.user).toUpperCase() : "";
+              const sourceHost = correlated?.source
+                ? String(correlated.source).toUpperCase().replace(/\s*\(.*\)$/, "").trim()
+                : "";
+              return {
+                eventId: h.eid,
+                timestamp: h.ts,
+                target: h.host,
+                serviceName: h.serviceName || "",
+                imagePath: h.imagePath || "",
+                commandLine: h.commandLine || "",
+                eventActor: h.eventActor || "",
+                serviceAccount: h.serviceAccount || "",
+                attributedUser,
+                sourceHost,
+                reason: h.d || "",
+                rowId: h.rid,
+              };
+            });
+            const serviceNames = _uniqueText(executionDetails.map(d => d.serviceName));
+            const imagePaths = _uniqueText(executionDetails.map(d => d.imagePath));
+            const commandLines = _uniqueText(executionDetails.map(d => d.commandLine));
+            const eventActors = _uniqueText(executionDetails.map(d => d.eventActor));
+            const serviceAccounts = _uniqueText(executionDetails.map(d => d.serviceAccount));
+            const executors = _uniqueText([...eventActors, ..._rsUsers]);
+            for (const serviceName of serviceNames.slice(0, 2)) {
+              _rsPills.push({ text: `service ${serviceName}`, type: "execution" });
+            }
+            if (imagePaths.length > 0) _rsDescParts.push(`Image path${imagePaths.length > 1 ? "s" : ""}: ${imagePaths.slice(0, 3).join(", ")}`);
+            if (executors.length > 0) _rsDescParts.push(`Account attribution: ${executors.slice(0, 4).join(", ")}`);
+            const serviceTitle = serviceNames.length === 1
+              ? `: ${serviceNames[0]}`
+              : serviceNames.length > 1
+                ? `: ${serviceNames.slice(0, 2).join(", ")}${serviceNames.length > 2 ? ` +${serviceNames.length - 2} more` : ""}`
+                : "";
             findings.push({ id: fid++, severity: "high", category: "Remote Service Execution", mitre: "T1569.002",
-              title: `Suspicious service-based execution${hosts.length > 0 ? ` (target ${hosts.slice(0, 3).join(", ")}${hosts.length > 3 ? ` +${hosts.length - 3} more` : ""})` : ""}`,
+              title: `Suspicious service-based execution${serviceTitle}${hosts.length > 0 ? ` (target ${hosts.slice(0, 3).join(", ")}${hosts.length > 3 ? ` +${hosts.length - 3} more` : ""})` : ""}`,
               description: `${_remoteSvcExec.length} suspicious service event(s). ${_rsDescParts.join("; ")}. Could indicate remote execution tools.`,
               source: _rsSources.join(", "), target: hosts.join(", "),
               filterHosts: hosts,
               timeRange: { from: allTs[0] || "", to: allTs[allTs.length - 1] || "" },
-              eventCount: _remoteSvcExec.length, filterEids: eids, evidencePills: _rsPills, users: _rsUsers, itemRowids: _remoteSvcExec.map(h => h.rid).filter(r => r != null) });
+              eventCount: _remoteSvcExec.length, filterEids: eids, evidencePills: _rsPills, users: _rsUsers,
+              serviceNames, imagePaths, commandLines, eventActors, serviceAccounts, executors, executionDetails,
+              itemRowids: _remoteSvcExec.map(h => h.rid).filter(r => r != null) });
           } } catch (_e) { warnings.push(`Remote Service detector failed: ${_e.message}`); console.error("Remote Service detector error:", _e); }
 
           // --- Emit WMI Event Subscription Persistence findings (Sysmon 19/20/21) ---

@@ -29,6 +29,27 @@ export const INT_COLOR = { System: "#f85149", High: "#f0883e", Medium: "#d29922"
 export const susColorsFor = (th) => ({ 3: th.sev.critical, 2: th.sev.high, 1: th.sev.med, 0: null });
 export const intColorFor = (th) => ({ System: th.sev.critical, High: th.sev.high, Medium: th.sev.med, Low: th.sev.low, Untrusted: th.sev.custom });
 
+// Process Inspector deliberately uses a restrained IRFlow-only palette:
+// orange for analyst attention and neutral theme tokens for context. Severity
+// remains explicit in text, score, and ordering instead of relying on a
+// red/amber/green rainbow that becomes noisy in dense process views.
+export const processInspectorPaletteFor = (th) => ({
+  severity: { 3: th.accent, 2: th.accent, 1: th.textDim, 0: th.border },
+  ruleSeverity: {
+    critical: th.accent,
+    high: th.accent,
+    medium: th.textDim,
+    low: th.textMuted,
+  },
+  integrity: {
+    System: th.textDim,
+    High: th.textDim,
+    Medium: th.textMuted,
+    Low: th.textMuted,
+    Untrusted: th.accent,
+  },
+});
+
 // Re-exports kept for non-PA consumers (utils/process-inspector.js) to avoid
 // reaching into the components/ tree. Source of truth lives in
 // src/components/process-analyzer/constants.js.

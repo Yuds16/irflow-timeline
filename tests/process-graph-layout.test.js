@@ -35,7 +35,10 @@ function load() {
     module.exports = {
       selectGraphSeedKeys,
       buildGraphSubgraph,
+      calculateGraphViewport,
+      collectGraphLineage,
       layoutProcessGraph,
+      selectGraphViewportKeys,
       PROCESS_GRAPH_DEFAULTS,
       wrapTextLines,
       estimateNodeHeight,
@@ -84,6 +87,63 @@ describe("process-graph-layout", () => {
     assert.ok(sub.keys.has("a1"));
   });
 
+  it("buildGraphSubgraph keeps child and grandchild execution connected to a focused seed", () => {
+    const { processes, detMap } = makeTree();
+    processes.push(
+      { key: "a5", parentKey: "a4", parentProcessName: "powershell.exe", processName: "rundll32.exe", pid: "500", hostname: "HOST-A", normHost: "host-a", tsMs: 5000, user: "alice", childCount: 1 },
+      { key: "a6", parentKey: "a5", parentProcessName: "rundll32.exe", processName: "payload.exe", pid: "600", hostname: "HOST-A", normHost: "host-a", tsMs: 6000, user: "alice", childCount: 0 },
+    );
+    const sub = api.buildGraphSubgraph(processes, detMap, ["a4"], {
+      maxNodes: 50,
+      descendantDepth: 2,
+    });
+    assert.ok(sub.keys.has("a5"), "child should be included");
+    assert.ok(sub.keys.has("a6"), "grandchild should be included");
+  });
+
+  it("focused subgraph can omit sibling branch context while retaining ancestry and descendants", () => {
+    const { processes, detMap } = makeTree();
+    processes.push({
+      key: "sibling",
+      parentKey: "a2",
+      parentProcessName: "winword.exe",
+      processName: "unrelated.exe",
+      pid: "900",
+      hostname: "HOST-A",
+      normHost: "host-a",
+      tsMs: 3500,
+      user: "alice",
+      childCount: 0,
+    });
+    const sub = api.buildGraphSubgraph(processes, detMap, ["a3"], {
+      maxNodes: 50,
+      descendantDepth: 2,
+      includeBranchContext: false,
+    });
+    assert.ok(sub.keys.has("a1"));
+    assert.ok(sub.keys.has("a2"));
+    assert.ok(sub.keys.has("a3"));
+    assert.ok(sub.keys.has("a4"));
+    assert.equal(sub.keys.has("sibling"), false);
+  });
+
+  it("collectGraphLineage returns the full grandparent path and bounded descendants", () => {
+    const { processes } = makeTree();
+    const byKey = new Map(processes.map((p) => [p.key, p]));
+    const childMap = new Map();
+    for (const p of processes) {
+      if (!p.parentKey) continue;
+      if (!childMap.has(p.parentKey)) childMap.set(p.parentKey, []);
+      childMap.get(p.parentKey).push(p.key);
+    }
+    const lineage = api.collectGraphLineage("a3", byKey, childMap, { maxDescendantDepth: 2 });
+    assert.deepEqual(Array.from(lineage.pathKeys), ["a1", "a2", "a3"]);
+    assert.ok(lineage.ancestryEdgeIds.has("a1->a2"));
+    assert.ok(lineage.ancestryEdgeIds.has("a2->a3"));
+    assert.ok(lineage.descendantKeys.has("a4"));
+    assert.equal(lineage.brokenParent, null);
+  });
+
   it("layoutProcessGraph produces multi-host layout with edges", () => {
     const { processes, detMap } = makeTree();
     const layout = api.layoutProcessGraph(processes, detMap, { minLevel: 1, maxNodes: 50 });
@@ -96,6 +156,38 @@ describe("process-graph-layout", () => {
       assert.ok(keys.has(e.source));
       assert.ok(keys.has(e.target));
     }
+  });
+
+  it("default viewport focuses the highest-priority chain instead of every disconnected root", () => {
+    const { processes, detMap } = makeTree();
+    const layout = api.layoutProcessGraph(processes, detMap, { minLevel: 0, maxNodes: 50 });
+    const focus = api.selectGraphViewportKeys(layout);
+    assert.ok(focus.has("a3"), "highest-priority process should anchor the viewport");
+    assert.ok(focus.has("a2"), "parent should remain in view");
+    assert.ok(focus.has("a1"), "grandparent/root should remain in view");
+    assert.ok(focus.has("a4"), "child process should remain in view");
+    assert.equal(focus.has("b2"), false, "disconnected benign host should not shrink the default camera");
+  });
+
+  it("focused viewport is centered and remains readable on a very tall graph", () => {
+    const layout = {
+      nodes: [
+        { key: "focus", x: 300, y: 200, width: 196, height: 48, level: 3, triageScore: 300, isSeed: true },
+        { key: "distant", x: 40, y: 12000, width: 196, height: 48, level: 0, triageScore: 0, isSeed: false },
+      ],
+      edges: [],
+    };
+    const size = { w: 1200, h: 800 };
+    const focusKeys = api.selectGraphViewportKeys(layout);
+    const focused = api.calculateGraphViewport(layout, size, { focusKeys, minScale: 0.45, maxScale: 1.05 });
+    const fitAll = api.calculateGraphViewport(layout, size, { minScale: 0.12, maxScale: 1.05 });
+    const focusNode = layout.nodes[0];
+    const screenCx = (focusNode.x + focusNode.width / 2) * focused.k + focused.x;
+    const screenCy = (focusNode.y + focusNode.height / 2) * focused.k + focused.y;
+    assert.ok(Math.abs(screenCx - size.w / 2) < 1);
+    assert.ok(Math.abs(screenCy - size.h / 2) < 1);
+    assert.ok(focused.k >= 0.45, "default camera should preserve a readable zoom");
+    assert.ok(focused.k > fitAll.k, "focused camera should be more zoomed than fit-all");
   });
 
   it("focusKeys overrides detection seeds", () => {

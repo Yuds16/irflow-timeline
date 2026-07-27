@@ -6,8 +6,11 @@ import { PI_ANALYST_PROFILE_DEFAULT } from "../constants/presets.js";
 // Entries may include `cmdTest` for command-line-aware matching (e.g. offline collectors)
 export const PI_ALLOWLIST = (() => {
   const entries = [
-    // EDR agents — Cortex XDR: installed agent matches vendor path; offline collector matches cmdline
-    { n: "cortex-xdr-payload", paths: ["\\palo alto networks\\"], cat: "edr" },
+    // EDR agents — Cortex XDR: current installs use Palo Alto Networks paths,
+    // while protected payloads may be staged below the legacy Cyvera vendor
+    // root in ProgramData. The exact process-name + trusted-root requirement
+    // still prevents a same-named copy from inheriting this baseline.
+    { n: "cortex-xdr-payload", paths: ["\\palo alto networks\\", "\\cyvera\\"], cat: "edr" },
     { n: "cortex-xdr-payload", paths: null, cat: "edr",
       cmdTest: /offline_collector_config\.json|--offline-collector|--collect-artifacts|XDR_Collector/i },
     { n: "cyserver", paths: ["\\palo alto networks\\"], cat: "edr" },
@@ -1377,7 +1380,10 @@ export const getSusInfo = (node, parentNode, opts) => {
   // 5. Score from accumulated evidence — single-pass aggregation.
   // Old code did: filter().filter().map().reduce() + spread() + flatMap() ≈ 6 passes
   // and an array allocation per process. At 200k rows that's ~1.2M throwaway arrays.
-  if (!evidence.length) return { level: 0, reason: null };
+  // Keep the sanctioned state even when there is no finding. Dataset-level
+  // passes (for example same-name path rarity) need it to avoid reintroducing
+  // an alert that the exact-name/vendor-path baseline already resolved.
+  if (!evidence.length) return { level: 0, reason: null, sanctioned };
   let primaryCount = 0;
   let hiCount = 0;
   let maxLevel = -Infinity;

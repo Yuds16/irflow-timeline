@@ -68,3 +68,50 @@ test("concurrent RDP: same user on the SAME target (no distinct targets) → no 
   assert.equal(state.findings.filter((f) => f.category === "Concurrent RDP Sessions").length, 0);
   assert.equal(fid, 200);
 });
+
+test("telemetry gaps and low reconstruction confidence are caveats, not score boosts", () => {
+  const complete = session(0);
+  scoreRdpSessions(baseState({ rdpSessions: [complete] }));
+
+  const incomplete = session(0, {
+    confidence: "low",
+    missingExpected: ["1149", "21/22"],
+    evidenceLevel: "correlated",
+  });
+  scoreRdpSessions(baseState({ rdpSessions: [incomplete] }));
+
+  assert.equal(incomplete.suspicionScore, complete.suspicionScore);
+  assert.ok(incomplete.flags.some((flag) => flag.startsWith("Telemetry gap:")));
+  assert.ok(incomplete.flags.includes("Low reconstruction confidence"));
+  assert.ok(incomplete.flags.includes("RDP classification is correlated, not direct"));
+});
+
+test("finding overlap raises an RDP score only when the pair also overlaps in time", () => {
+  const finding = (id, from, to = from) => ({
+    id,
+    category: "Brute Force",
+    severity: "high",
+    source: "10.0.0.5",
+    target: "HOST01",
+    timeRange: { from, to },
+  });
+
+  const farSession = session(0);
+  scoreRdpSessions(baseState({
+    rdpSessions: [farSession],
+    findings: [finding(10, "2026-03-11T08:00:00Z")],
+    _findingPairs: undefined,
+  }));
+  assert.equal(farSession.findingIds.length, 0);
+  assert.ok(!farSession.flags.some((flag) => flag.startsWith("Finding:")));
+
+  const nearSession = session(0);
+  scoreRdpSessions(baseState({
+    rdpSessions: [nearSession],
+    findings: [finding(11, "2026-03-10T08:05:00Z")],
+    _findingPairs: undefined,
+  }));
+  assert.deepEqual(nearSession.findingIds, [11]);
+  assert.equal(nearSession.suspicionScore, farSession.suspicionScore + 12);
+  assert.ok(nearSession.flags.includes("Finding: Brute Force"));
+});

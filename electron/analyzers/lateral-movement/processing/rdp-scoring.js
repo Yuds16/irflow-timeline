@@ -22,6 +22,7 @@ function scoreRdpSessions(state) {
   // pair index to hand over. Build one from the findings that exist at this point.
   // The final index is rebuilt by correlateTriageAndCluster over the complete array.
   const _findingPairs = state._findingPairs || buildFindingPairs(findings);
+  const _findingById = new Map(findings.map((finding) => [finding.id, finding]));
   let fid = state.fid;
 
       // === Episode Clustering per Edge ===
@@ -54,7 +55,13 @@ function scoreRdpSessions(state) {
       };
       const EPISODE_GAP_MS = 1800000; // 30 min
       for (const [ek, evts] of _evtsByEdge) {
-        evts.sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
+        evts.sort((a, b) => {
+          const at = normalizeTimestamp(a.ts);
+          const bt = normalizeTimestamp(b.ts);
+          return Number.isFinite(at) && Number.isFinite(bt)
+            ? at - bt
+            : String(a.ts || "").localeCompare(String(b.ts || ""));
+        });
         const episodes = [];
         let cur = null;
         for (const evt of evts) {
@@ -62,8 +69,8 @@ function scoreRdpSessions(state) {
           const phase = _epPhase(evt);
           const techFam = _epTechFamily(evt);
           if (cur && cur._uk === uk && cur._phase === phase && cur._techFam === techFam) {
-            const gap = new Date(evt.ts) - new Date(cur.lastTs);
-            if (!isNaN(gap) && gap <= EPISODE_GAP_MS) {
+            const gap = normalizeTimestamp(evt.ts) - normalizeTimestamp(cur.lastTs);
+            if (Number.isFinite(gap) && gap >= 0 && gap <= EPISODE_GAP_MS) {
               cur.count++;
               cur.lastTs = evt.ts;
               cur.eids.add(evt.eventId);
@@ -83,10 +90,12 @@ function scoreRdpSessions(state) {
 
       // === RDP Session Suspicion Scoring ===
       const _pairFirst = new Map();
+      const _pairCount = new Map();
       for (const s of rdpSessions) {
         const pk = `${(s.source || "").toUpperCase()}->${(s.target || "").toUpperCase()}|${(s.user || "").toUpperCase()}`;
         const ex = _pairFirst.get(pk);
         if (!ex || (s.startTime && s.startTime < ex)) _pairFirst.set(pk, s.startTime);
+        _pairCount.set(pk, (_pairCount.get(pk) || 0) + 1);
       }
       for (const s of rdpSessions) {
         let score = 0;
@@ -132,22 +141,38 @@ function scoreRdpSessions(state) {
             else if (isOffHours) { score += 10; flags.push(`Off-hours (${hour}:00 UTC)`); }
           }
         }
-        // Missing expected events
-        if (s.missingExpected && s.missingExpected.length > 0) { score += 5; flags.push(`Missing ${s.missingExpected.join(", ")}`); }
-        // Low confidence
-        if (s.confidence === "low") { score += 5; flags.push("Low confidence chain"); }
+        // Missing telemetry and low reconstruction confidence are evidence-quality
+        // caveats, not malicious behavior. They must never increase suspicion.
+        if (s.missingExpected && s.missingExpected.length > 0) flags.push(`Telemetry gap: missing ${s.missingExpected.join(", ")}`);
+        if (s.confidence === "low") flags.push("Low reconstruction confidence");
+        if (s.evidenceLevel === "correlated") flags.push("RDP classification is correlated, not direct");
         // First-seen pair
         const _pk = `${(s.source || "").toUpperCase()}->${(s.target || "").toUpperCase()}|${(s.user || "").toUpperCase()}`;
         if (_pairFirst.get(_pk) === s.startTime) {
-          const pairCount = rdpSessions.filter(x => `${(x.source || "").toUpperCase()}->${(x.target || "").toUpperCase()}|${(x.user || "").toUpperCase()}` === _pk).length;
+          const pairCount = _pairCount.get(_pk) || 0;
           if (pairCount === 1) { score += 8; flags.push("First-seen pair"); }
         }
-        // Finding overlap
+        // Finding overlap — pair identity alone is not enough. A finding from a
+        // different day on the same hosts must not inflate this session.
         const _fk = `${(s.source || "").toUpperCase()}->${(s.target || "").toUpperCase()}`;
-        const matchedFids = _findingPairs.get(_fk) || [];
+        const sessionStart = normalizeTimestamp(s.startTime);
+        const sessionEnd = normalizeTimestamp(s.endTime || s.effectiveEnd || s.startTime);
+        const CORRELATION_PAD_MS = 10 * 60000;
+        const matchedFids = (_findingPairs.get(_fk) || []).filter((findingId) => {
+          const finding = _findingById.get(findingId);
+          if (!finding) return false;
+          const findingStart = normalizeTimestamp(finding.timeRange?.from);
+          const findingEnd = normalizeTimestamp(finding.timeRange?.to || finding.timeRange?.from);
+          // If either side genuinely lacks time, retain the pair correlation but
+          // describe it as pair-level in the UI. Normal findings carry timeRange.
+          if (!Number.isFinite(sessionStart) || !Number.isFinite(findingStart)) return true;
+          const se = Number.isFinite(sessionEnd) ? sessionEnd : sessionStart;
+          const fe = Number.isFinite(findingEnd) ? findingEnd : findingStart;
+          return findingStart <= se + CORRELATION_PAD_MS && fe >= sessionStart - CORRELATION_PAD_MS;
+        });
         if (matchedFids.length > 0) {
           score += 12;
-          const fCats = [...new Set(matchedFids.map(fid => findings.find(f => f.id === fid)?.category).filter(Boolean))];
+          const fCats = [...new Set(matchedFids.map(fid => _findingById.get(fid)?.category).filter(Boolean))];
           flags.push(...fCats.map(c => `Finding: ${c}`));
         }
         // RDP session shadowing (EIDs 32/33) — an attacker or admin viewing the session
@@ -168,21 +193,26 @@ function scoreRdpSessions(state) {
           if (s.status === "failed" || s.status === "incomplete" || s.status === "connecting") continue;
           if (!s.user || !s.target || !s.startTime) continue;
           // Normalize end time: use endTime, else last event ts, else cap at start + 30min
+          const startMs = normalizeTimestamp(s.startTime);
+          if (!Number.isFinite(startMs)) continue;
           let effectiveEnd = s.endTime;
-          if (!effectiveEnd || effectiveEnd <= s.startTime) {
+          let endMs = normalizeTimestamp(effectiveEnd);
+          if (!Number.isFinite(endMs) || endMs <= startMs) {
             const lastEvtTs = s.events.length > 0 ? s.events[s.events.length - 1]?.ts : null;
-            if (lastEvtTs && lastEvtTs > s.startTime) {
+            const lastEvtMs = normalizeTimestamp(lastEvtTs);
+            if (Number.isFinite(lastEvtMs) && lastEvtMs > startMs) {
               effectiveEnd = lastEvtTs;
+              endMs = lastEvtMs;
             } else {
               // Cap open-ended sessions at start + 30 min to avoid over-firing
-              const startMs = new Date(s.startTime).getTime();
-              if (!isNaN(startMs)) effectiveEnd = new Date(startMs + 1800000).toISOString();
-              else continue;
+              endMs = startMs + 1800000;
+              effectiveEnd = new Date(endMs).toISOString();
             }
           }
           _concSessions.push({
             id: s.id, user: (s.user || "").toUpperCase(), target: (s.target || "").toUpperCase(),
             source: (s.source || "").toUpperCase(), start: s.startTime, end: effectiveEnd,
+            startMs, endMs,
             confidence: s.confidence || "low", hasAdmin: !!s.hasAdmin,
             suspicionScore: s.suspicionScore || 0, technique: s.technique || "RDP",
             _session: s,
@@ -200,7 +230,7 @@ function scoreRdpSessions(state) {
         for (const [user, sessions] of _byUser) {
           if (sessions.length < 2) continue;
           // Sort by start time
-          sessions.sort((a, b) => a.start.localeCompare(b.start));
+          sessions.sort((a, b) => a.startMs - b.startMs);
           // Find distinct-target overlaps via sweep
           // For each session, check forward for overlapping sessions on different targets
           const used = new Set(); // session ids already clustered
@@ -211,19 +241,27 @@ function scoreRdpSessions(state) {
             // Track the intersection window — all members must be active during this range
             let intStart = sessions[i].start; // max(starts)
             let intEnd = sessions[i].end;     // min(ends)
+            let intStartMs = sessions[i].startMs;
+            let intEndMs = sessions[i].endMs;
             for (let j = i + 1; j < sessions.length; j++) {
               if (used.has(sessions[j].id)) continue;
               // Candidate intersection with existing cluster window
-              const newIntStart = sessions[j].start > intStart ? sessions[j].start : intStart;
-              const newIntEnd = sessions[j].end < intEnd ? sessions[j].end : intEnd;
-              const overlapMs = new Date(newIntEnd) - new Date(newIntStart);
-              if (isNaN(overlapMs) || overlapMs < MIN_OVERLAP_MS) continue;
+              const useCandidateStart = sessions[j].startMs > intStartMs;
+              const useCandidateEnd = sessions[j].endMs < intEndMs;
+              const newIntStart = useCandidateStart ? sessions[j].start : intStart;
+              const newIntEnd = useCandidateEnd ? sessions[j].end : intEnd;
+              const newIntStartMs = Math.max(sessions[j].startMs, intStartMs);
+              const newIntEndMs = Math.min(sessions[j].endMs, intEndMs);
+              const overlapMs = newIntEndMs - newIntStartMs;
+              if (!Number.isFinite(overlapMs) || overlapMs < MIN_OVERLAP_MS) continue;
               // Require different target to establish concurrency, or extend existing multi-target cluster
               if (clusterTargets.has(sessions[j].target) && clusterTargets.size < 2) continue;
               cluster.push(sessions[j]);
               clusterTargets.add(sessions[j].target);
               intStart = newIntStart;
               intEnd = newIntEnd;
+              intStartMs = newIntStartMs;
+              intEndMs = newIntEndMs;
             }
             // Only emit if we have 2+ different targets
             if (clusterTargets.size < 2) continue;
@@ -236,6 +274,7 @@ function scoreRdpSessions(state) {
               sources: [...new Set(cluster.map(c => c.source).filter(Boolean))],
               overlapStart: intStart,
               overlapEnd: intEnd,
+              overlapMs: intEndMs - intStartMs,
             });
           }
         }
@@ -271,8 +310,8 @@ function scoreRdpSessions(state) {
             else if (severity === "high") severity = "medium";
           }
           // Check for very short overlap — further dampening
-          const overlapMs = new Date(overlapEnd) - new Date(overlapStart);
-          if (!isNaN(overlapMs) && overlapMs < 120000) { // < 2 min
+          const overlapMs = grp.overlapMs;
+          if (Number.isFinite(overlapMs) && overlapMs < 120000) { // < 2 min
             if (severity === "critical") severity = "high";
             else if (severity === "high") severity = "medium";
           }

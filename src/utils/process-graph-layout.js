@@ -90,7 +90,9 @@ export const wrapTextLines = (text, maxChars, maxLines = 20) => {
 export const buildNodeSubLine = (n) => {
   const parts = [];
   if (n?.pid) parts.push(`PID ${n.pid}`);
-  if (n?.level > 0) parts.push(`L${n.level}`);
+  if (n?.level > 0) {
+    parts.push({ 3: "Critical", 2: "High", 1: "Medium" }[n.level] || "Detected");
+  }
   if (n?.user) parts.push(n.user);
   return parts.join(" · ") || "—";
 };
@@ -169,13 +171,16 @@ export const selectGraphSeedKeys = (processes, detMap, opts = {}) => {
 };
 
 /**
- * Expand seed keys to a connected subgraph: seeds + ancestors + direct children.
+ * Expand seed keys to a connected subgraph: seeds + full ancestry + nearby
+ * branch context + bounded descendants.
  * Caps at maxNodes; prefers keeping higher-severity nodes when truncating.
  */
 export const buildGraphSubgraph = (processes, detMap, seedKeys, opts = {}) => {
   const maxNodes = opts.maxNodes ?? PROCESS_GRAPH_DEFAULTS.maxNodes;
   const includeChildren = opts.includeChildren !== false;
   const includeAncestors = opts.includeAncestors !== false;
+  const includeBranchContext = opts.includeBranchContext !== false;
+  const descendantDepth = Math.max(1, Number(opts.descendantDepth) || 2);
   if (!processes?.length || !seedKeys?.length) {
     return { keys: new Set(), truncated: false, seedCount: 0 };
   }
@@ -216,30 +221,257 @@ export const buildGraphSubgraph = (processes, detMap, seedKeys, opts = {}) => {
     }
   }
 
-  // Direct children of seeds (and of already-included nodes that are detected)
+  const childRank = (key) => {
+    const det = detMap?.get?.(key) || { level: 0, triageScore: 0 };
+    const node = byKey.get(key);
+    return {
+      key,
+      level: det.level || 0,
+      triage: det.triageScore || 0,
+      tsMs: Number.isFinite(node?.tsMs) ? node.tsMs : Number.MAX_SAFE_INTEGER,
+    };
+  };
+  const rankedChildrenOf = (key) => (childMap.get(key) || [])
+    .filter((ck) => {
+      const child = byKey.get(ck);
+      return child && consistentParentKey(child, byKey) === key;
+    })
+    .map(childRank)
+    .sort((a, b) => b.level - a.level || b.triage - a.triage || a.tsMs - b.tsMs);
+
+  // One-hop branch context from every included ancestor makes siblings visible
+  // without recursively exploding the whole host process tree.
   if (includeChildren) {
-    const childCandidates = [];
-    for (const k of keep) {
-      for (const ck of (childMap.get(k) || [])) {
-        if (keep.has(ck)) continue;
-        const det = detMap?.get?.(ck) || { level: 0, triageScore: 0 };
-        childCandidates.push({
-          key: ck,
-          level: det.level || 0,
-          triage: det.triageScore || 0,
-        });
+    if (includeBranchContext) {
+      const childCandidates = [];
+      const contextRoots = [...keep];
+      for (const k of contextRoots) {
+        for (const child of rankedChildrenOf(k)) {
+          if (!keep.has(child.key)) childCandidates.push(child);
+        }
+      }
+      childCandidates.sort((a, b) =>
+        b.level - a.level || b.triage - a.triage || a.tsMs - b.tsMs
+      );
+      for (const c of childCandidates) {
+        if (keep.size >= maxNodes) break;
+        add(c.key);
       }
     }
-    // Prefer suspicious children when space is tight
-    childCandidates.sort((a, b) => b.level - a.level || b.triage - a.triage);
-    for (const c of childCandidates) {
-      if (keep.size >= maxNodes) break;
-      add(c.key);
+
+    // Follow the actual seed branches farther than one hop so child and
+    // grandchild execution remain connected to the selected process.
+    const queue = seedKeys.map((key) => ({ key, depth: 0 }));
+    const expanded = new Set();
+    let qi = 0;
+    while (qi < queue.length && keep.size < maxNodes) {
+      const { key, depth } = queue[qi++];
+      if (expanded.has(key) || depth >= descendantDepth) continue;
+      expanded.add(key);
+      for (const child of rankedChildrenOf(key)) {
+        if (keep.size >= maxNodes) break;
+        add(child.key);
+        queue.push({ key: child.key, depth: depth + 1 });
+      }
     }
   }
 
   const truncated = seedKeys.some((k) => !keep.has(k)) || keep.size >= maxNodes;
   return { keys: keep, truncated, seedCount: seedKeys.length, byKey, childMap };
+};
+
+/**
+ * Collect the selected process's evidence-backed lineage. The ancestry path is
+ * root → selected; descendants are bounded so UI highlighting stays useful on
+ * very large service trees. Any broken/mismatched parent reference is reported
+ * rather than visually inventing an edge.
+ */
+export const collectGraphLineage = (selectedKey, byKey, childMap, opts = {}) => {
+  const ancestorKeys = [];
+  const descendantKeys = new Set();
+  const ancestryEdgeIds = new Set();
+  const descendantEdgeIds = new Set();
+  const maxAncestorHops = Math.max(1, Number(opts.maxAncestorHops) || 32);
+  const maxDescendantDepth = Math.max(0, Number(opts.maxDescendantDepth) || 2);
+  let brokenParent = null;
+
+  if (!selectedKey || !byKey?.has?.(selectedKey)) {
+    return {
+      pathKeys: [],
+      ancestorKeys,
+      descendantKeys,
+      ancestryEdgeIds,
+      descendantEdgeIds,
+      relatedKeys: new Set(),
+      brokenParent,
+    };
+  }
+
+  const seenAncestors = new Set([selectedKey]);
+  let cur = byKey.get(selectedKey);
+  let hops = 0;
+  while (cur && hops++ < maxAncestorHops) {
+    const rawParentKey = cur.parentKey || "";
+    if (!rawParentKey) break;
+    const parentKey = consistentParentKey(cur, byKey);
+    if (!parentKey || !byKey.has(parentKey)) {
+      brokenParent = {
+        childKey: cur.key,
+        parentKey: rawParentKey,
+        declaredName: cur.parentProcessName || "",
+        reason: parentKey ? "parent event missing" : "parent identity mismatch",
+      };
+      break;
+    }
+    if (seenAncestors.has(parentKey)) {
+      brokenParent = {
+        childKey: cur.key,
+        parentKey,
+        declaredName: cur.parentProcessName || "",
+        reason: "parent cycle",
+      };
+      break;
+    }
+    seenAncestors.add(parentKey);
+    ancestorKeys.unshift(parentKey);
+    ancestryEdgeIds.add(`${parentKey}->${cur.key}`);
+    cur = byKey.get(parentKey);
+  }
+
+  if (maxDescendantDepth > 0) {
+    const queue = [{ key: selectedKey, depth: 0 }];
+    const expanded = new Set();
+    let qi = 0;
+    while (qi < queue.length) {
+      const { key, depth } = queue[qi++];
+      if (expanded.has(key) || depth >= maxDescendantDepth) continue;
+      expanded.add(key);
+      for (const childKey of (childMap?.get?.(key) || [])) {
+        const child = byKey.get(childKey);
+        if (!child || consistentParentKey(child, byKey) !== key) continue;
+        descendantKeys.add(childKey);
+        descendantEdgeIds.add(`${key}->${childKey}`);
+        queue.push({ key: childKey, depth: depth + 1 });
+      }
+    }
+  }
+
+  const pathKeys = [...ancestorKeys, selectedKey];
+  return {
+    pathKeys,
+    ancestorKeys,
+    descendantKeys,
+    ancestryEdgeIds,
+    descendantEdgeIds,
+    relatedKeys: new Set([...pathKeys, ...descendantKeys]),
+    brokenParent,
+  };
+};
+
+/**
+ * Choose a compact, analyst-useful camera target from an already-laid-out
+ * graph. The default anchor is the highest-priority seed; a selected process
+ * takes precedence. Full ancestors and bounded descendants are kept so the
+ * first view opens on a readable chain instead of shrinking every disconnected
+ * root into one thumbnail.
+ */
+export const selectGraphViewportKeys = (layout, opts = {}) => {
+  const nodes = layout?.nodes || [];
+  const edges = layout?.edges || [];
+  if (!nodes.length) return new Set();
+
+  const nodeByKey = new Map(nodes.map((n) => [n.key, n]));
+  const selected = opts.selectedKey && nodeByKey.has(opts.selectedKey)
+    ? nodeByKey.get(opts.selectedKey)
+    : null;
+  const anchor = selected || [...nodes].sort((a, b) =>
+    (b.level || 0) - (a.level || 0)
+    || (b.triageScore || 0) - (a.triageScore || 0)
+    || Number(!!b.isSeed) - Number(!!a.isSeed)
+    || String(a.ts || "").localeCompare(String(b.ts || ""))
+  )[0];
+  if (!anchor) return new Set();
+
+  const maxNodes = Math.max(1, Number(opts.maxNodes) || 24);
+  const ancestorHops = Math.max(0, Number(opts.ancestorHops) || 12);
+  const descendantHops = Math.max(0, Number(opts.descendantHops) || 2);
+  const parentByTarget = new Map();
+  const childrenBySource = new Map();
+  for (const edge of edges) {
+    if (!nodeByKey.has(edge.source) || !nodeByKey.has(edge.target)) continue;
+    parentByTarget.set(edge.target, edge.source);
+    if (!childrenBySource.has(edge.source)) childrenBySource.set(edge.source, []);
+    childrenBySource.get(edge.source).push(edge.target);
+  }
+
+  const keep = new Set([anchor.key]);
+  let cur = anchor.key;
+  let hops = 0;
+  while (hops++ < ancestorHops && keep.size < maxNodes) {
+    const parent = parentByTarget.get(cur);
+    if (!parent || keep.has(parent)) break;
+    keep.add(parent);
+    cur = parent;
+  }
+
+  const queue = [{ key: anchor.key, depth: 0 }];
+  let qi = 0;
+  while (qi < queue.length && keep.size < maxNodes) {
+    const { key, depth } = queue[qi++];
+    if (depth >= descendantHops) continue;
+    const children = [...(childrenBySource.get(key) || [])].sort((a, b) => {
+      const an = nodeByKey.get(a) || {};
+      const bn = nodeByKey.get(b) || {};
+      return (bn.level || 0) - (an.level || 0)
+        || (bn.triageScore || 0) - (an.triageScore || 0);
+    });
+    for (const child of children) {
+      if (keep.size >= maxNodes) break;
+      keep.add(child);
+      queue.push({ key: child, depth: depth + 1 });
+    }
+  }
+  return keep;
+};
+
+/**
+ * Calculate a centered SVG pan/zoom transform for either a focused node set or
+ * the full graph. A focus view may crop distant roots intentionally; analysts
+ * can still use "Fit all" for the complete overview.
+ */
+export const calculateGraphViewport = (layout, size, opts = {}) => {
+  const allNodes = layout?.nodes || [];
+  const width = Math.max(1, Number(size?.w) || 1);
+  const height = Math.max(1, Number(size?.h) || 1);
+  if (!allNodes.length) return { x: 0, y: 0, k: 1 };
+
+  const focusKeys = opts.focusKeys;
+  let nodes = focusKeys?.size
+    ? allNodes.filter((n) => focusKeys.has(n.key))
+    : allNodes;
+  if (!nodes.length) nodes = allNodes;
+
+  const minX = Math.min(...nodes.map((n) => n.x));
+  const minY = Math.min(...nodes.map((n) => n.y));
+  const maxX = Math.max(...nodes.map((n) => n.x + n.width));
+  const maxY = Math.max(...nodes.map((n) => n.y + n.height));
+  const contentW = Math.max(1, maxX - minX);
+  const contentH = Math.max(1, maxY - minY);
+  const padX = Math.max(16, Number(opts.padX) || 88);
+  const padY = Math.max(16, Number(opts.padY) || 72);
+  const availableW = Math.max(40, width - padX * 2);
+  const availableH = Math.max(40, height - padY * 2);
+  const minScale = Math.max(0.01, Number(opts.minScale) || 0.45);
+  const maxScale = Math.max(minScale, Number(opts.maxScale) || 1.05);
+  const fitScale = Math.min(availableW / contentW, availableH / contentH);
+  const k = Math.max(minScale, Math.min(maxScale, fitScale));
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  return {
+    x: width / 2 - centerX * k,
+    y: height / 2 - centerY * k,
+    k,
+  };
 };
 
 /**
@@ -285,6 +517,8 @@ export const layoutProcessGraph = (processes, detMap, opts = {}) => {
     childMap,
     includeChildren: opts.includeChildren,
     includeAncestors: opts.includeAncestors,
+    includeBranchContext: opts.includeBranchContext,
+    descendantDepth: opts.descendantDepth,
   });
 
   // Depth relative to subgraph roots (not global tree depth)
