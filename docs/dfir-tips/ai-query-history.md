@@ -1,5 +1,5 @@
 ---
-description: Forensic artifact paths and parsing coverage for Grok Build, Claude, Codex, ChatGPT, Copilot, Gemini, Cursor, Windsurf, Continue, and other local AI applications.
+description: Forensic artifact paths and parsing coverage for ChatGPT Computer History, Grok Build, Claude, Codex, ChatGPT, Copilot, Gemini, Cursor, Windsurf, Continue, and other local AI applications.
 ---
 
 # AI Query History and AI App Artifacts
@@ -7,6 +7,10 @@ description: Forensic artifact paths and parsing coverage for Grok Build, Claude
 IRFlow Timeline includes a native **AI Query History** extractor for investigating local AI assistant usage during incident response. It parses local desktop, CLI, and editor-assistant stores into one timeline so analysts can review prompts, responses, tool calls, workspaces, source files, and possible pasted secrets.
 
 For the feature-level overview, see [AI Artifacts](/features/ai-artifacts). This guide is the deeper artifact inventory and investigation workflow.
+
+::: tip v1.0.10 coverage
+v1.0.10 adds **[ChatGPT Computer History (Skysight)](#chatgpt-computer-history-skysight)** — a separate artifact class covering OS-level interaction telemetry rather than conversation history, with deletion detection, recovery of cleared summaries, and host attribution.
+:::
 
 ::: tip v1.0.8 coverage
 The v1.0.8 parser expansion adds **Grok Build**, recursive **Claude Desktop/Cowork** transcripts and audit records, versioned **Codex** SQLite recovery with WAL/SHM companions, and exact `ToolCommand`/structured `ToolInput` preservation across modern JSONL formats.
@@ -31,6 +35,7 @@ Supported today:
 | **GitHub Copilot** | Copilot CLI `$COPILOT_HOME` or `~/.copilot/`, plus VS Code / VSCodium `workspaceStorage/*/chatSessions/` and `globalStorage/emptyWindowChatSessions/` |
 | **Windsurf** | `Windsurf/User/workspaceStorage/*/state.vscdb` (VS Code–family chat keys) |
 | **Continue** | `~/.continue/sessions/*.json` |
+| **ChatGPT Computer History** | macOS only — Skysight event segments plus derived activity summaries. Not conversation history; see [the dedicated section](#chatgpt-computer-history-skysight). |
 
 ### Canonical artifact paths (what IRFlow scans)
 
@@ -206,6 +211,111 @@ Copilot CLI session events are read from `session-state/<session-id>/events.json
 
 VS Code sessions are stored as `.json` or `.jsonl`. JSONL replays `kind: 0` / `kind: 2` / `kind: 1` lines (not only the last snapshot). **Code - Insiders** and **`emptyWindowChatSessions`** (chats with no folder open) are included. `workspace.json` beside each hash folder maps to the opened workspace path for the **Workspace** column.
 
+## ChatGPT Computer History (Skysight)
+
+::: tip New in v1.0.10
+Computer History is a **separate artifact class from AI Query History**. Everything above is prompt/response conversation data. Computer History is OS-level user-activity telemetry — focus changes, clicks, keystrokes, selections, drags, and window/URL context — so it opens in its own tab with a dedicated 54-column schema.
+:::
+
+Computer History is an opt-in macOS feature of the ChatGPT desktop app. It is **off by default**, requires Memories, is not available in the EEA, Switzerland, or the UK, and is not offered with an API key or Amazon Bedrock. When enabled it records an interaction-event stream from allowed apps and websites, then periodically distils it into natural-language activity summaries.
+
+It explicitly does **not** capture screenshots, screen recordings, microphone input, system audio, or private-mode browsing. Everything it records reaches disk through the macOS Accessibility API, which is why capture depth varies so much between applications.
+
+### Canonical artifact paths
+
+| Artifact | Path | Retention |
+|----------|------|-----------|
+| **Raw event stream** | `~/Library/Group Containers/2DC432GLL2.com.openai.sky.CUAService/Library/Caches/ComputerUse/Skysight/segments/<YYYY-MM-DDTHH-MM-SSZ>/events.jsonl` | **~48 hours**, then purged |
+| **Segment metadata** | `…/segments/<bucket>/metadata.json` | with its segment |
+| **Activity summaries** | `~/.codex/memories/extensions/skysight/resources/<ts>-<4char>-(10min\|6h)-*.md` | until the user clears them |
+| **Summariser instructions** | `~/.codex/memories/extensions/skysight/instructions.md` | persistent |
+| **Memories git repository** | `~/.codex/memories/.git` | persistent |
+| **Feature state** | `~/.codex/config.toml` → `[plugins."computer-history@openai-bundled"] enabled` | persistent |
+| **App approvals** | `…/CUAService/Library/Application Support/Software/ComputerUseAppApprovals.json` | persistent |
+| **Analytics store** | `…/CUAService/Library/Application Support/Software/Analytics.db` | uploaded then cleared |
+| **Device pseudonyms** | `~/Library/Preferences/com.openai.sky.CUAService.plist`, `com.openai.chat.plist` | persistent |
+| **Account binding** | `~/Library/Preferences/com.openai.chat.RemoteFeatureFlags.<account-uuid>.plist` | persistent |
+| **Helper app / IPC** | `~/.codex/computer-use/Codex Computer Use.app`, `…/CUAService/IPC/computeruse.sock` | persistent |
+
+Segment directories are fixed **10-minute UTC buckets**. `metadata.json` carries `startedAt`, `endedAt`, `eventCount`, `suppressedEventCount`, `id`, and `eventsPath` — the absolute path recorded at capture time, which on a triage copy is the only in-artifact proof of the original home directory, user, and volume.
+
+### Event kinds observed in the live schema
+
+`session.started` · `window.changed` · `mouse.click` · `mouse.context_menu` · `mouse.drag` · `selection.changed` · `keyboard.text_input` · `keyboard.submit` · `keyboard.shortcut`
+
+Each event may carry the frontmost app (bundle id and name), window title and URL, the accessibility target (role, subrole, label, description, identifier), the typed or selected payload, drag origin **and** destination, and an `ax` block containing accessibility text.
+
+### What IRFlow extracts
+
+Rows land in a dedicated schema rather than the AI history columns. The fields that carry the evidence:
+
+| Group | Columns |
+|-------|---------|
+| **When** | `Timestamp`, `EventId`, `SegmentId`, `SegmentStart`, `SegmentEnd`, `SegmentSuppressed`, `SegmentEventCount`, `SegmentCountDelta` |
+| **What** | `EventClass`, `AppClass`, `EventKind`, `Activity` |
+| **Where** | `AppName`, `BundleId`, `WindowTitle`, `Url` |
+| **Target** | `TargetRole`, `TargetSubrole`, `TargetLabel`, `TargetDescription`, `TargetId` |
+| **Payload** | `Content`, `ContentLength`, `TypedDelta`, `KeyChord`, `MouseButton`, `ClickCount`, `SelectionOffset`, `SelectionLength`, `SelectedItems`, `SelectedItemRoles`, `SelectedItemCount` |
+| **Movement** | `DestAppName`, `DestBundleId`, `DestWindowTitle`, `DestUrl`, `DestTargetRole`, `DestTargetSubrole`, `DestTargetLabel`, `DestContent` |
+| **Capture** | `FidelityTier`, `AxMode`, `AxLength`, `ScreenText` |
+| **Narrative** | `SummarySuggestion`, `SummaryCitations` |
+| **Provenance** | `Identifier`, `SourceFile`, `RecordedSourcePath`, `LineNumber`, `User`, `Host`, `Description`, `RecordId` |
+
+`EventClass` describes **what the user did** (typing is `Input` wherever it happens). `AppClass` describes **where** it happened (`Terminal`, `Communication`, `Web`, `FileSystem`). They are deliberately separate — filter typed content on `EventClass = Input`.
+
+### Investigation value
+
+| Question | Where to look |
+|----------|---------------|
+| Did the subject enter credentials? | `TargetSubrole = AXSecureTextField`, surfaced as `Activity: Credential Entry`. macOS withholds the field value, but keystrokes are captured at hardware level, so typed characters can still land in `Content`. |
+| Which files were selected before an exfil? | `SelectedItems` / `SelectedItemRoles` — Finder row selections. These events carry no selected text, so without this column they are empty rows. |
+| Where did data move? | `mouse.drag` with `DestAppName` / `DestTargetLabel` / `DestContent` — the receiving end of a cross-app drag. |
+| What commands were run? | Terminal rows. Emulators expose the whole scrollback buffer as one `AXTextArea`, so these are screen-state snapshots, not a single command. |
+| What was searched for? | `TargetSubrole = AXSearchField`. |
+| Was recording paused or cleared? | `Configuration` and `Integrity` rows — see the caveats below. |
+| Who does this host belong to? | `Identity` rows — see the attribution table below. |
+
+### Field notes from live analysis
+
+These are the findings that change how the data should be read. Each was measured against a live capture, not inferred.
+
+**Raw events purge after ~48 hours. Collect early.** On a stale image the derived summaries are frequently the only surviving record — and they are model-generated interpretation, not primary evidence. The summariser also self-redacts, omitting content it judges sensitive, so a summary can understate what the raw events showed.
+
+**`ScreenText` is not always a screen snapshot.** `AxMode` decides how to read it: `fullTree` is a snapshot of the visible accessibility tree, while `diffFromPrevious` carries **only what changed** since the previous snapshot. In one capture 58% of ax-bearing events were diffs (median 1,108 chars) against 42% full trees (median 6,250 chars). Reading a diff as a snapshot understates what was on screen.
+
+**Capture depth is a property of the app, not the event.** `FidelityTier` is resolved once per application from its largest full-tree capture. In Tier 3 apps — Slack, Telegram, and similar hardened UIs — **outbound typed text is captured while inbound message content is not**, because keyboard events are hardware-level and app-independent while message bodies only ever appear via the accessibility tree. A Tier 3 capture is one side of a conversation and must never be presented as a chat record.
+
+**`EventId` gaps are not a suppression count.** The counter is session-global and monotonic, but it also advances for events that are never persisted at all. Measured on one 10-minute bucket: 2,374 ids spanned, 329 events retained, and a declared `suppressedEventCount` of **13**. Only the metadata count is authoritative about suppression; reporting the id gap as withheld events overstates it by two orders of magnitude.
+
+**A missing segment bucket is not evidence of deletion.** Cross-check event-id continuity across the hole. Observed live: bucket `06-30` absent while ids ran `6347 → 6348` straight through, which proves the host was idle rather than that a bucket was removed. A genuine deletion shows an id **jump**.
+
+**`metadata.eventCount` is a usable integrity anchor.** It matched the file exactly on every closed segment measured. Because the app offers "clear the last 10 minutes / hour / day / all", a clear removes records while leaving the count behind — so a shortfall between declared count and well-formed records present is a deletion lead. Count malformed lines separately: corruption and deletion both lower the record count but are different findings.
+
+**`~/.codex/memories/` is a git repository.** Summaries cleared through the UI remain recoverable from the git object store, and the deleting commit is timestamped. On a host where the 48-hour purge has already run *and* the user cleared their history, this can be the only surviving record. Recovery proves the summary existed and when it was removed — it does not upgrade the summary's own evidentiary weight.
+
+**Absence of events for an app is not evidence the app was unused.** `ComputerUseAppApprovals.json` records what the recorder was permitted to observe. Read the coverage map before drawing conclusions from silence.
+
+### Attribution — four different UUIDs
+
+A single host carries several unrelated pseudonyms. Conflating them produces wrong attribution.
+
+| Identifier | Location | What it identifies |
+|------------|----------|--------------------|
+| **Account UUID** | `com.openai.chat.RemoteFeatureFlags.<uuid>.plist` **filename** | The ChatGPT account. Cheapest attribution on the box — no parsing, no tokens, survives token expiry. **Two such files mean two accounts used the host.** |
+| **Signed-in identity** | `~/.codex/auth.json` → `id_token` claims | Email, name, `chatgpt_user_id`, plan, org and role, Auth0 `sub`, `auth_time`. **Holds live bearer and refresh tokens — treat as credential material.** |
+| **`distinct_id`** | `Analytics.db` | The recorder install. Uppercase UUID written by the native Swift service. Appears nowhere else on the host; its value is as the key to cite in a vendor request. |
+| **Statsig `stableID`** | `com.openai.sky.CUAService.plist`, `com.openai.chat.plist` | Per-app device pseudonym. Each OpenAI app generates its own, so several of these are one machine, not several. |
+| **`installation_id`** | `~/.codex/installation_id` | The Codex (Electron) install — lowercase UUID, a different namespace again. |
+
+Two further pivots worth knowing:
+
+- **The Statsig evaluation cache outlives the purge.** `com.Statsig.InternalStore.localStorageKeyV2` holds cached evaluation contexts with timestamps. One host showed contexts spanning five months against 48 hours of raw events. It proves the process was alive at those times — not that recording was enabled, and not that the user was active.
+- **Codex conversation ids are UUIDv7**, so the id itself encodes a creation timestamp and joins conversations to the event timeline with no other artifact. Threads flagged under `codex-writing-block-deleted-thread-v1:` are deleted conversations — and the model chosen and text typed into them are often still present in the event stream. Deleting the conversation does not delete the record of it.
+
+::: warning Analytics.db expectations
+The local analytics event table is uploaded and then cleared, and the freed pages are zeroed rather than merely unlinked — one measured file was 99% zero bytes with 137 of 145 pages on the freelist and nothing carvable. Expect it **empty** on anything but a fast live acquisition, and treat that absence as normal rather than as evidence the feature was unused. Its `distinct_id_alias` table is the designed anonymous-device-to-account bridge; if it is ever populated, that is direct local account attribution.
+:::
+
 ## How to use it in IRFlow
 
 ![Tools → Analysis → AI Artifacts with Collect AI Artifacts and the AI Apps submenu](/dfir-tips/Tools-Menu-AI-Artifacts.png)
@@ -345,3 +455,9 @@ Large profile scans, **Collect AI Artifacts**, and merged folder extracts share 
 - Consumer Grok: web/mobile chats are not decoded as a native application store; collect browser origin data or a vendor export.
 - Grok Build: `events.jsonl`, `signals.json`, `prompt_context.json`, and some auxiliary state remain preservation targets even though the first parser slice does not project every record into the timeline.
 - Official **Gemini macOS desktop app** is not parsed (cloud-first); only **Gemini CLI** local sessions are supported.
+- **Computer History** is macOS-only, opt-in, off by default, and unavailable in the EEA, Switzerland, and the UK. Absence of the artifact means nothing about user activity.
+- **Computer History** raw events are purged after ~48 hours; on a stale image the derived summaries may be all that remains, and they are model-generated interpretation rather than primary evidence.
+- **Computer History** summaries can self-redact — the generator omits content it judges sensitive, so a summary may understate the raw events.
+- **Computer History** capture depth varies by application. Tier 3 apps yield window metadata and outbound typed text only; received message content is not captured, so such a capture is one side of a conversation.
+- The ChatGPT **analytics event store** (`Analytics.db`) is uploaded then cleared with freed pages zeroed. Expect it empty outside a fast live acquisition, and note that deleted analytics events are **not** carvable.
+- **Computer History** summary recovery from the memories git repository requires `git` on the examination host (Xcode Command Line Tools on macOS).
