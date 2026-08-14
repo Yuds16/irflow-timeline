@@ -8,13 +8,19 @@ Release announcements and focused notes about new forensic workflows.
 
 ## Latest
 
+### [IRFlow Timeline 1.0.10 — ChatGPT Computer History](/blog/v1.0.10-computer-history)
+
+**August 14, 2026**
+
+ChatGPT Computer History becomes a new macOS artifact family: a timeline of what was typed, clicked, selected, and dragged, with credential-entry flagging, detection of cleared history, recovery of deleted activity summaries, and host attribution.
+
+## Previous Releases
+
 ### [IRFlow Timeline 1.0.9 — Large EVTX Imports Fixed](/blog/v1.0.9-large-evtx-imports)
 
 **July 27, 2026**
 
 Bounded 64 KiB EVTX chunk parsing removes the Node 2 GiB failure, supports Windows Event Logs up to the format's approximately 4 GiB ceiling, and prevents duplicate pending imports and error notifications.
-
-## Previous Releases
 
 ### [IRFlow Timeline 1.0.8 — AI Application Forensics Expanded](/blog/v1.0.8-ai-application-forensics)
 

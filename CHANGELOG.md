@@ -7,86 +7,36 @@ released version as the GitHub release notes — keep version headers in the for
 
 ## v1.0.10
 
-IRFlow Timeline 1.0.10 adds ChatGPT Computer History as a first-class forensic artifact and is a
-crash-resilience update for long-running investigations.
+IRFlow Timeline 1.0.10 adds **ChatGPT Computer History** as a new forensic artifact family, and hardens the app for long-running investigations.
 
-### ChatGPT Computer History (new artifact family)
+### ChatGPT Computer History (new)
 
-- New parser for the opt-in macOS ChatGPT "Computer History" (Skysight) feature: the raw
-  interaction-event stream (`events.jsonl` segment buckets, retained ~48h) and the derived
-  activity summaries under `~/.codex/memories/extensions/skysight/resources/`, which persist until
-  the user clears them.
-- Dedicated 54-column schema rather than the conversation-history columns, covering event class,
-  app/window/URL context, accessibility target role and subrole, typed content, cross-app drag
-  origin and destination, capture fidelity, segment provenance, and attribution.
-- `AXSecureTextField` targets are reported as credential entry, with the caveat that macOS withholds
-  the field value while the keystrokes are still captured at hardware level.
-- Finder and menu item selections (`selection.selectedItems`) are captured; these events carry no
-  selected text and previously produced rows with an empty payload.
-- Per-keystroke input runs are coalesced into the completed field value, while terminal scrollback
-  snapshots are never coalesced — including for terminal emulators absent from the app table,
-  which are now recognised structurally.
-- Integrity checks: closed segments are reconciled against `metadata.eventCount`, and a shortfall is
-  reported as a derived deletion lead consistent with the "clear last 10 minutes / hour / day"
-  control. Malformed lines are counted separately from missing records.
-- Activity summaries the user cleared are recovered read-only from the `~/.codex/memories` git
-  object store, with the deleting commit's timestamp.
-- Attribution rows collect the ChatGPT account id (read from per-account preference filenames), the
-  signed-in identity claims, the recorder and per-app device pseudonyms, and the Statsig evaluation
-  cache, which extends the presence timeline well beyond the 48-hour event retention. Every
-  identifier states its own attribution strength, and no token material is ever stored or exported.
-- Codex conversation ids are decoded from UUIDv7 to timestamps and joined to the event timeline;
-  conversations marked deleted are flagged, since the model chosen and the text typed into them are
-  often still present in the event stream.
-- Feature-state rows record what the recorder was permitted to observe, so an absence of events for
-  an app is not misread as inactivity.
+- **New artifact family** — collect and analyze the opt-in macOS ChatGPT "Computer History" feature: the raw interaction-event stream (kept for roughly 48 hours) and the activity summaries that persist until the user clears them.
+- **A timeline of real user activity** — see what was typed, clicked, selected, and dragged between applications, along with the window and website in view at the time. Not just that an application ran.
+- **Credential entry is flagged** — typing into a password field is identified as credential entry, with a clear note that macOS hides the value while the keystrokes themselves are still recorded.
+- **File and menu selections captured** — Finder file selections and menu commands now appear on the timeline; previously these arrived as empty rows.
+- **Cleared history is detected** — each recording segment is reconciled against its own metadata, so records removed by the app's "clear last 10 minutes / hour / day" control are surfaced as a deletion lead rather than passing unnoticed.
+- **Deleted summaries recovered** — activity summaries the user cleared are recovered read-only, together with when they were removed.
+- **Deleted AI conversations flagged** — conversations marked deleted are identified, and the model chosen and text typed into them are often still recoverable from the activity timeline.
+- **Host attribution** — identify the ChatGPT account and signed-in user behind a capture. Every identifier is labelled with how strongly it identifies an account rather than just a device, and no authentication tokens are ever stored or exported.
+- **Analyst caveats travel with the evidence** — capture depth varies by application, and in hardened messaging apps only outbound typing is recorded. The import notice states these limits so they reach the report.
 
-### Computer History accuracy fixes
+### Stability and Crash Resilience
 
-- `EventClass` now describes what the user did rather than which app they were in. The app family
-  moved to a separate `AppClass` column; previously it reclassified the large majority of input
-  events away from `Input`, so filtering for typed content missed keystrokes in terminal and
-  messaging apps.
-- `ScreenText` is qualified by `AxMode`: `diffFromPrevious` rows carry only what changed since the
-  previous snapshot and are labelled as such instead of reading as a full screen capture.
-- Segment gaps are cross-checked against event-id continuity. A gap with an unbroken id chain is
-  reported as an idle host rather than as a possible deletion.
-- Event-id gaps are no longer described as suppressed events; only the metadata suppressed count is
-  reported as authoritative.
-- `FidelityTier` is resolved once per application from its largest full-tree capture instead of
-  per row, so an application no longer reports different capture depths on adjacent rows.
+- Worker threads are retired properly once finished, so they no longer accumulate during long sessions.
+- Autosaves are written safely and validated on restore, with the previous snapshot kept as a fallback.
+- Closing the macOS window now hides the workspace instead of tearing it down; Dock activation restores it with tabs and background work intact.
+- Unexpected crashes trigger a clean shutdown of workers and databases followed by one controlled restart.
+- A memory-aware worker budget now spans imports, indexing, analyzers, Sigma scans, and AI extraction.
+- Cancelling a Hayabusa EVTX scan reliably stops the process and cleans up its temporary output.
 
-### Worker Lifecycle Reliability
+### Additional Improvements
 
-- One-shot query, import, index, analyzer, Sigma, and AI-history workers now close their parent ports after delivering a terminal result and are force-retired if they fail to exit promptly.
-- Live workers remain visible to concurrency accounting until their actual exit, preventing completed worker threads and V8 isolates from accumulating during long sessions.
-- Autosave bookmark snapshots use the main SQLite connection instead of creating a worker per tab every 30 seconds.
-- Worker jobs now settle exactly once and fail explicitly when a worker exits without a terminal result, cannot start, or exits abnormally.
+- Upgraded to Electron 43 with refreshed native dependencies.
+- Minimum supported macOS is now 12 (Monterey).
+- Building and testing now require Node.js 22.14 or newer.
 
-### Crash-Safe Session Recovery
-
-- Autosaves are single-flight and serialized so slow snapshots cannot overlap.
-- Session files are written through a synced temporary file and atomic rename, with the previous valid autosave retained as a recovery backup.
-- Recovery validates session structure and falls back to the backup when the primary snapshot is missing or corrupt.
-
-### Application and Resource Resilience
-
-- Closing the macOS window now hides the live workspace instead of destroying the renderer while workers and SQLite tabs remain active; Dock activation restores that same window.
-- Uncaught main-process errors, unhandled rejections, and unexpected renderer exits now trigger synchronous worker/database cleanup, diagnostic flushing, and one controlled relaunch. A 30-second guard suppresses restart loops.
-- Electron's local crash reporter is enabled without uploading crash data, and child-process exits are recorded in the debug log.
-- A memory-aware global worker budget now spans imports, index/FTS builds, analyzers, Sigma scans, AI-history extraction, and worker-backed queries. Heavy work has a separate ceiling, and live/queued counts are exposed through job diagnostics.
-
-### Hayabusa Process Reliability
-
-- Cancelling an EVTX scan now waits for the Hayabusa process to close, escalates from `SIGTERM` to `SIGKILL` when necessary, and removes temporary output only after the process has stopped writing.
-- Scan registration is cleared on every success, cancellation, and error path, including cancel-before-spawn races.
-- Captured Hayabusa diagnostics are capped at 256 KiB, and progress-parser failures are contained instead of reaching the Electron main process as uncaught exceptions.
-
-### Supported Runtime
-
-- Upgraded Electron from 33 to 43, `better-sqlite3` from 11 to 13, Electron Builder to 26, Electron Rebuild to 4, and Electron Updater to 6.8.
-- Development and release automation now require **Node.js 22.14 or newer**. The `better-sqlite3` 13 prebuilt binding segfaults when a database is opened under Node 22.12 and 22.13, so those two releases are not usable for building or testing even though they satisfy the package's own `>=22` floor. The EVTX message provider is pinned to the same SQLite 13 native addon so every SQLite call uses the Electron 43 ABI.
-- The packaged minimum is now explicit at macOS 12 (Monterey), matching Electron 43's supported platform floor.
+**Full artifact paths, schema, and investigation guidance:** [AI Query History and AI App Artifacts](https://r3nzsec.github.io/irflow-timeline/dfir-tips/ai-query-history)
 
 ## v1.0.9
 
