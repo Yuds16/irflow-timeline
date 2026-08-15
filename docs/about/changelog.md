@@ -4,13 +4,13 @@ description: IRFlow Timeline changelog — version history, new features, perfor
 
 # Changelog
 
-## v1.0.10 — August 11, 2026
+## v1.0.10 — August 14, 2026
 
 ### ChatGPT Computer History
 
 - Added ChatGPT "Computer History" (Skysight) as a new macOS artifact family: the raw interaction-event stream retained for about 48 hours, plus the derived activity summaries that persist until cleared
 - Dedicated 54-column schema for user-activity telemetry — app, window and URL context, accessibility target role and subrole, typed content, cross-app drag origin and destination, capture fidelity, and segment provenance
-- Password-field entry is identified and labelled, with the caveat that the field value is withheld by macOS while the keystrokes are still recorded
+- Password-field entry is identified and labelled as a timing anchor — macOS Secure Input Mode withholds the field value *and* suppresses the keystrokes, so a credential row evidences that a password was entered, not what it was
 - Finder file selections and menu commands are captured instead of landing as empty rows
 - Typed input is collapsed into completed prompts, while terminal scrollback is preserved as a command timeline
 - Segments are reconciled against their own metadata so that records removed after the fact — the effect of the "clear last 10 minutes / hour / day" control — are surfaced as a deletion lead

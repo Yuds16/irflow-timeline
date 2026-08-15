@@ -228,6 +228,21 @@ Supported AI app families include:
 
 Use this workflow when AI-assisted activity may be relevant evidence: pasted secrets, suspicious prompts, generated commands, workspace-specific development activity, or AI tool output tied to an incident.
 
+## ChatGPT Computer History (Skysight)
+
+**Inputs:** a `segments/` directory of `<YYYY-MM-DDTHH-MM-SSZ>/events.jsonl` + `metadata.json` buckets, and/or a `skysight/resources/` directory of `*-(10min|6h)-*.md` activity summaries. A `.codex` folder, a CUAService group container, or a triage root containing either will also resolve.
+
+Imported through **Tools → Analysis → AI Artifacts → AI Apps → ChatGPT Computer History**. This is **not** AI conversation history — it is macOS user-activity telemetry (app focus, clicks, keystrokes, shortcuts, selections, drags, window and URL context), so it opens in its own tab with a dedicated 54-column schema rather than the AI Query History columns.
+
+| Path | Retention |
+|------|-----------|
+| `~/Library/Group Containers/2DC432GLL2.com.openai.sky.CUAService/Library/Caches/ComputerUse/Skysight/segments/` | ~48 hours, then purged |
+| `~/.codex/memories/extensions/skysight/resources/` | Until the user clears them (recoverable from the memories git history afterwards) |
+
+macOS only, opt-in, off by default, and unavailable in the EEA, Switzerland, and the UK — so absence of the artifact says nothing about user activity. Collect the raw segments early; on a stale image the derived summaries may be all that survives, and they are model-generated interpretation rather than primary evidence.
+
+Full artifact inventory, caveats, and investigation workflow: [ChatGPT Computer History](/dfir-tips/ai-query-history#chatgpt-computer-history-skysight).
+
 ## Format Detection
 
 IRFlow Timeline determines the file format by extension and content detection:
@@ -241,6 +256,7 @@ IRFlow Timeline determines the file format by extension and content detection:
 .mft / $MFT (FILE0 magic)  →  Raw MFT Binary Parser
 $J / $UsnJrnl (by name)    →  Raw USN Journal Parser
 AI app folders / stores      →  AI Query History parser
+Skysight segments / summaries →  Computer History parser (own tab, 54-column schema)
 ```
 
 Files without a recognized extension are auto-detected by name patterns and magic bytes, so raw `$MFT` and `$J` files extracted by forensic tools work without renaming.

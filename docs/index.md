@@ -20,7 +20,7 @@ features:
     details: SQLite engine with sub-100ms queries on 10M+ rows. Streams 30GB+ files with zero-copy CSV parsing, memory-capped background indexing, and single-query analytics — no loading into memory.
   - icon: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#E85D2A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v4"/><path d="M12 17v4"/><path d="M3 12h4"/><path d="M17 12h4"/><rect x="7" y="7" width="10" height="10" rx="2" fill="rgba(232,93,42,0.18)"/><path d="M10 11h4M10 14h2"/></svg>'
     title: AI Artifacts
-    details: Scan local AI history from ChatGPT Desktop, Claude Code, Codex, Grok Build, Cursor, Copilot, Gemini CLI, Windsurf, and Continue. Preserve prompts, responses, tool calls, workspaces, and secret exposure evidence.
+    details: Scan local AI history from ChatGPT Desktop, Claude Code, Codex, Grok Build, Cursor, Copilot, Gemini CLI, Windsurf, and Continue — plus ChatGPT Computer History interaction telemetry. Preserve prompts, responses, tool calls, workspaces, and secret exposure evidence.
   - icon: '<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#E85D2A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/><line x1="8" y1="11" x2="14" y2="11"/><line x1="11" y1="8" x2="11" y2="14"/></svg>'
     title: 5 Search Modes
     details: Mixed, FTS, LIKE, Fuzzy, and Regex. Full-text search, substring matching, typo-tolerant fuzzy, and pattern matching across millions of rows.
@@ -47,13 +47,14 @@ features:
     details: Bookmarks, color-coded tags, conditional formatting with KAPE-aware presets, and full session save/restore.
 ---
 
-## What's New · v1.0.9
+## What's New · v1.0.10
 
-- **Multi-gigabyte EVTX imports fixed** — Raw Windows Event Logs no longer hit Node's 2 GiB whole-file Buffer ceiling.
-- **Bounded native EVTX parsing** — IRFlow reads one 64 KiB EVTX chunk at a time, supporting logs up to the format's approximately 4 GiB ceiling with stable parser memory.
-- **Cleaner import recovery** — Duplicate pending imports are suppressed and identical failures collapse into one retryable notification.
+- **ChatGPT Computer History is a new artifact family** — The opt-in macOS interaction-event stream and its derived activity summaries, parsed into a dedicated 54-column schema instead of the conversation columns.
+- **Deletion detection and recovery** — Segments are reconciled against their own metadata, and activity summaries cleared through the app are recovered read-only from the Codex memories git history with the time they were removed.
+- **Host attribution** — Account, signed-in identity, and per-app device pseudonyms are collected separately and labelled with how strongly each identifies an account rather than a device. No token material is stored or exported.
+- **Crash resilience** — Worker threads retire cleanly, autosaves are written atomically and validated on restore, and Electron is upgraded to 43 (macOS 12 floor).
 
-[Read the v1.0.9 announcement →](/blog/v1.0.9-large-evtx-imports) · [AI application forensics in v1.0.8 →](/blog/v1.0.8-ai-application-forensics) · [Full changelog →](/about/changelog)
+[Read the v1.0.10 announcement →](/blog/v1.0.10-computer-history) · [Large EVTX reliability in v1.0.9 →](/blog/v1.0.9-large-evtx-imports) · [Full changelog →](/about/changelog)
 
 ## What is IRFlow Timeline?
 
@@ -81,6 +82,7 @@ Excel row limits, Windows VM overhead, or missing AI evidence — IRFlow is the 
 | **Raw $MFT** | `.mft` | NTFS Master File Table — direct import for NTFS analysis tools |
 | **Raw $J** | `.$J`, `.usn` | NTFS USN Journal (change journal) |
 | **AI app artifacts** | folders / JSONL / SQLite / LevelDB | Scan local AI history from supported desktop, CLI, and editor assistants |
+| **ChatGPT Computer History** | Skysight `events.jsonl` segments + summary `.md` | macOS interaction telemetry — focus, clicks, keystrokes, selections, drags (own tab, 54-column schema) |
 
 ### Built for Scale
 

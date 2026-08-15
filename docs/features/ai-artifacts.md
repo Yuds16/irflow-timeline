@@ -8,6 +8,10 @@ AI Artifacts turns local AI assistant history into timeline evidence. It helps i
 
 The feature creates an **AI Query History** timeline tab from local desktop, CLI, and editor-assistant stores. Each row keeps the evidence context analysts need: timestamp, role, AI app, invoked action, session, workspace, source file, summary, full text, and endpoint attribution when available.
 
+::: tip New in v1.0.10
+**ChatGPT Computer History (Skysight) is a new artifact family.** It is OS-level interaction telemetry rather than conversation history, so it opens in its own tab with a dedicated 54-column schema — plus deletion detection, recovery of cleared summaries, and host attribution. See [ChatGPT Computer History](#chatgpt-computer-history) below.
+:::
+
 ::: tip Expanded in v1.0.8
 **Grok Build is now a native evidence source.** IRFlow also adds recursive Claude Desktop/Cowork transcript and audit parsing, version-aware Codex SQLite discovery with WAL/SHM acquisition, and bounded JSONL/tool evidence that preserves exact shell commands without allowing one oversized record to exhaust Electron memory.
 :::
@@ -15,7 +19,7 @@ The feature creates an **AI Query History** timeline tab from local desktop, CLI
 ## Opening AI Artifacts
 
 - **Menu:** **Tools → Analysis → AI Artifacts → Collect AI Artifacts**
-- **Per-app import:** **Tools → Analysis → AI Artifacts → AI Apps → …** (Claude Code, Codex, Grok Build, ChatGPT Desktop, Gemini CLI, Cursor, Copilot, Windsurf, Continue)
+- **Per-app import:** **Tools → Analysis → AI Artifacts → AI Apps → …** (Claude Code, Codex, Grok Build, ChatGPT Desktop, ChatGPT Computer History, Gemini CLI, Cursor, Copilot, Windsurf, Continue)
 - **Home launcher:** **Collect AI Artifacts** tile on the capability launcher
 - **Single artifact:** **File → Open…** on a supported AI app folder or file
 - **Output:** one **AI Query History** timeline tab
@@ -114,7 +118,9 @@ Computer History is a separate, opt-in macOS feature of the ChatGPT desktop app.
 conversation history: it records an interaction-event stream from the host — app focus changes,
 clicks, keystrokes, shortcuts, selections, drags, and the window and URL context macOS exposes
 through its accessibility system — and periodically distils it into natural-language activity
-summaries. It is off by default and is not available in the EEA, Switzerland, or the UK.
+summaries. It is off by default, limited to Pro/Business/Enterprise plans, and is not available in
+the EEA, Switzerland, or the UK. It replaced the screenshot-based Chronicle research preview in
+August 2026.
 
 Because these are OS-level activity events rather than prompt/response turns, they open in their own
 tab with a dedicated column set rather than the AI Query History columns.
@@ -123,19 +129,26 @@ tab with a dedicated column set rather than the AI Query History columns.
 |----------|----------|-----------|
 | Raw event stream | `~/Library/Group Containers/2DC432GLL2.com.openai.sky.CUAService/Library/Caches/ComputerUse/Skysight/segments/<bucket>/{events.jsonl,metadata.json}` | ~48 hours, then purged |
 | Activity summaries | `~/.codex/memories/extensions/skysight/resources/<ts>-<id>-(10min\|6h)-*.md` | Until the user clears them |
-| Feature state | `~/.codex/config.toml`, `ComputerUseAppApprovals.json` | Persistent |
+| Feature state | `~/.codex/config.toml` → `[plugins."computer-history@openai-bundled"] enabled` | Persistent |
+
+Both stores are plain text and unencrypted — readable by any process running as the same macOS
+user, which cuts both ways for acquisition and for risk.
 
 What the parser adds beyond the raw events:
 
 - **Credential entry.** Targets carrying the `AXSecureTextField` subrole are labelled as credential
-  entry. macOS withholds the field's value, but keystrokes are captured at hardware level, so typed
-  characters can still reach the stream.
+  entry. This time-anchors *that a password was typed*, in which field and which app — it does not
+  recover the password. macOS Secure Input Mode blocks the recorder's event tap while a password
+  field holds focus, so the keystrokes consume event ids without ever being written to disk.
 - **File and menu selection.** Finder row selections and menu commands are captured; these events
   carry no selected text and would otherwise appear as empty rows.
 - **Capture fidelity.** Everything flows through the macOS Accessibility API, so depth varies by
-  app. `FidelityTier` is resolved once per application. In Tier 3 messaging apps, outbound typed
-  text is captured while inbound message content is not — such a capture is one side of a
-  conversation and must not be presented as a conversation record.
+  app. `FidelityTier` is resolved once per application, from the largest full accessibility tree
+  that application produced. In genuine Tier 3 apps, outbound typed text is captured while inbound
+  message content is not — such a capture is one side of a conversation and must not be presented
+  as a conversation record. The tier tracks the UI toolkit, not the app category: Electron and
+  Chromium apps expose full message text, hardened native UIs expose little. Check `AxLength` for
+  the bundle in your own capture rather than assuming a tier from the app's name.
 - **Screen text is qualified.** `ScreenText` is only a screen snapshot when `AxMode` is `fullTree`;
   most events are `diffFromPrevious` and carry only what changed.
 - **Deletion detection.** Closed segments are reconciled against their own metadata event count. A
@@ -144,13 +157,18 @@ What the parser adds beyond the raw events:
   memories git history, with the time they were removed.
 - **Gap interpretation.** A missing segment bucket is only flagged when the event-id chain is
   actually broken across it; an unbroken chain means the host was idle, not that data was deleted.
+  Event ids reset to 1 whenever the recorder restarts, so continuity is only meaningful *within* a
+  run — across a restart boundary the id chain cannot assess deletion either way.
 - **Attribution.** Identity rows collect the ChatGPT account, signed-in identity, and per-app device
   identifiers, each labelled with how strongly it identifies an account rather than a device. Codex
   conversations are dated from their identifiers and joined to the timeline, with deleted
   conversations flagged — the prompt typed into a deleted conversation is often still recorded in
   the event stream. No token material is stored or exported.
-- **Coverage.** Feature-state rows record which apps the recorder was permitted to observe, so an
-  absence of events for an app is not misread as inactivity.
+- **Coverage.** Feature-state rows record whether the feature was enabled and what configuration
+  survives on disk, so an absence of events for an app is not misread as inactivity. The recording
+  allow/exclude scope itself is an account-side setting and is not resolvable from local artifacts —
+  note it as unknown rather than inferring it from `ComputerUseAppApprovals.json`, which belongs to
+  the separate Computer Use agent feature.
 
 ## Performance and Safeguards
 

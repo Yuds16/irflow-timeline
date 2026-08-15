@@ -217,9 +217,11 @@ VS Code sessions are stored as `.json` or `.jsonl`. JSONL replays `kind: 0` / `k
 Computer History is a **separate artifact class from AI Query History**. Everything above is prompt/response conversation data. Computer History is OS-level user-activity telemetry — focus changes, clicks, keystrokes, selections, drags, and window/URL context — so it opens in its own tab with a dedicated 54-column schema.
 :::
 
-Computer History is an opt-in macOS feature of the ChatGPT desktop app. It is **off by default**, requires Memories, is not available in the EEA, Switzerland, or the UK, and is not offered with an API key or Amazon Bedrock. When enabled it records an interaction-event stream from allowed apps and websites, then periodically distils it into natural-language activity summaries.
+Computer History is an opt-in macOS feature of the ChatGPT desktop app, released 13 August 2026 as the replacement for the screenshot-based Chronicle research preview. It is **off by default**, requires Memories, is limited to Pro/Business/Enterprise plans, and is not available in the EEA, Switzerland, or the UK. When enabled it records an interaction-event stream from allowed apps and websites, then periodically distils it into natural-language activity summaries.
 
 It explicitly does **not** capture screenshots, screen recordings, microphone input, system audio, or private-mode browsing. Everything it records reaches disk through the macOS Accessibility API, which is why capture depth varies so much between applications.
+
+Two properties matter for acquisition. Raw events are uploaded to OpenAI for summarisation, so the local stream is not the only copy — a vendor request is a parallel avenue. And the local files are **plain text and unencrypted**: OpenAI's own documentation notes that other programs running as the same macOS user can read them, which makes them readable by any user-context malware and, equally, readable by a live-response script without elevation.
 
 ### Canonical artifact paths
 
@@ -231,19 +233,23 @@ It explicitly does **not** capture screenshots, screen recordings, microphone in
 | **Summariser instructions** | `~/.codex/memories/extensions/skysight/instructions.md` | persistent |
 | **Memories git repository** | `~/.codex/memories/.git` | persistent |
 | **Feature state** | `~/.codex/config.toml` → `[plugins."computer-history@openai-bundled"] enabled` | persistent |
-| **App approvals** | `…/CUAService/Library/Application Support/Software/ComputerUseAppApprovals.json` | persistent |
+| **Computer Use agent approvals** | `…/CUAService/Library/Application Support/Software/ComputerUseAppApprovals.json` — see the caveat below; **not** the recording scope | persistent |
 | **Analytics store** | `…/CUAService/Library/Application Support/Software/Analytics.db` | uploaded then cleared |
 | **Device pseudonyms** | `~/Library/Preferences/com.openai.sky.CUAService.plist`, `com.openai.chat.plist` | persistent |
 | **Account binding** | `~/Library/Preferences/com.openai.chat.RemoteFeatureFlags.<account-uuid>.plist` | persistent |
 | **Helper app / IPC** | `~/.codex/computer-use/Codex Computer Use.app`, `…/CUAService/IPC/computeruse.sock` | persistent |
 
-Segment directories are fixed **10-minute UTC buckets**. `metadata.json` carries `startedAt`, `endedAt`, `eventCount`, `suppressedEventCount`, `id`, and `eventsPath` — the absolute path recorded at capture time, which on a triage copy is the only in-artifact proof of the original home directory, user, and volume.
+Segment directories are fixed **10-minute UTC buckets**. A *closed* `metadata.json` carries `startedAt`, `endedAt`, `eventCount`, `suppressedEventCount`, `id`, and `eventsPath` — the absolute path recorded at capture time, which on a triage copy is the only in-artifact proof of the original home directory, user, and volume.
+
+The **currently open** bucket is different: it carries only `id`, `startedAt`, and `eventsPath`. `endedAt`, `eventCount`, and `suppressedEventCount` are written when the bucket closes. On a live acquisition the newest one or two buckets will therefore look "incomplete" — that is normal, not tampering, and they must be excluded from count reconciliation rather than scored as a shortfall.
 
 ### Event kinds observed in the live schema
 
-`session.started` · `window.changed` · `mouse.click` · `mouse.context_menu` · `mouse.drag` · `selection.changed` · `keyboard.text_input` · `keyboard.submit` · `keyboard.shortcut`
+`session.started` · `session.ended` · `window.changed` · `mouse.click` · `mouse.context_menu` · `mouse.drag` · `selection.changed` · `keyboard.text_input` · `keyboard.submit` · `keyboard.shortcut`
 
 Each event may carry the frontmost app (bundle id and name), window title and URL, the accessibility target (role, subrole, label, description, identifier), the typed or selected payload, drag origin **and** destination, and an `ax` block containing accessibility text.
+
+`app.secureInput` is a further per-event flag: `true` means macOS **Secure Input Mode** was engaged at that moment (a password field held focus anywhere on the system). It is a stronger and more common credential signal than the `AXSecureTextField` target subrole — see the credential note below.
 
 ### What IRFlow extracts
 
@@ -267,7 +273,7 @@ Rows land in a dedicated schema rather than the AI history columns. The fields t
 
 | Question | Where to look |
 |----------|---------------|
-| Did the subject enter credentials? | `TargetSubrole = AXSecureTextField`, surfaced as `Activity: Credential Entry`. macOS withholds the field value, but keystrokes are captured at hardware level, so typed characters can still land in `Content`. |
+| Did the subject enter credentials? | `TargetSubrole = AXSecureTextField`, surfaced as `Activity: Credential Entry` / `Credential Submit`. This proves a password field was focused — it does **not** recover the password. See the credential note below. |
 | Which files were selected before an exfil? | `SelectedItems` / `SelectedItemRoles` — Finder row selections. These events carry no selected text, so without this column they are empty rows. |
 | Where did data move? | `mouse.drag` with `DestAppName` / `DestTargetLabel` / `DestContent` — the receiving end of a cross-app drag. |
 | What commands were run? | Terminal rows. Emulators expose the whole scrollback buffer as one `AXTextArea`, so these are screen-state snapshots, not a single command. |
@@ -281,19 +287,33 @@ These are the findings that change how the data should be read. Each was measure
 
 **Raw events purge after ~48 hours. Collect early.** On a stale image the derived summaries are frequently the only surviving record — and they are model-generated interpretation, not primary evidence. The summariser also self-redacts, omitting content it judges sensitive, so a summary can understate what the raw events showed.
 
-**`ScreenText` is not always a screen snapshot.** `AxMode` decides how to read it: `fullTree` is a snapshot of the visible accessibility tree, while `diffFromPrevious` carries **only what changed** since the previous snapshot. In one capture 58% of ax-bearing events were diffs (median 1,108 chars) against 42% full trees (median 6,250 chars). Reading a diff as a snapshot understates what was on screen.
+**Secure Input suppresses the keystrokes — a credential row is not a recovered password.** When a password field takes focus, macOS engages Secure Input Mode, which blocks the event tap the recorder relies on. The result on disk is that the keystrokes are *consumed but never written*: the event-id counter advances across them while no records appear. Measured across a full live capture of 5,370 events, `keyboard.text_input` records with captured text under Secure Input: **zero**. Two illustrations from that capture — a `loginwindow` password prompt produced a single `keyboard.submit` against an `AXSecureTextField` with `text: null` and ids `2593`/`2594` missing; a browser login produced the typed *username* (`keyboard.text_input`, id 12626) followed by a `tab` into the password field, after which ids 12628 and 12630 were consumed with nothing persisted.
 
-**Capture depth is a property of the app, not the event.** `FidelityTier` is resolved once per application from its largest full-tree capture. In Tier 3 apps — Slack, Telegram, and similar hardened UIs — **outbound typed text is captured while inbound message content is not**, because keyboard events are hardware-level and app-independent while message bodies only ever appear via the accessibility tree. A Tier 3 capture is one side of a conversation and must never be presented as a chat record.
+Read a credential row as **"a password was entered here, at this time, into this field, in this app"** — an excellent pivot, and enough to time-anchor an authentication event against other logs. It is not the credential. Reporting it as recoverable plaintext is wrong and will not survive review.
 
-**`EventId` gaps are not a suppression count.** The counter is session-global and monotonic, but it also advances for events that are never persisted at all. Measured on one 10-minute bucket: 2,374 ids spanned, 329 events retained, and a declared `suppressedEventCount` of **13**. Only the metadata count is authoritative about suppression; reporting the id gap as withheld events overstates it by two orders of magnitude.
+The corollary is the useful part: `app.secureInput: true` fires on *any* system-wide password prompt, including ones with no `AXSecureTextField` target — in the same capture it marked a third-party app-lock prompt (`com.cisdem.appencrypt`, window title "Please Enter your Password") that carried no secure-field subrole at all. Filter on both signals, not just the subrole.
 
-**A missing segment bucket is not evidence of deletion.** Cross-check event-id continuity across the hole. Observed live: bucket `06-30` absent while ids ran `6347 → 6348` straight through, which proves the host was idle rather than that a bucket was removed. A genuine deletion shows an id **jump**.
+One value *does* surface, and it is worth knowing exactly what it is. When a secure field is selected, `selection.selectedText` carries the field's **masked rendering** — a run of U+2022 bullets. Verified byte-level on the capture above: two such rows, one of 14 bullets and one of 5, with no other codepoint present. That is not the password, and a `Content` cell full of bullets must never be quoted as though it were. It does disclose the **length**, which is a legitimate corroborating detail — a 14-character value is consistent with a generated passphrase and not with a 6-digit PIN — so record it as a length observation and nothing more.
+
+**`ScreenText` is not always a screen snapshot.** `AxMode` decides how to read it: `fullTree` is a snapshot of the visible accessibility tree, while `diffFromPrevious` carries **only what changed** since the previous snapshot. Diffs dominate — in one capture 66% of ax-bearing events were diffs (median 1,625 chars) against 34% full trees (median 7,032 chars). The exact split varies by host and workload; what does not vary is that reading a diff as a snapshot understates what was on screen.
+
+**Capture depth is a property of the app, not the event — and it must be measured, not assumed.** `FidelityTier` is resolved once per application from its largest full-tree capture. In genuine Tier 3 apps, **outbound typed text is captured while inbound message content is not**, because keyboard events are hardware-level and app-independent while message bodies only ever appear via the accessibility tree. Such a capture is one side of a conversation and must never be presented as a chat record.
+
+Do not assume which apps those are. "Messaging app" is not the predictor — *UI toolkit* is. Measured on one live capture: **Telegram** exposed a maximum full-tree of **144 characters** (window and menu labels only — genuinely Tier 3), while **Slack**, an Electron app, exposed **53,590 characters** including channel message text, thread markers, and per-message timestamps. Two apps in the same product category, three orders of magnitude apart. Verify the tier against `AxLength` for that bundle in your own capture before writing either the "we have the conversation" or the "we only have one side" sentence into a report.
+
+**`EventId` gaps are not a suppression count.** The counter is monotonic *within a recorder session*, but it also advances for events that are never persisted at all. Measured on one 10-minute bucket: 2,374 ids spanned, 329 events retained, and a declared `suppressedEventCount` of **13**. Only the metadata count is authoritative about suppression; reporting the id gap as withheld events overstates it by two orders of magnitude.
+
+**`EventId` resets to 1 every time the recorder restarts.** This is the trap in the previous check. The counter is *not* capture-global: each `session.started` event carries `id: 1`, and the events themselves contain no session identifier, so the only way to segment runs is the reset itself. One 35-hour capture contained four such runs, the counter reaching 17,169 before dropping back to 1. Any continuity test that simply compares the last id before a hole with the first id after it produces nonsense across a restart — "ids run continuously, 17169 → 1" — and, worse, reports a *clearance* it never earned. Split the capture at each `session.started` first, then test continuity **within** each run only. Across a restart boundary, event-id continuity cannot assess deletion at all; say so rather than clearing it.
+
+**A missing segment bucket is not evidence of deletion.** Within a single recorder run, cross-check event-id continuity across the hole. Observed live: bucket `06-30` absent while ids ran `6347 → 6348` straight through, which proves the host was idle rather than that a bucket was removed. A genuine deletion shows an id **jump** — a positive discontinuity inside one run, never a reset to 1.
 
 **`metadata.eventCount` is a usable integrity anchor.** It matched the file exactly on every closed segment measured. Because the app offers "clear the last 10 minutes / hour / day / all", a clear removes records while leaving the count behind — so a shortfall between declared count and well-formed records present is a deletion lead. Count malformed lines separately: corruption and deletion both lower the record count but are different findings.
 
 **`~/.codex/memories/` is a git repository.** Summaries cleared through the UI remain recoverable from the git object store, and the deleting commit is timestamped. On a host where the 48-hour purge has already run *and* the user cleared their history, this can be the only surviving record. Recovery proves the summary existed and when it was removed — it does not upgrade the summary's own evidentiary weight.
 
-**Absence of events for an app is not evidence the app was unused.** `ComputerUseAppApprovals.json` records what the recorder was permitted to observe. Read the coverage map before drawing conclusions from silence.
+**Absence of events for an app is not evidence the app was unused — but do not read the coverage map out of `ComputerUseAppApprovals.json`.** That file belongs to **Computer Use**, the separate feature that lets ChatGPT *drive* the Mac, and it lists the apps the agent is approved to control. It is not the Skysight recording scope, and treating it as one inverts the finding. On one live host it contained a single bundle (`com.microsoft.edgemac`) and carried an mtime of **4 May 2026** — three months before Computer History shipped — while the event stream from the same host recorded **38 distinct bundle identifiers**, Edge among the least active of them.
+
+Computer History does have per-app and per-website include/exclude controls, and collection can be paused from the menu bar. Those settings were **not resolvable from local artifacts** in the captures examined; treat the recording scope as unknown unless you can evidence it from the account side. Scope silence honestly: "no events for app X" means the recorder did not persist events for X, which could be exclusion, a pause, an idle period, or a recorder restart.
 
 ### Attribution — four different UUIDs
 
@@ -458,6 +478,8 @@ Large profile scans, **Collect AI Artifacts**, and merged folder extracts share 
 - **Computer History** is macOS-only, opt-in, off by default, and unavailable in the EEA, Switzerland, and the UK. Absence of the artifact means nothing about user activity.
 - **Computer History** raw events are purged after ~48 hours; on a stale image the derived summaries may be all that remains, and they are model-generated interpretation rather than primary evidence.
 - **Computer History** summaries can self-redact — the generator omits content it judges sensitive, so a summary may understate the raw events.
-- **Computer History** capture depth varies by application. Tier 3 apps yield window metadata and outbound typed text only; received message content is not captured, so such a capture is one side of a conversation.
+- **Computer History** capture depth varies by application, and the tier follows the UI toolkit rather than the app category — Electron and Chromium apps (Slack included) expose full message text, while hardened native UIs (Telegram) yield window metadata and outbound typed text only. Verify `AxLength` per bundle in your own capture before characterising what a messaging app did or did not record.
+- **Computer History** credential rows prove a password field was focused; they do not recover the password. macOS Secure Input Mode blocks the recorder's event tap, so the keystrokes consume event ids without being written to disk.
+- **Computer History** `EventId` resets to 1 on every recorder restart, so it is a within-run join key only. Across a restart boundary, id continuity cannot assess whether events were deleted.
 - The ChatGPT **analytics event store** (`Analytics.db`) is uploaded then cleared with freed pages zeroed. Expect it empty outside a fast live acquisition, and note that deleted analytics events are **not** carvable.
 - **Computer History** summary recovery from the memories git repository requires `git` on the examination host (Xcode Command Line Tools on macOS).
