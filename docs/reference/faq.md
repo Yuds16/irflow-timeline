@@ -26,7 +26,7 @@ IRFlow Timeline is inspired by Eric Zimmerman's Timeline Explorer but adds capab
 - Dual-engine Sigma detection (Hayabusa + in-app JS Sigma)
 - Process Inspector with MITRE ATT&CK detection rules
 - Lateral Movement Tracker with interactive network graphs
-- Persistence Analyzer with 36 EVTX and 33 registry detection rules
+- Persistence Analyzer with 39 EVTX and 33 registry detection rules
 - IOC Matching with 17+ indicator types
 - Gap & Burst Analysis for anomaly detection
 - Log Source Coverage heatmap
