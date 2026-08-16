@@ -17,7 +17,7 @@ attached to it. All of them survive deleting the chat — see
 :::
 
 ::: tip New in v1.0.10
-**ChatGPT Computer History (Skysight) is a new artifact family.** It is OS-level interaction telemetry rather than conversation history, so it opens in its own tab with a dedicated 54-column schema — plus deletion detection, recovery of cleared summaries, and host attribution. See [ChatGPT Computer History](#chatgpt-computer-history) below.
+**ChatGPT Computer History (Skysight) is a new artifact family.** It is OS-level interaction telemetry rather than conversation history, so it opens in its own tab with a dedicated 54-column schema — plus deletion detection, recovery of cleared summaries, and host attribution. See [ChatGPT Computer History](#chatgpt-computer-history) below and the deep guide on [ChatGPT / Codex](/dfir-tips/ai-apps/chatgpt-codex#chatgpt-computer-history-skysight).
 :::
 
 ::: tip Expanded in v1.0.8
@@ -68,7 +68,7 @@ IRFlow scans local artifacts from these AI apps:
 | **Windsurf** | VS Code-family workspace/global chat stores and Cascade inventory. |
 | **Continue** | Local session JSON files under `.continue`. |
 
-For exact paths, collection notes, and parser caveats, see [AI Query History and AI App Artifacts](/dfir-tips/ai-query-history).
+For exact paths, collection notes, and parser caveats, see [AI Query History](/dfir-tips/ai-query-history) and the per-app guides for [Claude](/dfir-tips/ai-apps/claude-desktop), [ChatGPT / Codex](/dfir-tips/ai-apps/chatgpt-codex), [Grok](/dfir-tips/ai-apps/grok-ai), [Cursor](/dfir-tips/ai-apps/cursor), and [Gemini](/dfir-tips/ai-apps/gemini).
 
 ## Collect Modes
 
@@ -226,7 +226,8 @@ What the parser adds beyond the raw events:
 
 ## See Also
 
-- [AI Query History and AI App Artifacts](/dfir-tips/ai-query-history)
+- [AI Query History](/dfir-tips/ai-query-history)
+- [Claude Desktop](/dfir-tips/ai-apps/claude-desktop) · [ChatGPT / Codex](/dfir-tips/ai-apps/chatgpt-codex) · [Grok AI](/dfir-tips/ai-apps/grok-ai) · [Cursor](/dfir-tips/ai-apps/cursor) · [Gemini](/dfir-tips/ai-apps/gemini)
 - [Supported Formats](/getting-started/supported-formats)
 - [KAPE Triage Workflow](/dfir-tips/kape-triage-workflow)
 - [Export and Reports](/workflows/export-reports)

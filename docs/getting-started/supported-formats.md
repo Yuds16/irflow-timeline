@@ -241,7 +241,7 @@ Imported through **Tools → Analysis → AI Artifacts → AI Apps → OpenAI Co
 
 macOS only, opt-in, off by default, and unavailable in the EEA, Switzerland, and the UK — so absence of the artifact says nothing about user activity. Collect the raw segments early; on a stale image the derived summaries may be all that survives, and they are model-generated interpretation rather than primary evidence.
 
-Full artifact inventory, caveats, and investigation workflow: [ChatGPT Computer History](/dfir-tips/ai-query-history#chatgpt-computer-history-skysight).
+Full artifact inventory, caveats, and investigation workflow: [ChatGPT Computer History](/dfir-tips/ai-apps/chatgpt-codex#chatgpt-computer-history-skysight).
 
 ## Format Detection
 

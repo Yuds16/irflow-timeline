@@ -146,7 +146,18 @@ export default defineConfig({
         {
           text: 'DFIR Tips & Tricks',
           items: [
-            { text: 'AI Query History & AI App Artifacts', link: '/dfir-tips/ai-query-history' },
+            {
+              text: 'AI Query History',
+              collapsed: false,
+              items: [
+                { text: 'Overview', link: '/dfir-tips/ai-query-history' },
+                { text: 'Claude Desktop', link: '/dfir-tips/ai-apps/claude-desktop' },
+                { text: 'ChatGPT / Codex', link: '/dfir-tips/ai-apps/chatgpt-codex' },
+                { text: 'Grok AI', link: '/dfir-tips/ai-apps/grok-ai' },
+                { text: 'Cursor', link: '/dfir-tips/ai-apps/cursor' },
+                { text: 'Gemini', link: '/dfir-tips/ai-apps/gemini' }
+              ]
+            },
             { text: 'Ransomware Investigation', link: '/dfir-tips/ransomware-investigation' },
             { text: 'Lateral Movement Tracing', link: '/dfir-tips/lateral-movement-tracing' },
             { text: 'Malware Execution Analysis', link: '/dfir-tips/malware-execution-analysis' },
