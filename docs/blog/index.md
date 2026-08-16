@@ -8,13 +8,19 @@ Release announcements and focused notes about new forensic workflows.
 
 ## Latest
 
+### [IRFlow Timeline 1.0.11 — Computer History, Verified Against the Artifact](/blog/v1.0.11-computer-history-verified)
+
+**August 16, 2026**
+
+Four claims IRFlow made about Computer History were wrong, and only fell over against a live capture: credential rows do not recover passwords, capture fidelity follows the UI toolkit rather than the app category, and a continuity check was clearing gaps it never assessed. Plus nine stores nobody was reading — the consolidated memory that outlives a cleared history, Claude Desktop deletion tombstones and staged uploads, and the Grok session index that survives deleting the session.
+
+## Previous Releases
+
 ### [IRFlow Timeline 1.0.10 — ChatGPT Computer History](/blog/v1.0.10-computer-history)
 
 **August 14, 2026**
 
 ChatGPT Computer History becomes a new macOS artifact family: a timeline of what was typed, clicked, selected, and dragged, with credential-entry flagging, detection of cleared history, recovery of deleted activity summaries, and host attribution.
-
-## Previous Releases
 
 ### [IRFlow Timeline 1.0.9 — Large EVTX Imports Fixed](/blog/v1.0.9-large-evtx-imports)
 
