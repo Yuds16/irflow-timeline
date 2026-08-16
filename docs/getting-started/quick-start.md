@@ -26,7 +26,7 @@ Each card opens the relevant analyzer or file dialog. Cards that need an importe
 
 ## Import Progress
 
-![Import progress bar showing rows imported, file name, and streaming status while a large timeline loads](/dfir-tips/QuickStart-Import-Progress.png)
+![Import of the WKS2390 EvtxECmd timeline — 145,560 rows / 70% streamed, UI stays on the import canvas](/dfir-tips/QuickStart-Import-Progress.png)
 
 During import you will see:
 

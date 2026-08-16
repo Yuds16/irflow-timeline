@@ -6,7 +6,7 @@ description: Persistence Analyzer — 36 EVTX and 33 registry detection rules wi
 
 The Persistence Analyzer automatically scans your timeline data for Windows persistence mechanisms, scoring each finding by risk level and organizing results by category. It supports both EVTX event logs and registry exports (RECmd CSV and similar), with **69 built-in rule definitions** — **36 EVTX event-log rules** and **33 registry key-family rules** — across services, scheduled tasks, WMI subscriptions, autorun keys, and related locations.
 
-![Persistence Analyzer showing 8648 findings in Timeline view with severity scores, service installations, and category filtering](/dfir-tips/Persistence-Analyzer.png)
+![Persistence Analyzer on WKS2390 — 763 incidents, 5 critical, grouped alerts with MITRE T1547.001 / T1053.005](/dfir-tips/Persistence-Analyzer.png)
 
 ## Opening the Persistence Analyzer
 
