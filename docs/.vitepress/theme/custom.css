@@ -1,6 +1,9 @@
 /* IRFlow Timeline — Unit 42 Orange Theme */
 
 :root {
+  /* Use more of the viewport so tables and prose are not stuck at 688px. */
+  --vp-layout-max-width: 1760px;
+
   /* Brand colors: Unit 42 Orange #E85D2A */
   --vp-c-brand-1: #E85D2A;
   --vp-c-brand-2: #F47B50;
@@ -234,4 +237,34 @@
 /* Code tabs — light */
 :root:not(.dark) .vp-code-group .tabs label.active {
   color: #E85D2A !important;
+}
+
+/* Wider article column — default VitePress caps .has-aside content at 688px */
+@media (min-width: 1280px) {
+  .VPDoc.has-aside .content {
+    min-width: 0;
+    flex: 1 1 auto;
+  }
+
+  .VPDoc.has-aside .content-container {
+    max-width: 1040px;
+  }
+
+  .VPDoc .aside {
+    max-width: 240px;
+    padding-left: 24px;
+    flex-grow: 0;
+    flex-shrink: 0;
+  }
+}
+
+@media (min-width: 1600px) {
+  .VPDoc.has-aside .content-container {
+    max-width: 1120px;
+  }
+}
+
+.vp-doc table {
+  display: table;
+  width: 100%;
 }
