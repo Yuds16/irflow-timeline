@@ -27,16 +27,16 @@ attached to it. All of them survive deleting the chat — see
 ## Opening AI Artifacts
 
 - **Menu:** **Tools → Analysis → AI Artifacts → Collect AI Artifacts**
-- **Per-app import:** **Tools → Analysis → AI Artifacts → AI Apps → …** (Claude Code, Codex, Grok Build, ChatGPT Desktop, ChatGPT Computer History, Gemini CLI, Cursor, Copilot, Windsurf, Continue)
+- **Per-app import:** **Tools → Analysis → AI Artifacts → AI Apps → …** (Claude Code, OpenAI Codex → **Codex AI History** / **ChatGPT Computer History**, Grok Build, ChatGPT Desktop, Gemini CLI, Cursor, Copilot, Windsurf, Continue)
 - **Home launcher:** **Collect AI Artifacts** tile on the capability launcher
 - **Single artifact:** **File → Open…** on a supported AI app folder or file
 - **Output:** one **AI Query History** timeline tab
 
-![Tools → Analysis → AI Artifacts with Collect AI Artifacts and the AI Apps submenu](/dfir-tips/Tools-Menu-AI-Artifacts.png)
+![Tools → Analysis → AI Artifacts with Collect AI Artifacts, nested OpenAI Codex / ChatGPT Computer History, and Grok Build](/dfir-tips/Tools-Menu-AI-Artifacts.png)
 
 Use **Collect AI Artifacts** for live Mac triage, KAPE collections, mounted disks, copied profile folders, or external triage packages. Use **AI Apps** or **File → Open…** when you already know the specific AI artifact root, such as `.claude`, `.codex`, `.grok`, `.cursor`, `.gemini`, or a supported app data directory.
 
-![Home capability launcher with Collect AI Artifacts shortcut](/dfir-tips/Home-Capability-Launcher-v107.png)
+![Home capability launcher with Collect AI Artifacts, Sigma · Hayabusa, Process Inspector, and NTFS cards](/dfir-tips/Home-Capability-Launcher-v107.png)
 
 ## What It Captures
 

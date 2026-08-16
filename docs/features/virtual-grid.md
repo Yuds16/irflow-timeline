@@ -6,7 +6,7 @@ description: Virtual scrolling data grid with SQLite pagination — view and int
 
 The data grid is the primary interface for viewing and interacting with timeline data. It uses virtual scrolling backed by SQLite pagination to handle millions of rows without performance degradation.
 
-![Virtual Grid displaying EvtxECmd timeline data with sortable columns, row detail panel, and histogram](/dfir-tips/Virtual-Grid.png)
+![Virtual Grid displaying EvtxECmd timeline data with the File / View / Actions / Tools / Help menu capsule and sortable columns](/dfir-tips/Virtual-Grid.png)
 
 ## Menu Bar
 
@@ -25,6 +25,8 @@ The menu bar provides access to all application features through five dropdown m
 | **Close Tab** | `⌘W` | Close the active tab |
 | **Close All Tabs** | | Close every open tab |
 | **Exit** | | Quit the application |
+
+![File menu with Open, Open Triage Collection, Export, session save/load, and Open Recent](/dfir-tips/File-Menu.png)
 
 ### View
 
@@ -60,7 +62,7 @@ Select a row, then choose **Actions → Pivot ±N Minutes** to open the proximit
 
 The **Tools** menu is organized into four sections so timeline-wide analytics stay separate from platform-specific forensics as IRFlow scales beyond Windows.
 
-![Tools → Analysis → AI Artifacts with Collect AI Artifacts and the AI Apps submenu](/dfir-tips/Tools-Menu-AI-Artifacts.png)
+![Tools → Analysis → AI Artifacts with Collect AI Artifacts, the AI Apps submenu, nested OpenAI Codex / ChatGPT Computer History, and Grok Build](/dfir-tips/Tools-Menu-AI-Artifacts.png)
 
 #### Analysis
 
@@ -73,7 +75,7 @@ Timeline-wide analytics that work on any imported tab (CSV, EVTX, XLSX, Plaso, e
 | **Tools → Analysis → Log Sources** | Gantt-style heatmap of log source coverage across time |
 | **Tools → Analysis → Burst Detection** | Identify abnormal spikes in event volume |
 | **Tools → Analysis → AI Artifacts → Collect AI Artifacts** | Discover and merge local AI assistant stores (this Mac or a KAPE/triage folder) into one **AI Query History** tab |
-| **Tools → Analysis → AI Artifacts → AI Apps → …** | Per-app import for Claude Code, Codex, Grok Build, ChatGPT Desktop, Gemini CLI, Cursor, Copilot, Windsurf, and Continue |
+| **Tools → Analysis → AI Artifacts → AI Apps → …** | Per-app import for Claude Code, OpenAI Codex (**Codex AI History** and nested **ChatGPT Computer History**), Grok Build, ChatGPT Desktop, Gemini CLI, Cursor, Copilot, Windsurf, and Continue |
 
 #### Detection
 
@@ -105,6 +107,8 @@ See [NTFS Analysis](/features/ntfs-analysis) for the MFT and USN Journal tools.
 
 | Menu path | Description |
 |-----------|-------------|
+| **Tools → Export → Export AI History Package** | Filtered **AI Query History** CSV plus a hashed source-file manifest (enabled on AI history tabs) |
+| **Tools → Export → Export Source Manifest (sources only)** | Source-file hashes without the timeline CSV |
 | **Tools → Export → Generate Report** | Create an HTML investigation report from bookmarks and tags (also **File → Generate Report…** on the macOS menu bar, `Cmd+Shift+R`) |
 
 ### Help

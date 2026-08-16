@@ -15,7 +15,7 @@ IRFlow Timeline includes six specialized tools for analyzing raw NTFS artifacts 
 
 Both formats are imported as regular tabs and are available alongside CSV, EVTX, XLSX, and Plaso timelines. Once imported, open **Tools → Platforms → Windows** and use the **Master File Table** or **USN Journal** submenus for the tools below.
 
-![Tools menu Platforms section expanded to show Windows with Master File Table and USN Journal submenus](/dfir-tips/Analysis-Button-NewUI.png)
+![Tools menu with Windows expanded — Process Inspector, Lateral Movement, Persistence, RDP Bitmap Cache, Master File Table, and USN Journal](/dfir-tips/Analysis-Button-NewUI.png)
 
 ## Ransomware Analysis
 

@@ -403,7 +403,7 @@ The local analytics event table is uploaded and then cleared, and the freed page
 
 ## How to use it in IRFlow
 
-![Tools → Analysis → AI Artifacts with Collect AI Artifacts and the AI Apps submenu](/dfir-tips/Tools-Menu-AI-Artifacts.png)
+![Tools → Analysis → AI Artifacts with Collect AI Artifacts, nested OpenAI Codex / ChatGPT Computer History, and Grok Build](/dfir-tips/Tools-Menu-AI-Artifacts.png)
 
 ### Collect AI Artifacts (all tools)
 
@@ -440,8 +440,13 @@ Use this for a live Mac triage without a KAPE folder, or to sanity-check what is
 
 **OpenAI Codex**
 
-1. **File → Open…** and select your `~/.codex` folder (recommended), or **Tools → Analysis → AI Artifacts → AI Apps → OpenAI Codex…**
+1. **File → Open…** and select your `~/.codex` folder (recommended), or **Tools → Analysis → AI Artifacts → AI Apps → OpenAI Codex → Codex AI History…**
 2. Imports `history.jsonl` plus all `rollout-*.jsonl` under `sessions/` and `archived_sessions/` (deduped against session prompts).
+
+**ChatGPT Computer History**
+
+1. **Tools → Analysis → AI Artifacts → AI Apps → OpenAI Codex → ChatGPT Computer History…** and pick a `segments/` directory, `skysight/resources/`, a `.codex` folder, or a triage root that contains either.
+2. This is **not** conversation history. It opens in its own tab with the 54-column Computer History schema. See [ChatGPT Computer History](#chatgpt-computer-history-skysight).
 
 **Grok Build**
 

@@ -8,7 +8,7 @@ Inspired by Eric Zimmerman's Timeline Explorer for Windows.
 
 ### Key Features
 
-- **AI Artifacts** — Collect local AI history from Claude Code, Codex, ChatGPT Desktop, Gemini CLI, Cursor, Copilot, Windsurf, and Continue into one timeline tab; **AI Secret Hunt** for exposed keys, tokens, and credentials
+- **AI Artifacts** — Collect local AI history from Claude Code, Codex, Grok Build, ChatGPT Desktop, Gemini CLI, Cursor, Copilot, Windsurf, and Continue into one timeline tab; **ChatGPT Computer History** for macOS interaction telemetry; **AI Secret Hunt** for exposed keys, tokens, and credentials
 - **Raw NTFS Artifact Import** — Direct ingestion of `$MFT` and `$UsnJrnl` (`$J`) with full path reconstruction, SI/FN timestamps, and change reason mapping
 - **Ransomware Analytics** — Automated impact analysis from `$MFT` data: bulk rename detection, entropy-based extension analysis, ransom note identification, and temporal clustering
 - **VirusTotal Enrichment** — IOC matching with bulk VT lookups, malware family extraction, verdict badges, relationship pivoting, and local caching
@@ -23,7 +23,7 @@ For the full feature list and documentation, visit the **[IRFlow Timeline Docs](
 ## Building from Source
 
 **Prerequisites (for developers only):**
-- Node.js 18+: `brew install node`
+- Node.js 22.14+: `brew install node`
 - Xcode CLI tools: `xcode-select --install` (for native module compilation)
 - macOS 12+ (Monterey or later)
 

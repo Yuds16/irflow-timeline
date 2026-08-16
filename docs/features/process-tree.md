@@ -6,7 +6,7 @@ description: Process Inspector — parent-child process trees, multi-pass detect
 
 The Process Inspector builds parent-child process trees from **Sysmon Event ID 1** and **Windows Security Event ID 4688**, then scores execution chains with chain rules, standalone detections, prevalence, binary trust, lifetime, injection, and privilege-use correlation. Results open as **Story / Triage / Hunt / Graph / Raw** views plus a **Rules** health report, with analyst suppressions, custom rules, and one-click pivots into the main grid and other IRFlow features.
 
-![Process Inspector graph view with parent-child execution chains](/dfir-tips/Process-Tree-Analyzer-Sysmon.png)
+![Process Inspector configuration — tree-ready mapping, detection technique groups, Sysmon and Security coverage, and Build Tree](/dfir-tips/Process-Tree-Analyzer-Sysmon.png)
 
 ## Opening the Process Inspector
 
