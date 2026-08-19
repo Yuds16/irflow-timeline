@@ -1228,8 +1228,16 @@ export default function LateralMovementModal() {
                   </div>
                   {modal.lmMultiSource && (
                     <div style={{ borderTop: `1px solid ${th.border}22`, paddingTop: 8 }}>
-                      <div style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", marginBottom: 6, fontFamily: "-apple-system, sans-serif" }}>
-                        Select tabs to include ({(modal.lmSelectedTabIds || []).length + 1} of {otherTabs.length + 1} tabs)
+                      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 6 }}>
+                        <div style={{ fontSize: LM_TYPOGRAPHY.meta, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "-apple-system, sans-serif" }}>
+                          Select tabs to include ({(modal.lmSelectedTabIds || []).length + 1} of {otherTabs.length + 1} tabs)
+                        </div>
+                        {otherTabs.length > 0 && (
+                          <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                            <button onClick={() => setModal((p) => ({ ...p, lmSelectedTabIds: otherTabs.map(t => t.id) }))} style={{ padding: "2px 8px", fontSize: LM_TYPOGRAPHY.control, background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 4, color: th.text, cursor: "pointer" }}>Select All</button>
+                            <button onClick={() => setModal((p) => ({ ...p, lmSelectedTabIds: [] }))} style={{ padding: "2px 8px", fontSize: LM_TYPOGRAPHY.control, background: th.panelBg, border: `1px solid ${th.border}44`, borderRadius: 4, color: th.text, cursor: "pointer" }}>Clear</button>
+                          </div>
+                        )}
                       </div>
                       <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 120, overflow: "auto" }}>
                         {/* Current tab — always included, shown but not toggleable */}
