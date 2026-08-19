@@ -28,20 +28,22 @@ function buildScanCommand({ dirPath, options = {}, outputPaths, warnings = [] })
   let statusFilter = selectedStatuses.length < STATUS_LIST.length ? selectedStatuses : null;
 
   const outputMode = options.outputMode || "csv";
-  const subcommand = outputMode === "json" || outputMode === "jsonl" ? "json-timeline" : "csv-timeline";
+  // Hayabusa v4 unified csv-timeline/json-timeline into a single dfir-timeline
+  // subcommand; output format is now selected via -t/--output-type.
+  const subcommand = "dfir-timeline";
+  const outputType = outputMode === "json" ? "json" : outputMode === "jsonl" ? "jsonl" : "csv";
   const profile = options.profile || "verbose";
 
   const args = [
     subcommand,
     "-d", dirPath,
     "-o", outputPaths.actualOutput,
+    "-t", outputType,
     "-p", profile,
     "--no-wizard",
     "-q",
     "-H", outputPaths.tmpHtmlReport,
   ];
-
-  if (outputMode === "jsonl") args.push("--jsonl-output");
 
   const ruleSet = options.ruleSet || "all";
   if (ruleSet === "core") {
