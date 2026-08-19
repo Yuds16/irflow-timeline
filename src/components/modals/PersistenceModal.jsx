@@ -896,8 +896,12 @@ export default function PersistenceModal() {
                         <span style={{ fontSize: 9, color: th.textMuted, textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "-apple-system, sans-serif" }}>
                           Select tabs to merge ({(modal.paSelectedTabIds || []).length + 1} of {otherTabs.length + 1})
                         </span>
-                        <button onClick={() => setModal((p) => ({ ...p, paSelectedTabIds: otherTabs.map((t) => t.id), _paNeedsMultiPreview: true }))}
-                          style={{ fontSize: 9, padding: "2px 7px", borderRadius: 4, background: `${th.accent}12`, color: th.accent, border: `1px solid ${th.accent}25`, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 }}>Select all</button>
+                        <div style={{ display: "flex", gap: 6, flexShrink: 0 }}>
+                          <button onClick={() => setModal((p) => ({ ...p, paSelectedTabIds: otherTabs.map((t) => t.id), _paNeedsMultiPreview: true }))}
+                            style={{ fontSize: 9, padding: "2px 7px", borderRadius: 4, background: `${th.accent}12`, color: th.accent, border: `1px solid ${th.accent}25`, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 }}>Select all</button>
+                          <button onClick={() => setModal((p) => ({ ...p, paSelectedTabIds: [], _paNeedsMultiPreview: true }))}
+                            style={{ fontSize: 9, padding: "2px 7px", borderRadius: 4, background: "transparent", color: th.textMuted, border: `1px solid ${th.border}44`, cursor: "pointer", fontFamily: "-apple-system, sans-serif", fontWeight: 500 }}>Clear</button>
+                        </div>
                       </div>
                       <div style={{ display: "flex", flexDirection: "column", gap: 3, maxHeight: 140, overflow: "auto" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "4px 8px", background: `${th.accent}12`, borderRadius: 6, border: `1px solid ${th.accent}22` }}>
