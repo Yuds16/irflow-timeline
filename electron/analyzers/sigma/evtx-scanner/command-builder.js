@@ -6,6 +6,12 @@ const DEFAULT_LEVELS = ["critical", "high", "medium", "low", "informational"];
 const LEVEL_RANK = ["informational", "low", "medium", "high", "critical"];
 const STATUS_LIST = ["stable", "test", "experimental"];
 
+function hayabusaMajorVersion(version) {
+  if (typeof version !== "string") return null;
+  const match = version.match(/(\d+)/);
+  return match ? parseInt(match[1], 10) : null;
+}
+
 function createScanOutputPaths(outputMode = "csv") {
   const ts = Date.now();
   const tmpOutput = path.join(os.tmpdir(), `tle-hayabusa-${ts}.csv`);
@@ -28,22 +34,28 @@ function buildScanCommand({ dirPath, options = {}, outputPaths, warnings = [] })
   let statusFilter = selectedStatuses.length < STATUS_LIST.length ? selectedStatuses : null;
 
   const outputMode = options.outputMode || "csv";
-  // Hayabusa v4 unified csv-timeline/json-timeline into a single dfir-timeline
-  // subcommand; output format is now selected via -t/--output-type.
-  const subcommand = "dfir-timeline";
+  // Hayabusa v4 unified csv-timeline/json-timeline into a single dfir-timeline. need to consider v2/v3
+  const major = hayabusaMajorVersion(options.version);
+  const useUnified = major === null || major >= 4;
   const outputType = outputMode === "json" ? "json" : outputMode === "jsonl" ? "jsonl" : "csv";
+  const subcommand = useUnified
+    ? "dfir-timeline"
+    : (outputMode === "json" || outputMode === "jsonl" ? "json-timeline" : "csv-timeline");
   const profile = options.profile || "verbose";
 
   const args = [
     subcommand,
     "-d", dirPath,
     "-o", outputPaths.actualOutput,
-    "-t", outputType,
+  ];
+  if (useUnified) args.push("-t", outputType);
+  args.push(
     "-p", profile,
     "--no-wizard",
     "-q",
     "-H", outputPaths.tmpHtmlReport,
-  ];
+  );
+  if (!useUnified && outputMode === "jsonl") args.push("--jsonl-output");
 
   const ruleSet = options.ruleSet || "all";
   if (ruleSet === "core") {
@@ -132,4 +144,5 @@ module.exports = {
   buildScanCommand,
   buildGenericCommand,
   getAvailableProfiles,
+  hayabusaMajorVersion,
 };

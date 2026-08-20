@@ -8,6 +8,7 @@ const { severityHistogram, sortMatchesBySeverity } = require("../match-utils");
 const { validateEvtxScanRequest } = require("../scan-preflight");
 const {
   findHayabusa,
+  detectHayabusaVersion,
   downloadHayabusa,
   getHayabusaStatus,
 } = require("./binary-manager");
@@ -179,11 +180,13 @@ async function runRegisteredScan({ dirPath, options, onProgress, scanStartedAt, 
   dbg("SIGMA-EVTX", `Using Hayabusa: ${hayabusaPath}`);
   const outputMode = options.outputMode || "csv";
   const outputPaths = createScanOutputPaths(outputMode);
-  const command = buildScanCommand({ dirPath, options, outputPaths, warnings });
+  const hayabusaStatus = options.hayabusaStatus || getHayabusaStatus();
+  const hayabusaVersion = (hayabusaStatus?.path === hayabusaPath ? hayabusaStatus?.version : null)
+    || detectHayabusaVersion(hayabusaPath);
+  const command = buildScanCommand({ dirPath, options: { ...options, version: hayabusaVersion }, outputPaths, warnings });
   const { args, levels } = command;
   const { tmpOutput, tmpHtmlReport, actualOutput } = outputPaths;
   const commandLine = [hayabusaPath, ...args].map(quoteArg).join(" ");
-  const hayabusaStatus = options.hayabusaStatus || getHayabusaStatus();
 
   onProgress?.({
     phase: "hayabusa-running",
